@@ -18,6 +18,7 @@ web_dist/
 
 # ----- 前端依赖 -----
 web_src/node_modules/
+avm_web/node_modules/
 web_src/dist/
 *.tsbuildinfo
 
