@@ -1,11 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-把 AV 博物馆打包成 Windows 单文件夹可执行程序。
+把「片匣」打包成 Windows 单文件夹可执行程序。
 
 用法：
     python build.py
 
-产物： dist/AV博物馆/AV博物馆.exe
+产物： dist/片匣/片匣.exe
 - 双击即启动本地服务并打开浏览器（默认 http://127.0.0.1:8000）。
 - 数据（library.db / covers / avatars / config.json）保存在 exe 同级的 data/ 目录，
   方便整体拷贝备份。
@@ -17,7 +17,7 @@ import PyInstaller.__main__
 
 PyInstaller.__main__.run([
     "run.py",
-    "--name", "AV博物馆",
+    "--name", "片匣",
     "--onedir",
     "--paths", ".",
     "--add-data", "web_dist;web_dist",

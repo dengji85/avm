@@ -18,7 +18,7 @@
   * 设置：`SettingsView.vue`（媒体目录、数据源、ffmpeg 路径、文件名解析预览、目录浏览）。
 * 公共模块：`api.js`（统一请求封装）、`state.js`（全局响应式状态）、`utils.js`（格式化/DOM 辅助/toast）、`composables/useLibrary.js`（影片加载/筛选）。
 * 开发：`npm run dev`（Vite 代理 `/api`、`/covers` 到后端）；生产：`npm run build` → `web_dist/`。
-* 后端 `main.py` 静态托管改为 `web_dist`，`/assets` 挂载构建产物；`build.py` 与 `AV博物馆.spec` 打包 `web_dist`。
+* 后端 `main.py` 静态托管改为 `web_dist`，`/assets` 挂载构建产物；`build.py` 与 `片匣.spec` 打包 `web_dist`。
 
 ### 新增（8 项体验增强）
 
@@ -124,7 +124,7 @@
 
 * `app/store.py`：新增评分、多人、合作网相关聚合查询与排序。
 * `app/config.py`：支持 PyInstaller 冻结环境路径（`_MEIPASS` / `exe` 同级 `data/`）。
-* 新增 `build.py` 一键打包为 `dist/AV博物馆/AV博物馆.exe`（单文件夹，双击即运行）。
+* 新增 `build.py` 一键打包为 `dist/片匣/片匣.exe`（单文件夹，双击即运行）。
 
 ## [1.3.0] - 早前
 

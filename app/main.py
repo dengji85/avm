@@ -12,7 +12,7 @@ from .api import router
 from .config import WEB_DIR, ensure_dirs
 from .db import init_db
 
-app = FastAPI(title="AV 博物馆 · 本地影片资料库", version=__version__, docs_url="/api/docs")
+app = FastAPI(title="片匣 · 本地 AV 收藏管理", version=__version__, docs_url="/api/docs")
 
 app.add_middleware(
     CORSMiddleware,

@@ -171,7 +171,7 @@ def cmd_serve(args) -> int:
     from .main import app
     import uvicorn
     url = f"http://{args.host}:{args.port}/"
-    print(f"AV 博物馆已启动： {url}")
+    print(f"片匣已启动： {url}")
     if not args.no_browser:
         threading.Timer(1.5, lambda: webbrowser.open(url)).start()
     uvicorn.run(app, host=args.host, port=args.port, reload=args.reload, log_level="info")
@@ -179,7 +179,7 @@ def cmd_serve(args) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="avm", description="AV 博物馆 - 命令行工具")
+    p = argparse.ArgumentParser(prog="avm", description="片匣 - 命令行工具")
     sub = p.add_subparsers(dest="cmd")
     ps = sub.add_parser("scan", help="扫描媒体库")
     ps.add_argument("--full", action="store_true", help="全量重扫（忽略增量缓存）")
