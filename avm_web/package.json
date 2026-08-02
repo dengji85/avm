@@ -1,0 +1,17 @@
+{
+  "name": "avm_web",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^4.6.2",
+    "vite": "^4.5.14",
+    "vue": "^3.5.40"
+  }
+}

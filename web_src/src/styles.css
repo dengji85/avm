@@ -1,0 +1,17 @@
+/* ============================================================
+   兼容层
+   ------------------------------------------------------------
+   全局样式已拆分为分层结构，按以下顺序在 main.js 中引入：
+     styles/tokens.css  设计令牌（颜色 / 间距 / 圆角 / 动效）
+     styles/base.css    重置与排版基础
+     styles/ui.css      通用组件（按钮 / 表单 / 面板 / 骨架屏…）
+     styles/layout.css  布局骨架（顶栏 / 侧栏 / 网格 / 抽屉）
+   视图专有样式一律写在各自 .vue 的 <style scoped> 中。
+   此文件仅保留少量跨视图补充规则。
+   ============================================================ */
+
+/* 打印时隐藏交互控件 */
+@media print {
+  .topnav, .sidebar, .bulk-bar, .toast-layer, .pager { display: none !important; }
+  .view-body { overflow: visible; padding: 0; }
+}

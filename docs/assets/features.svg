@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="920" height="360" font-family="Segoe UI, Arial, sans-serif">
+  <defs>
+    <linearGradient id="bg2" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#12151d"/>
+      <stop offset="1" stop-color="#0b0d12"/>
+    </linearGradient>
+    <linearGradient id="card" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1b2030"/>
+      <stop offset="1" stop-color="#161a25"/>
+    </linearGradient>
+  </defs>
+  <rect width="920" height="360" rx="14" fill="url(#bg2)"/>
+  <text x="32" y="40" fill="#f1f3f8" font-size="20" font-weight="700">核心功能</text>
+  <text x="32" y="62" fill="#6b7690" font-size="13">从扫描入库到 AI 增强的一体化本地媒体库工作流</text>
+
+  <!-- 12 feature cards : 4 cols x 3 rows -->
+  <g font-size="12.5">
+    <!-- row1 -->
+    <g transform="translate(32,84)"><rect width="208" height="72" rx="10" fill="url(#card)" stroke="#232936"/><text x="16" y="26" fill="#e0355a" font-weight="700">▣ 自动扫描建库</text><text x="16" y="48" fill="#b6bed0">递归目录 · 多版本归并 · 番号识别</text></g>
+    <g transform="translate(256,84)"><rect width="208" height="72" rx="10" fill="url(#card)" stroke="#232936"/><text x="16" y="26" fill="#4d8dff" font-weight="700">▤ 元数据刮削</text><text x="16" y="48" fill="#b6bed0">可插拔数据源 · 封面/女优/类型</text></g>
+    <g transform="translate(480,84)"><rect width="208" height="72" rx="10" fill="url(#card)" stroke="#232936"/><text x="16" y="26" fill="#2fb87a" font-weight="700">◫ 画廊与瀑布流</text><text x="16" y="48" fill="#b6bed0">卡片视图 · 侧栏分面筛选</text></g>
+    <g transform="translate(704,84)"><rect width="184" height="72" rx="10" fill="url(#card)" stroke="#232936"/><text x="16" y="26" fill="#f0a93b" font-weight="700">◧ 详情抽屉</text><text x="16" y="48" fill="#b6bed0">播放 · 续播进度 · 相似推荐</text></g>
+
+    <!-- row2 -->
+    <g transform="translate(32,168)"><rect width="208" height="72" rx="10" fill="url(#card)" stroke="#232936"/><text x="16" y="26" fill="#e0355a" font-weight="700">⌕ 语义搜索</text><text x="16" y="48" fill="#b6bed0">自然语言 → 结构化筛选条件</text></g>
+    <g transform="translate(256,168)"><rect width="208" height="72" rx="10" fill="url(#card)" stroke="#232936"/><text x="16" y="26" fill="#4d8dff" font-weight="700">✦ AI 增强</text><text x="16" y="48" fill="#b6bed0">生成简介 · 补充标签 · 兼容 OpenAI</text></g>
+    <g transform="translate(480,168)"><rect width="208" height="72" rx="10" fill="url(#card)" stroke="#232936"/><text x="16" y="26" fill="#2fb87a" font-weight="700">✚ 数据健康</text><text x="16" y="48" fill="#b6bed0">六类体检 · 一键重解析/补刮</text></g>
+    <g transform="translate(704,168)"><rect width="184" height="72" rx="10" fill="url(#card)" stroke="#232936"/><text x="16" y="26" fill="#f0a93b" font-weight="700">◰ 统计可视化</text><text x="16" y="48" fill="#b6bed0">标签云 · 热力图 · 时长分布</text></g>
+
+    <!-- row3 -->
+    <g transform="translate(32,252)"><rect width="208" height="72" rx="10" fill="url(#card)" stroke="#232936"/><text x="16" y="26" fill="#e0355a" font-weight="700">✩ 片单管理</text><text x="16" y="48" fill="#b6bed0">手动/智能清单 · 自动聚合</text></g>
+    <g transform="translate(256,252)"><rect width="208" height="72" rx="10" fill="url(#card)" stroke="#232936"/><text x="16" y="26" fill="#4d8dff" font-weight="700">▤ 女优墙</text><text x="16" y="48" fill="#b6bed0">按出演数排序 · 头像墙</text></g>
+    <g transform="translate(480,252)"><rect width="208" height="72" rx="10" fill="url(#card)" stroke="#232936"/><text x="16" y="26" fill="#2fb87a" font-weight="700">◰ 主题切换</text><text x="16" y="48" fill="#b6bed0">暗色/亮色 · 紧凑/舒适密度</text></g>
+    <g transform="translate(704,252)"><rect width="184" height="72" rx="10" fill="url(#card)" stroke="#232936"/><text x="16" y="26" fill="#f0a93b" font-weight="700">⚙ 数据自托管</text><text x="16" y="48" fill="#b6bed0">本地 SQLite · 一键备份迁移</text></g>
+  </g>
+</svg>

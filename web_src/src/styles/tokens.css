@@ -1,0 +1,130 @@
+/* ============================================================
+   AV 博物馆 · 设计令牌 (Design Tokens)
+   暗色优先，媒体库场景：内容为主、界面退让
+   ============================================================ */
+
+:root {
+  /* 默认暗色：让浏览器原生控件（输入框/下拉/滚动条）按暗色渲染，
+     否则暗色下控件会用浅色配色，覆盖自定义背景与文字色，导致表单看不清 */
+  color-scheme: dark;
+
+  /* ---------- 色板：中性 ---------- */
+  --c-bg:            #0b0d12;   /* 应用底色 */
+  --c-bg-sunken:     #07080c;   /* 更深的凹陷区（播放器背景） */
+  --c-surface:       #12151d;   /* 卡片/面板 */
+  --c-surface-2:     #181c26;   /* 悬浮层/输入框 */
+  --c-surface-3:     #202634;   /* hover 态 */
+  --c-overlay:       rgba(6, 8, 12, .72);
+
+  --c-line:          #232936;   /* 常规分割线 */
+  --c-line-strong:   #333b4d;   /* 强调边框 */
+
+  --c-text:          #f1f3f8;   /* 主文本 */
+  --c-text-2:        #b6bed0;   /* 次文本 */
+  --c-text-3:        #6b7690;   /* 弱化/占位 */
+
+  /* ---------- 色板：品牌与语义 ---------- */
+  --c-primary:       #e0355a;   /* 品牌主色（玫红） */
+  --c-primary-h:     #f04a6d;
+  --c-primary-d:     #b82545;
+  --c-primary-soft:  rgba(224, 53, 90, .14);
+  --c-primary-line:  rgba(224, 53, 90, .40);
+
+  --c-accent:        #4d8dff;   /* 信息/链接 */
+  --c-accent-soft:   rgba(77, 141, 255, .14);
+
+  --c-ok:            #2fb87a;
+  --c-ok-soft:       rgba(47, 184, 122, .14);
+  --c-warn:          #e5a13a;
+  --c-warn-soft:     rgba(229, 161, 58, .14);
+  --c-err:           #e5484d;
+  --c-err-soft:      rgba(229, 72, 77, .14);
+
+  --c-gold:          #f5c451;   /* 评分星 */
+
+  /* ---------- 圆角 ---------- */
+  --r-xs: 4px;
+  --r-sm: 6px;
+  --r-md: 10px;
+  --r-lg: 14px;
+  --r-xl: 20px;
+  --r-full: 999px;
+
+  /* ---------- 间距（4pt 栅格） ---------- */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 20px;
+  --sp-6: 24px;
+  --sp-8: 32px;
+  --sp-10: 40px;
+
+  /* ---------- 字号 ---------- */
+  --fs-xs: 11px;
+  --fs-sm: 12px;
+  --fs-md: 13px;
+  --fs-lg: 15px;
+  --fs-xl: 18px;
+  --fs-2xl: 24px;
+  --fs-3xl: 32px;
+
+  /* ---------- 阴影 ---------- */
+  --sh-1: 0 1px 2px rgba(0, 0, 0, .30);
+  --sh-2: 0 4px 12px rgba(0, 0, 0, .40);
+  --sh-3: 0 12px 32px rgba(0, 0, 0, .52);
+  --sh-4: 0 24px 64px rgba(0, 0, 0, .62);
+  --sh-glow: 0 0 0 3px var(--c-primary-soft);
+
+  /* ---------- 动效 ---------- */
+  --ease: cubic-bezier(.4, 0, .2, 1);
+  --ease-out: cubic-bezier(.16, 1, .3, 1);
+  --t-fast: .12s var(--ease);
+  --t-base: .2s var(--ease);
+  --t-slow: .32s var(--ease-out);
+
+  /* ---------- 布局尺寸 ---------- */
+  --h-topnav: 52px;
+  --w-sidebar: 216px;
+  --w-sidebar-collapsed: 56px;
+  --w-drawer: min(1080px, 94vw);
+  --z-sticky: 20;
+  --z-drawer: 60;
+  --z-modal: 80;
+  --z-toast: 100;
+
+  /* ---------- 卡片网格 ---------- */
+  --card-min: 176px;
+}
+
+/* 浅色主题（通过 <html data-theme="light"> 切换） */
+[data-theme='light'] {
+  color-scheme: light;
+
+  --c-bg:            #eef0f5;
+  --c-bg-sunken:     #e3e6ec;
+  --c-surface:       #ffffff;
+  --c-surface-2:     #f4f5f9;
+  --c-surface-3:     #e9ecf2;
+  --c-overlay:       rgba(20, 24, 33, .48);
+
+  --c-line:          #d4d8e2;
+  --c-line-strong:   #bec4d1;
+
+  --c-text:          #171922;
+  --c-text-2:        #303647;
+  --c-text-3:        #5b6375;
+
+  --sh-1: 0 1px 2px rgba(20, 24, 33, .06);
+  --sh-2: 0 4px 12px rgba(20, 24, 33, .10);
+  --sh-3: 0 12px 32px rgba(20, 24, 33, .14);
+  --sh-4: 0 24px 64px rgba(20, 24, 33, .18);
+}
+
+/* 紧凑密度（通过 <html data-density="compact">） */
+[data-density='compact'] {
+  --h-topnav: 44px;
+  --card-min: 148px;
+  --sp-4: 12px;
+  --sp-6: 18px;
+}

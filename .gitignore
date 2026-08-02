@@ -1,0 +1,41 @@
+# ----- Python -----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.Python
+venv/
+.venv/
+env/
+
+# ----- 运行时数据（含收藏/封面/数据库，不入库） -----
+data/
+
+# ----- 构建 / 打包产物 -----
+dist/
+build/
+web_dist/
+*.spec
+
+# ----- 前端依赖 -----
+web_src/node_modules/
+web_src/dist/
+*.tsbuildinfo
+
+# ----- 日志与临时文件 -----
+*.log
+*.out
+*.err
+
+# ----- 根目录临时调试脚本（_ 前缀） -----
+_*.py
+_*.js
+_*.log
+_*.out
+_*.err
+
+# ----- 系统 / 编辑器 -----
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
