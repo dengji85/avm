@@ -113,11 +113,10 @@ python run.py serve                          # 服务直接托管 web_dist/
 ### 打包为可分发包
 
 ```bash
-python run.py build      # 生成单目录打包到 dist/
-python run.py pack 1.0.0 # 生成带版本号的发布包
+python build.py          # 生成单目录打包到 dist/片匣/片匣.exe
 ```
 
-> 打包已包含前端产物（`web_dist`）与 `app/ai.py` 等全部子模块，无需额外配置。产物位于 `dist/片匣/片匣.exe`。
+> 打包已包含前端产物（`web_dist`）与 `app/ai.py` 等全部子模块，无需额外配置。产物位于 `dist/片匣/片匣.exe`，将其压缩为 zip 即可分发（建议发布到 GitHub Releases 供用户下载）。
 
 ---
 

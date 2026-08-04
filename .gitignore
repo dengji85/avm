@@ -16,6 +16,9 @@ build/
 web_dist/
 *.spec
 
+# ----- 发布用压缩包（手动上传到 GitHub Releases，不入库） -----
+*.zip
+
 # ----- 前端依赖 -----
 web_src/node_modules/
 avm_web/node_modules/
