@@ -99,6 +99,7 @@ export const removeFromCollection = (cid, movieId) => del(`/collections/${cid}/m
 export const getStats = () => get('/stats')
 export const getStatsEnhanced = () => get('/stats-enhanced')
 export const getRankings = (kind = 'watched', limit = 30) => get('/rankings', { kind, limit })
+export const getWatchHistory = (page = 1, size = 50) => get('/watch-history', { page, size })
 export const getStorage = () => get('/storage')
 export const getIntegrity = () => get('/integrity')
 export const getHealthCheck = () => get('/health-check')

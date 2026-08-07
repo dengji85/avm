@@ -43,3 +43,9 @@ Thumbs.db
 .idea/
 .vscode/
 *.swp
+
+# ----- 个人笔记（不入库，仅本地保留） -----
+docs/todo.md
+TODO.md
+todo.md
+*.todo.md

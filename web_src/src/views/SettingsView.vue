@@ -27,7 +27,7 @@ const cfg = reactive({
   cover: { auto_local: false, download: false },
   media: { avatar_dir: 'avatars', fanart_dir: 'fanarts', avatar_download: false, fanart_download: true },
   scraper: {
-    order: [], timeout: 20, delay_ms: 0, proxy: '', overwrite: false,
+    order: [], timeout: 20, delay_ms: 0, workers: 4, proxy: '', overwrite: false,
     javbus: { base_url: '', cookie: '' },
     javdb: { base_url: '', cookie: '' },
     http_json: {}, http_html: {},
@@ -59,7 +59,7 @@ async function load() {
       c.media,
     )
     cfg.scraper = Object.assign(
-      { order: [], timeout: 20, delay_ms: 0, proxy: '', overwrite: false, javbus: {}, javdb: {}, http_json: {}, http_html: {} },
+      { order: [], timeout: 20, delay_ms: 0, workers: 4, proxy: '', overwrite: false, javbus: {}, javdb: {}, http_json: {}, http_html: {} },
       c.scraper,
     )
     cfg.scraper.javbus = Object.assign({ base_url: '', cookie: '' }, cfg.scraper.javbus)
@@ -206,6 +206,7 @@ async function saveScraper() {
         order,
         timeout: Number(cfg.scraper.timeout) || 20,
         delay_ms: Number(cfg.scraper.delay_ms) || 0,
+        workers: Math.max(1, Number(cfg.scraper.workers) || 1),
         proxy: cfg.scraper.proxy || '',
         overwrite: !!cfg.scraper.overwrite,
         http_json: hj,
@@ -459,6 +460,10 @@ onMounted(load)
               <div class="hstack"><input type="number" v-model="cfg.scraper.delay_ms" style="width:100px" /><span class="muted">毫秒，避免请求过快被封</span></div>
             </div>
             <div class="field-row">
+              <label>并发线程数</label>
+              <div class="hstack"><input type="number" min="1" max="16" v-model="cfg.scraper.workers" style="width:100px" /><span class="muted">同时刮削影片数，2-8 较稳妥，越高越快但易被限流</span></div>
+            </div>
+            <div class="field-row">
               <label>代理</label>
               <input v-model="cfg.scraper.proxy" placeholder="http://127.0.0.1:7890" />
             </div>
@@ -635,9 +640,21 @@ onMounted(load)
           </div>
         </div>
         <div class="panel">
+          <div class="panel-head">备份与迁移（升级不丢数据）</div>
+          <div class="panel-body">
+            <p class="muted">所有收藏数据都保存在程序目录下的 <code>data/</code> 文件夹（含 <code>library.db</code> 数据库、配置、封面、头像）。</p>
+            <ul class="tips">
+              <li><b>升级</b>：用新版本 <code>片匣.exe</code> <b>覆盖旧 exe 即可</b>，不要删除 <code>data/</code> 文件夹，收藏、设置、观看进度全部保留。</li>
+              <li><b>换电脑 / 备份</b>：直接把整个程序文件夹（含 <code>data/</code>）整体拷贝即可。程序每次启动会自动为 <code>library.db</code> 留一份每日备份（最近 7 天），多一层保险。</li>
+              <li><b>自定义目录</b>：若把头像/背景图设到了独立磁盘（设置 → 媒体资源路径），迁移时需在目标机同样挂载该路径，或改回相对 <code>data/</code> 的路径。</li>
+              <li><b>导出兜底</b>：下方「数据导出」可把元数据导出为 CSV，作为纯文本备份。</li>
+            </ul>
+          </div>
+        </div>
+        <div class="panel">
           <div class="panel-head">关于</div>
           <div class="panel-body">
-            <p><b>AV 博物馆</b> — 本地影片收藏管理工具</p>
+            <p><b>片匣 (AVM)</b> — 本地 AV 收藏管理工具</p>
             <p class="muted">所有数据均保存在本地，不会上传到任何服务器。</p>
             <div class="kbd-list">
               <div class="section-title">快捷键</div>
@@ -760,6 +777,9 @@ onMounted(load)
 .kbd-list { margin-top: var(--sp-3); }
 .kb { display: flex; align-items: center; gap: var(--sp-2); padding: 3px 0; font-size: var(--fs-sm); }
 .kb span { color: var(--c-text-3); margin-left: var(--sp-2); }
+.tips { margin: 0; padding-left: 1.2em; line-height: 1.7; }
+.tips li { margin: 4px 0; font-size: var(--fs-sm); color: var(--c-text-2); }
+.tips b { color: var(--c-text); }
 kbd {
   padding: 1px 6px;
   border-radius: var(--r-xs);

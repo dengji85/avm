@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -237,38 +238,56 @@ def run_scrape(ids: Optional[List[int]] = None, scope: str = "missing",
             return {"ok": False, "reason": "no_provider"}
         SCRAPE.message = f"待处理 {len(targets)} 部，数据源：{', '.join(p.name for p in providers)}"
 
-        for idx, mid in enumerate(targets, 1):
-            if SCRAPE.cancelled:
-                break
-            row = conn.execute("SELECT code, title FROM movies WHERE id = ?", (mid,)).fetchone()
-            label = (row["code"] or row["title"]) if row else str(mid)
+        # 并发抓取：每个 worker 使用独立 SQLite 连接，避免跨线程共用。
+        workers = max(1, int(cfg["scraper"].get("workers", 4)))
+        # 全局限速：把总间隔均摊到各 worker，整体吞吐约提升 workers 倍。
+        per_worker_delay = delay / workers if delay else 0.0
+
+        def _job(mid: int) -> Dict[str, Any]:
+            lc = connect()
             try:
-                res = scrape_one(conn, mid, providers, cfg, overwrite)
+                if SCRAPE.cancelled:
+                    return {"ok": False, "reason": "cancelled", "mid": mid}
+                res = scrape_one(lc, mid, providers, cfg, overwrite)
+                # 数据源没给封面时，兜底找一次本地图
+                if cfg["cover"].get("auto_local", True):
+                    cur = lc.execute("SELECT cover FROM movies WHERE id = ?", (mid,)).fetchone()
+                    if cur and not cur["cover"] and sniff_local_cover(lc, mid, cfg):
+                        res = dict(res)
+                        res["cover_local"] = True
+                if per_worker_delay:
+                    time.sleep(per_worker_delay)
+                return res
+            finally:
+                lc.close()
+
+        done = 0
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="scrape") as pool:
+            futs = {pool.submit(_job, mid): mid for mid in targets}
+            for fut in as_completed(futs):
+                mid = futs[fut]
+                done += 1
+                try:
+                    res = fut.result()
+                except Exception as exc:
+                    res = {"ok": False, "reason": f"异常: {exc}", "mid": mid}
+                row = conn.execute("SELECT code, title FROM movies WHERE id = ?", (mid,)).fetchone()
+                label = (row["code"] or row["title"]) if row else str(mid)
                 if res.get("ok"):
                     SCRAPE.bump("success")
                     if "cover" in (res.get("changed") or []):
                         SCRAPE.bump("cover")
+                    if res.get("cover_local"):
+                        SCRAPE.bump("cover_local")
                 else:
                     SCRAPE.bump("miss")
-                    # 记录失败原因，便于前端展示「为什么没刮到」
                     reason = (res.get("reason") or "未知原因")
                     SCRAPE.counters.setdefault("reasons", {})
                     SCRAPE.counters["reasons"][reason] = SCRAPE.counters["reasons"].get(reason, 0) + 1
-                # 数据源没给封面时，兜底找一次本地图
-                if cfg["cover"].get("auto_local", True):
-                    cur = conn.execute("SELECT cover FROM movies WHERE id = ?", (mid,)).fetchone()
-                    if cur and not cur["cover"] and sniff_local_cover(conn, mid, cfg):
-                        SCRAPE.bump("cover_local")
-            except Exception as exc:
-                SCRAPE.bump("failed")
-                SCRAPE.error(f"{label}: {exc}")
-                SCRAPE.counters.setdefault("reasons", {})
-                SCRAPE.counters["reasons"][f"异常: {exc}"] = SCRAPE.counters["reasons"].get(f"异常: {exc}", 0) + 1
-            SCRAPE.tick(label)
-            if idx % 20 == 0:
-                conn.commit()
-            if delay:
-                time.sleep(delay)
+                SCRAPE.tick(label)
+                # 周期性提交主线程连接（仅用于读取 row，提交开销极小）
+                if done % 20 == 0:
+                    conn.commit()
         conn.commit()
     finally:
         conn.close()

@@ -410,6 +410,12 @@ def get_rankings(kind: str = "watched", limit: int = 30) -> Dict[str, Any]:
         return {"items": store.rankings(conn, kind, limit)}
 
 
+@router.get("/watch-history")
+def get_watch_history(page: int = 1, size: int = 50) -> Dict[str, Any]:
+    with db() as conn:
+        return store.watch_history(conn, page, size)
+
+
 @router.get("/stats-enhanced")
 def get_stats_enhanced() -> Dict[str, Any]:
     with db() as conn:

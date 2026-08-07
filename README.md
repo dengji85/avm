@@ -150,7 +150,7 @@ build.py       源码版打包脚本（PyInstaller）
 run.py         入口：serve / build / pack / dev
 ```
 
-更完整的架构、接口清单与开发约定见 **[`docs/开发文档.md`](docs/开发文档.md)**，使用说明见 **[`docs/使用手册.md`](docs/使用手册.md)**。
+更完整的架构、接口清单与开发约定见 **[`docs/开发文档.md`](docs/开发文档.md)**，使用说明见 **[`docs/使用手册.md`](docs/使用手册.md)**，升级与数据迁移见 **[`docs/升级指南.md`](docs/升级指南.md)**。
 
 ---
 

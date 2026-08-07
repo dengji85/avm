@@ -89,6 +89,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         # 抓取顺序，先命中的先用；可选 javbus / javdb / local_nfo / http_json / http_html
         "order": ["javbus", "javdb", "local_nfo"],
         "timeout": 20,
+        # 并发抓取线程数；网络 IO 密集型，适度提高可显著加速（建议 2-8）
+        "workers": 4,
         # 每条请求之间的间隔（毫秒），避免把数据源打挂
         "delay_ms": 800,
         "proxy": "",

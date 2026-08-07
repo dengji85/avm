@@ -866,11 +866,61 @@ def remove_from_collection(conn: sqlite3.Connection, cid: int, movie_id: int) ->
         "DELETE FROM collection_items WHERE collection_id = ? AND movie_id = ?", (cid, movie_id))
 
 
+def smart_query(conn: sqlite3.Connection, rule: Any, page: int = 1,
+                 size: int = 60) -> Dict[str, Any]:
+    """按智能清单规则聚合影片。
+
+    rule 可以是 JSON 字符串（库里存储形态）或 dict；约定取 rule["params"] 作为
+    筛选参数。参数键与 search_movies 基本一致：cond 为状态标志（watched/unwatched/
+    favorite 等，见 FLAG_CLAUSES）、min_rating 评分下限、genre/actress 分类名、
+    sort 排序键。"""
+    params: Dict[str, Any] = {}
+    if isinstance(rule, str):
+        try:
+            rule = json.loads(rule)
+        except Exception:
+            rule = {}
+    if isinstance(rule, dict):
+        params = rule.get("params") if isinstance(rule.get("params"), dict) else dict(rule)
+    params = params or {}
+
+    # cond 是前端单选的状态条件（如 unwatched/watched/favorite），映射到 FLAG_CLAUSES
+    cond = params.get("cond")
+    if cond and cond not in params:
+        params[cond] = 1
+
+    where, args = _build_where(params)
+    order = SORTS.get(str(params.get("sort") or "added_desc"), SORTS["added_desc"])
+    page = max(1, int(page or 1))
+    size = min(500, max(1, int(size or 60)))
+    offset = (page - 1) * size
+
+    total = int(scalar(
+        conn,
+        "SELECT COUNT(*) FROM movies m "
+        "LEFT JOIN studios st ON st.id = m.studio_id "
+        "LEFT JOIN series se ON se.id = m.series_id" + where,
+        args,
+    ))
+    rows = query_all(
+        conn,
+        f"{_LIST_SELECT}{where} ORDER BY {order} LIMIT ? OFFSET ?",
+        [*args, size, offset],
+    )
+    return {
+        "total": total,
+        "page": page,
+        "page_size": size,
+        "pages": max(1, (total + size - 1) // size),
+        "items": [_row_to_card(r) for r in rows],
+    }
+
+
 def collection_movies(conn: sqlite3.Connection, cid: int, page: int = 1,
                       size: int = 60) -> Dict[str, Any]:
     info = conn.execute("SELECT kind, rule FROM collections WHERE id=?", (cid,)).fetchone()
     if info and (info["kind"] or "manual") == "smart":
-        return smart_query(conn, info["rule"])
+        return smart_query(conn, info["rule"], page, size)
     total = int(scalar(conn, "SELECT COUNT(*) FROM collection_items WHERE collection_id = ?", (cid,)))
     pages = max(1, (total + size - 1) // size)
     page = max(1, min(int(page), pages))
@@ -1110,6 +1160,46 @@ def rankings(conn: sqlite3.Connection, kind: str = "watched", limit: int = 30) -
     else:  # play
         rows = query_all(conn, f"{_LIST_SELECT} ORDER BY m.play_count DESC, m.rating DESC LIMIT ?", (limit,))
     return [_row_to_card(r) for r in rows]
+
+
+def watch_history(conn: sqlite3.Connection, page: int = 1,
+                  size: int = 50) -> Dict[str, Any]:
+    """按时间倒序返回每次观看的明细（一条观看记录一行）。"""
+    page = max(1, int(page or 1))
+    size = min(200, max(1, int(size or 50)))
+    offset = (page - 1) * size
+    total = int(scalar(conn, "SELECT COUNT(*) FROM watch_sessions") or 0)
+    rows = query_all(conn, """
+        SELECT s.id, s.movie_id, s.started_at, s.ended_at, s.watched_sec,
+               s.finished, s.method, s.start_pos, s.end_pos,
+               m.code, m.title, m.cover, m.year, st.name AS studio
+        FROM watch_sessions s
+        JOIN movies m ON m.id = s.movie_id
+        LEFT JOIN studios st ON st.id = m.studio_id
+        ORDER BY s.started_at DESC, s.id DESC LIMIT ? OFFSET ?""", (size, offset))
+    items = [{
+        "id": r["id"],
+        "movie_id": r["movie_id"],
+        "code": r["code"],
+        "title": r["title"],
+        "cover": r["cover"],
+        "studio": r["studio"],
+        "year": r["year"],
+        "started_at": r["started_at"],
+        "ended_at": r["ended_at"],
+        "watched_sec": float(r["watched_sec"] or 0),
+        "finished": int(r["finished"] or 0),
+        "method": r["method"] or "external",
+        "start_pos": float(r["start_pos"] or 0),
+        "end_pos": float(r["end_pos"] or 0),
+    } for r in rows]
+    return {
+        "total": total,
+        "page": page,
+        "page_size": size,
+        "pages": max(1, (total + size - 1) // size),
+        "items": items,
+    }
 
 
 # ----------------------------------------------------------------- 文件体检（明细）

@@ -21,6 +21,8 @@ function onLoaded() {
   ready.value = true
   const v = videoEl.value
   if (!v) return
+  // 默认音量较小，避免一打开就炸耳；用户拖音量条会覆盖此值
+  v.volume = 0.3
   dur.value = v.duration || 0
   if (props.startAt > 0 && props.startAt < (v.duration || 0) - 5) {
     v.currentTime = props.startAt
@@ -62,7 +64,8 @@ async function openExternal() {
 
 function seek(delta) {
   const v = videoEl.value
-  if (v) v.currentTime = Math.max(0, Math.min(v.duration || 0, v.currentTime + delta))
+  if (!v || !v.duration) return
+  v.currentTime = Math.max(0, Math.min(v.duration, v.currentTime + delta))
 }
 
 saveTimer = setInterval(() => saveProgress(false), 10000)
