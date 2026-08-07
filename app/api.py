@@ -430,6 +430,7 @@ def start_scan(payload: Dict[str, Any] = Body(default={})) -> Dict[str, Any]:
     incremental = bool(payload.get("incremental", True))
     workers = payload.get("workers") or None
     hash_files = bool(payload.get("hash_files", False))
+    auto_cleanup = payload.get("auto_cleanup", None)
     if not SCAN.start():
         raise HTTPException(409, "已有扫描任务在执行中")
     def _run():
@@ -439,6 +440,7 @@ def start_scan(payload: Dict[str, Any] = Body(default={})) -> Dict[str, Any]:
                 incremental=incremental,
                 workers=workers,
                 hash_files=hash_files,
+                auto_cleanup=auto_cleanup,
             )
             SCAN.finish(json.dumps(result, ensure_ascii=False))
         except Exception as e:

@@ -2,7 +2,7 @@
 import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
 import { state } from '../state.js'
 import {
-  getMovie, updateMovie, deleteMovie, toggleFlag, playMovie, scrapeOne,
+  getMovie, updateMovie, deleteMovie, toggleFlag, playMovie,
   exportNfo, getPreviews, getSimilar, coverUrl, coverThumbUrl, uploadCover, clearCover,
   listCollections, addToCollection,
   aiGenerateSynopsis, aiSuggestTags, aiStatus,
@@ -11,6 +11,9 @@ import {
   toast, confirmDialog, copyText, coverFallback, fmtSize, fmtDuration,
   fmtDate, fmtAgo, qualityTag,
 } from '../utils.js'
+import { useTasks } from '../composables/useTasks.js'
+
+const { runScrape } = useTasks()
 import VideoPlayer from './VideoPlayer.vue'
 
 const mv = ref(null)
@@ -111,15 +114,21 @@ async function play() {
   catch (e) { toast(e.message, 'err') }
 }
 
+// 详情页「重新刮削」复用批量刮削任务管线，进度会出现在右上角任务中心。
 async function doScrape() {
-  loading.value = true
   try {
-    await scrapeOne(id.value, {})
-    toast('刮削完成', 'ok')
-    await load()
-    window.dispatchEvent(new CustomEvent('avm-refresh'))
-  } catch (e) { toast(e.message, 'err') } finally { loading.value = false }
+    await runScrape({ ids: [id.value], overwrite: true })
+    toast('已加入刮削队列', 'ok')
+  } catch (e) { toast(e.message, 'err') }
 }
+
+// 刮削任务结束后自动刷新详情（任务中心轮询会在结束时广播 avm-refresh）
+watch(
+  () => state.task.scrape.running,
+  (running, was) => {
+    if (was && !running && id.value) load()
+  },
+)
 
 async function doNfo() {
   try { const r = await exportNfo(id.value); toast('已导出 ' + (r.path || 'NFO'), 'ok') }

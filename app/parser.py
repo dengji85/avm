@@ -38,11 +38,13 @@ _TECH_NOISE = re.compile(
 _FLAG_RULES: Dict[str, re.Pattern] = {
     "subtitle": re.compile(
         r"(中文字幕|中字|简体|繁體|繁体|字幕|chinese\s*sub(?:title)?s?|\bsubbed\b|"
-        r"[-_](?:c|ch|uc|chs|cht|sub)(?=[\s.\-_\]]|$))",
+        r"[-_](?:c|ch|uc|chs|cht|sub)(?=[\s.\-_\]]|$)|"      # -C / -CH / _UC 等带分隔符
+        r"(?<=\d)(?:ch|chs|cht|chn|chi|chinese|unc|uc|c|u|sub)(?=$|[\s._\-]))",  # 171CH 紧贴数字无分隔符
         re.I,
     ),
     "uncensored": re.compile(
-        r"(无码|無碼|無修正|无修正|uncensor(?:ed)?|uncen|无码破解|破解|[-_](?:u|uc)(?=[\s.\-_\]]|$))",
+        r"(无码|無碼|無修正|无修正|uncensor(?:ed)?|uncen|无码破解|破解|"
+        r"[-_](?:u|uc|cl)(?=[\s.\-_\]]|$)|(?<=\d)(?:unc|uc|cl)(?=$|[\s._\-]))",
         re.I,
     ),
     "leak": re.compile(r"(流出|泄漏|泄露|\bleak(?:ed)?\b)", re.I),
@@ -110,9 +112,19 @@ _CODE_RULES: list[tuple[str, re.Pattern, Any]] = [
         lambda m: f"{m.group(1).lower()}{m.group(2)}",
     ),
     (
-        "STANDARD",  # ABC-123 / ABCD00123 / ssis 001 / IRO061C(尾随字幕/无码字母)
-        # 数字后可紧跟单个版本字母（c/u/ch/uc 等），匹配时一并吞掉、格式化时丢弃
-        re.compile(r"(?<![a-z0-9])([a-z]{2,6})[\s\-_.]?(\d{2,5})(?:[ _.\-]?(?:c|u|ch|uc|unc|sub))*?(?![a-z0-9])", re.I),
+        "STANDARD",  # ABC-123 / ABCD00123 / ssis 001 / IRO061C / JUR-171CH / MIRD-181CHSUB
+        # 厂牌前缀 [2,6] 字母 + 可选分隔符 + 编号；编号后紧跟的字幕/版本标记
+        # （ch/chs/cht/chn/chi/c/u/uc/unc/sub/multi 等，可无分隔符紧贴或带 -_）一并吞掉，
+        # 格式化时只保留「前缀-编号」，字幕信息由 detect_flags 单独记录。
+        re.compile(
+            r"(?<![a-z0-9])"
+            r"([a-z]{2,6})"                                              # 厂牌前缀
+            r"[\s\-_.]?"                                                 # 可选分隔符
+            r"(\d{2,5})"                                                 # 编号
+            r"(?:[\s._\-]?(?:ch|chs|cht|chn|chi|chinese|unc|uc|c|u|cl|sub|multi))*"  # 尾随版本/字幕标记
+            r"(?![a-z0-9])",
+            re.I,
+        ),
         lambda m: f"{m.group(1).upper()}-{_fmt_num(m.group(2))}",
     ),
 ]

@@ -280,10 +280,16 @@ def run_scrape(ids: Optional[List[int]] = None, scope: str = "missing",
                     if res.get("cover_local"):
                         SCRAPE.bump("cover_local")
                 else:
-                    SCRAPE.bump("miss")
-                    reason = (res.get("reason") or "未知原因")
                     SCRAPE.counters.setdefault("reasons", {})
+                    reason = (res.get("reason") or "未知原因")
                     SCRAPE.counters["reasons"][reason] = SCRAPE.counters["reasons"].get(reason, 0) + 1
+                    # 真正的异常（接口报错/超时）记为 error 级别，便于前端区分「刮削失败」与「未刮到」
+                    if str(reason).startswith("异常") or res.get("error"):
+                        SCRAPE.bump("fail")
+                        SCRAPE.error(f"{label}：{reason}")
+                    else:
+                        SCRAPE.bump("miss")
+                        SCRAPE.log(f"{label}：{reason}", "warn", code=row["code"] if row else "")
                 SCRAPE.tick(label)
                 # 周期性提交主线程连接（仅用于读取 row，提交开销极小）
                 if done % 20 == 0:

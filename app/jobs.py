@@ -23,6 +23,7 @@ class Job:
             self.current = ""
             self.counters: Dict[str, int] = {}
             self.errors: List[str] = []
+            self.logs: List[Dict[str, Any]] = []
             self.message = ""
             self.started_at = 0.0
             self.ended_at = 0.0
@@ -55,6 +56,21 @@ class Job:
         with self._lock:
             self.counters[key] = self.counters.get(key, 0) + n
 
+    def log(self, msg: str, level: str = "info", code: str = "") -> None:
+        """追加一条滚动日志（最多保留最近 200 条）。
+
+        level 取 info / warn / error；前端只展示 warn/error 作为「未命中 / 错误明细」。
+        """
+        with self._lock:
+            self.logs.append({
+                "t": time.strftime("%H:%M:%S"),
+                "level": level,
+                "msg": str(msg)[:300],
+                "code": code or "",
+            })
+            if len(self.logs) > 200:
+                del self.logs[0: len(self.logs) - 200]
+
     def tick(self, current: str = "") -> None:
         with self._lock:
             self.done += 1
@@ -75,6 +91,7 @@ class Job:
         with self._lock:
             if len(self.errors) < 100:
                 self.errors.append(str(msg)[:300])
+            self.log(msg, "error")
 
     def snapshot(self) -> Dict[str, Any]:
         with self._lock:
@@ -92,6 +109,10 @@ class Job:
                 "counters": dict(self.counters),
                 "errors": list(self.errors[-20:]),
                 "error_count": len(self.errors),
+                "logs": [
+                    {"t": l["t"], "level": l["level"], "msg": l["msg"], "code": l["code"]}
+                    for l in self.logs if l["level"] in ("warn", "error")
+                ],
                 "message": self.message,
                 "elapsed": round(elapsed, 1),
             }

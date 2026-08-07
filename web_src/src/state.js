@@ -60,10 +60,13 @@ export const state = reactive({
   mobileNavOpen: false,
 
   // ---- 后台任务 ----
+  // task.* 保留「当前/最近一次」任务的实时快照（完成后不清空，供即时查看）
   task: {
-    scan: { running: false, done: 0, total: 0, message: '', phase: '' },
-    scrape: { running: false, done: 0, total: 0, message: '', ok: 0, fail: 0 },
+    scan: { running: false, done: 0, total: 0, message: '', phase: '', elapsed: 0, cancelled: false, ok: 0, fail: 0, logs: [], counters: {} },
+    scrape: { running: false, done: 0, total: 0, message: '', phase: '', elapsed: 0, cancelled: false, ok: 0, fail: 0, logs: [], counters: {} },
   },
+  // 任务历史（已完成的任务存档，任务结束后失败数据仍可回看）
+  taskHistory: [],
   taskPanelOpen: false,
 })
 

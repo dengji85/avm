@@ -68,6 +68,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         ],
         # 小于该体积的文件视为预览片/样片，直接跳过
         "min_size_mb": 100,
+        # 扫描完成后自动清理失效记录（磁盘已删的文件 / 空影片 / 孤儿元数据）
+        "auto_cleanup": True,
         "ignore_keywords": ["sample", "trailer", "预告", "花絮", "特典"],
         "ignore_dirs": [
             "@eaDir", "#recycle", "$RECYCLE.BIN", "System Volume Information",

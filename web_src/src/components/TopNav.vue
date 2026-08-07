@@ -1,12 +1,14 @@
 <script setup>
 import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
 import { state } from '../state.js'
-import { useTasks, pct } from '../composables/useTasks.js'
+import { useTasks, pct, etaSec, phaseLabel, fmtDur } from '../composables/useTasks.js'
 import { aiStatus, aiSearchIntent } from '../api.js'
-import { toast } from '../utils.js'
+import { toast, fmtAgo } from '../utils.js'
 
 const emit = defineEmits(['search'])
-const { anyRunning, activeTasks, overallPct, runScan, runScrape, abort } = useTasks()
+const { anyRunning, activeTasks, lastFinished, taskHistory, overallPct, runScan, runScrape, abort, clearHistory } = useTasks()
+const showScrapeLogs = ref(null)   // 当前展开的明细所属任务 key（或历史 id）
+const openHistory = ref(new Set()) // 展开的历史记录 id 集合
 
 const searchEl = ref(null)
 const kw = ref(state.q)
@@ -82,6 +84,33 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
 
 function toggleTheme() { state.theme = state.theme === 'dark' ? 'light' : 'dark' }
 const themeIcon = computed(() => (state.theme === 'dark' ? '☾' : '☀'))
+
+// 进度环：用 conic-gradient 模拟（indeterminate 时走 CSS 旋转动画）
+function ringStyle(p) {
+  if (p < 0) return {}
+  const deg = Math.min(100, Math.max(0, p)) * 3.6
+  const c1 = 'var(--c-primary-h, #4f8cff)'
+  const c2 = 'var(--c-line-strong, #2a2f3a)'
+  return { background: `conic-gradient(${c1} ${deg}deg, ${c2} ${deg}deg)` }
+}
+
+function toggleHistory(id) {
+  const s = new Set(openHistory.value)
+  s.has(id) ? s.delete(id) : s.add(id)
+  openHistory.value = s
+}
+
+// 从 counters 中提取自动清理的孤儿元数据计数（cleaned_actresses 等）
+function cleanedOrphans(t) {
+  const c = (t && t.counters) || {}
+  const labels = { actresses: '女优', genres: '类型', tags: '标签', studios: '厂商', series: '系列' }
+  const out = []
+  for (const [k, label] of Object.entries(labels)) {
+    const v = c['cleaned_' + k]
+    if (v) out.push({ k: label, v })
+  }
+  return out
+}
 </script>
 
 <template>
@@ -132,24 +161,144 @@ const themeIcon = computed(() => (state.theme === 'dark' ? '☾' : '☀'))
         <div v-if="state.taskPanelOpen" class="task-pop" @click.stop>
           <div class="tp-head">
             <b>任务中心</b>
+            <span class="tp-head-sub">{{ anyRunning ? '运行中' : '空闲' }}</span>
             <button class="btn ghost icon tiny" @click="state.taskPanelOpen = false">✕</button>
           </div>
 
-          <div v-if="!activeTasks.length" class="tp-idle">
-            <p class="muted">当前没有正在运行的任务</p>
+          <!-- 进行中：当前运行 / 最近一次完成的任务 -->
+          <div class="tp-section">
+            <div v-if="!activeTasks.length && !lastFinished.length" class="tp-idle">
+              <div class="tp-idle-ico">✓</div>
+              <p class="muted">当前没有运行中的任务</p>
+              <p class="muted sm">扫描或刮削时，进度会实时显示在这里；完成后可在下方历史中回看</p>
+            </div>
+
+            <div
+              v-for="t in [...activeTasks, ...lastFinished]"
+              :key="t.key"
+              class="tp-item"
+              :class="{ done: !t.running }"
+            >
+              <!-- 顶部：名称 + 状态徽标 -->
+              <div class="tp-top">
+                <span class="tp-name">
+                  <span class="tp-dot" :class="{ live: t.running }"></span>
+                  {{ t.label }}
+                </span>
+                <span class="tp-pill" :class="t.running ? 'run' : (t.cancelled ? 'cancel' : 'ok')">
+                  {{ phaseLabel(t) }}
+                </span>
+              </div>
+
+              <!-- 进度环 + 数字 -->
+              <div class="tp-body">
+                <div
+                  class="tp-ring"
+                  :class="{ indeterminate: pct(t) < 0 }"
+                  :style="ringStyle(pct(t))"
+                >
+                  <template v-if="pct(t) >= 0"><b class="tabular">{{ pct(t) }}%</b></template>
+                  <span v-else class="tp-ring-q">…</span>
+                </div>
+                <div class="tp-stats">
+                  <div class="tp-stat">
+                    <span class="v tabular">{{ t.done }}<i v-if="t.total"> / {{ t.total }}</i></span>
+                    <span class="k">已处理</span>
+                  </div>
+                  <div class="tp-stat ok"><span class="v tabular">{{ t.ok }}</span><span class="k">成功</span></div>
+                  <div class="tp-stat bad"><span class="v tabular">{{ t.fail || t.error_count || 0 }}</span><span class="k">失败</span></div>
+                  <div class="tp-stat"><span class="v tabular">{{ fmtDur(t.elapsed) }}</span><span class="k">已用时</span></div>
+                  <div class="tp-stat" v-if="etaSec(t) != null"><span class="v tabular">{{ fmtDur(etaSec(t)) }}</span><span class="k">预计剩余</span></div>
+                </div>
+              </div>
+
+              <!-- 进度条 -->
+              <div class="progress" :class="{ indeterminate: pct(t) < 0 }">
+                <i v-if="pct(t) >= 0" :style="{ width: pct(t) + '%' }"></i>
+              </div>
+
+              <!-- 当前项：正在刮削/扫描哪个 -->
+              <div v-if="t.running" class="tp-current ellipsis" :title="t.current || t.message">
+                <span class="tk">{{ t.key === 'scan' ? '扫描' : '刮削' }}</span>
+                {{ t.current || t.message || '处理中…' }}
+              </div>
+
+              <!-- 操作 + 明细 + 失败统计 -->
+              <div class="tp-actions">
+                <span v-if="t.logs && t.logCounts.error" class="tp-badge err" title="刮削出错的影片">⚠ 错误 {{ t.logCounts.error }}</span>
+                <span v-if="t.logCounts.miss" class="tp-badge warn" title="未刮到元数据的影片">未命中 {{ t.logCounts.miss }}</span>
+                <button
+                  v-if="t.logs && t.logs.length"
+                  class="btn tiny ghost"
+                  :class="{ on: showScrapeLogs === t.key }"
+                  @click="showScrapeLogs = showScrapeLogs === t.key ? null : t.key"
+                >明细 {{ t.logs.length }}</button>
+                <button v-if="t.running" class="btn tiny ghost danger" @click="abort(t.key)">取消</button>
+              </div>
+
+              <!-- 失败原因汇总 -->
+              <div v-if="t.reasons && t.reasons.length" class="tp-reasons">
+                <span class="tr-h">失败原因 TOP：</span>
+                <span v-for="r in t.reasons" :key="r.name" class="tr-chip" :class="r.cls">{{ r.name }} ×{{ r.n }}</span>
+              </div>
+
+              <!-- 自动清理结果 -->
+              <div v-if="t.counters && t.counters.cleaned_files != null" class="tp-clean">
+                <span class="tc-ico">🧹</span>
+                自动清理：删除失效文件 {{ t.counters.cleaned_files || 0 }}
+                <template v-if="cleanedOrphans(t).length">
+                  ，孤儿元数据
+                  <span v-for="o in cleanedOrphans(t)" :key="o.k">{{ o.k }} {{ o.v }} </span>
+                </template>
+              </div>
+
+              <!-- 未命中 / 错误明细 -->
+              <transition name="tp-slide">
+                <div v-if="showScrapeLogs === t.key && t.logs && t.logs.length" class="tp-logs">
+                  <div v-for="(l, i) in t.logs.slice().reverse()" :key="i" class="tp-log" :class="l.level">
+                    <span class="lt tabular">{{ l.t }}</span>
+                    <span v-if="l.code" class="lc">{{ l.code }}</span>
+                    <span class="lm">{{ l.msg }}</span>
+                  </div>
+                </div>
+              </transition>
+            </div>
           </div>
 
-          <div v-for="t in activeTasks" :key="t.key" class="tp-item">
-            <div class="tp-row">
-              <span class="tp-name">{{ t.label }}</span>
-              <span class="tp-n tabular">{{ t.done }} / {{ t.total || '?' }}</span>
+          <!-- 历史记录：任务结束后仍可回看失败明细 -->
+          <div v-if="taskHistory.length" class="tp-section history">
+            <div class="tp-sec-head">
+              <span>历史记录</span>
+              <button class="btn ghost tiny" @click="clearHistory">清空</button>
             </div>
-            <div class="progress" :class="{ indeterminate: pct(t) < 0 }">
-              <i v-if="pct(t) >= 0" :style="{ width: pct(t) + '%' }"></i>
-            </div>
-            <div class="tp-row">
-              <span class="tp-msg ellipsis">{{ t.message || '处理中…' }}</span>
-              <button class="btn tiny ghost" @click="abort(t.key)">取消</button>
+            <div v-for="h in taskHistory" :key="h.id" class="tp-hist" :class="{ fail: h.fail }">
+              <button class="tp-hist-row" @click="toggleHistory(h.id)">
+                <span class="th-ico" :class="{ err: h.fail, warn: !h.fail && h.logCounts?.miss }">
+                  {{ h.fail ? '⚠' : (h.cancelled ? '⊘' : '✓') }}
+                </span>
+                <span class="th-label">{{ h.label }}</span>
+                <span class="th-meta tabular">{{ fmtAgo(h.finishedAt) }}</span>
+                <span class="th-stat tabular">成功 {{ h.ok }} · 失败 {{ h.fail }}</span>
+                <span class="th-caret" :class="{ open: openHistory.has(h.id) }">▾</span>
+              </button>
+              <transition name="tp-slide">
+                <div v-if="openHistory.has(h.id)" class="tp-hist-body">
+                  <!-- 失败原因 -->
+                  <div v-if="h.reasons && h.reasons.length" class="tp-reasons">
+                    <span class="tr-h">失败原因 TOP：</span>
+                    <span v-for="r in h.reasons" :key="r.name" class="tr-chip" :class="r.cls">{{ r.name }} ×{{ r.n }}</span>
+                  </div>
+                  <!-- 明细 -->
+                  <div v-if="h.logs && h.logs.length" class="tp-logs">
+                    <div v-for="(l, i) in h.logs.slice().reverse()" :key="i" class="tp-log" :class="l.level">
+                      <span class="lt tabular">{{ l.t }}</span>
+                      <span v-if="l.code" class="lc">{{ l.code }}</span>
+                      <span class="lm">{{ l.msg }}</span>
+                    </div>
+                  </div>
+                  <p v-else class="muted sm" style="padding:6px 8px">本次没有未命中或错误记录</p>
+                </div>
+              </transition>
             </div>
           </div>
 
@@ -209,7 +358,9 @@ const themeIcon = computed(() => (state.theme === 'dark' ? '☾' : '☀'))
   position: absolute;
   top: calc(100% + 8px); right: 0;
   z-index: 50;
-  width: 320px;
+  width: 340px;
+  max-height: min(78vh, 620px);
+  display: flex; flex-direction: column;
   background: var(--c-surface);
   border: 1px solid var(--c-line-strong);
   border-radius: var(--r-md);
@@ -218,19 +369,215 @@ const themeIcon = computed(() => (state.theme === 'dark' ? '☾' : '☀'))
   animation: rise-in var(--t-slow);
 }
 .tp-head {
-  display: flex; align-items: center; justify-content: space-between;
+  display: flex; align-items: center; gap: var(--sp-2);
   padding: var(--sp-2) var(--sp-3);
   border-bottom: 1px solid var(--c-line);
+  flex: 0 0 auto;
 }
-.tp-idle { padding: var(--sp-5); text-align: center; font-size: var(--fs-sm); }
+.tp-head b { font-size: var(--fs-md); }
+.tp-head-sub {
+  font-size: var(--fs-xs); color: var(--c-text-3);
+  margin-right: auto;
+}
+.tp-idle {
+  padding: var(--sp-6) var(--sp-4);
+  text-align: center;
+}
+.tp-idle-ico {
+  width: 44px; height: 44px; margin: 0 auto var(--sp-3);
+  display: grid; place-items: center;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--c-ok, #2e9e5b) 16%, transparent);
+  color: var(--c-ok, #2e9e5b);
+  font-size: 22px; font-weight: 700;
+}
+.tp-idle .sm { font-size: var(--fs-xs); margin-top: 2px; }
+
 .tp-item {
   padding: var(--sp-3);
   display: flex; flex-direction: column; gap: var(--sp-2);
   border-bottom: 1px solid var(--c-line);
+  overflow-y: auto;
 }
-.tp-row { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-2); }
-.tp-name { font-size: var(--fs-md); font-weight: 500; }
-.tp-n { font-size: var(--fs-sm); color: var(--c-text-3); }
-.tp-msg { font-size: var(--fs-xs); color: var(--c-text-3); flex: 1; }
-.tp-foot { padding: var(--sp-2) var(--sp-3); display: flex; gap: var(--sp-2); }
+.tp-item.done { opacity: .96; }
+
+.tp-top { display: flex; align-items: center; justify-content: space-between; }
+.tp-name { display: flex; align-items: center; gap: 6px; font-size: var(--fs-md); font-weight: 600; }
+.tp-dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: var(--c-text-3); flex: 0 0 auto;
+}
+.tp-dot.live {
+  background: var(--c-primary-h, #4f8cff);
+  box-shadow: 0 0 0 0 color-mix(in srgb, var(--c-primary-h, #4f8cff) 60%, transparent);
+  animation: tp-pulse 1.4s infinite;
+}
+.tp-pill {
+  font-size: var(--fs-xs); font-weight: 600;
+  padding: 2px 8px; border-radius: 999px;
+  background: var(--c-surface-3); color: var(--c-text-3);
+}
+.tp-pill.run { background: color-mix(in srgb, var(--c-primary-h, #4f8cff) 18%, transparent); color: var(--c-primary-h, #4f8cff); }
+.tp-pill.ok { background: color-mix(in srgb, var(--c-ok, #2e9e5b) 18%, transparent); color: var(--c-ok, #2e9e5b); }
+.tp-pill.cancel { background: color-mix(in srgb, var(--c-warning, #d9a23a) 18%, transparent); color: var(--c-warning, #d9a23a); }
+
+.tp-body { display: flex; align-items: center; gap: var(--sp-3); }
+.tp-ring {
+  --sz: 52px;
+  width: var(--sz); height: var(--sz); flex: 0 0 auto;
+  border-radius: 50%;
+  display: grid; place-items: center;
+  position: relative;
+}
+.tp-ring::after {
+  content: ''; position: absolute; inset: 5px;
+  border-radius: 50%; background: var(--c-surface);
+}
+.tp-ring > * { position: relative; z-index: 1; }
+.tp-ring b { font-size: var(--fs-md); font-variant-numeric: tabular-nums; }
+.tp-ring-q { font-size: 18px; color: var(--c-primary-h, #4f8cff); }
+.tp-ring.indeterminate { animation: tp-spin 1s linear infinite; }
+.tp-ring.indeterminate::before {
+  content: ''; position: absolute; inset: 0; border-radius: 50%;
+  background: conic-gradient(var(--c-primary-h, #4f8cff) 0 35%, transparent 35% 100%);
+}
+
+.tp-stats {
+  flex: 1; display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 6px var(--sp-2);
+}
+.tp-stat { display: flex; flex-direction: column; line-height: 1.15; }
+.tp-stat .v { font-size: var(--fs-md); font-weight: 600; }
+.tp-stat .v i { font-style: normal; color: var(--c-text-3); font-weight: 400; font-size: var(--fs-xs); }
+.tp-stat .k { font-size: var(--fs-xs); color: var(--c-text-3); }
+.tp-stat.ok .v { color: var(--c-ok, #2e9e5b); }
+.tp-stat.bad .v { color: var(--c-danger, #e5484d); }
+
+.tp-current {
+  font-size: var(--fs-xs); color: var(--c-text-2);
+  background: var(--c-surface-2);
+  border: 1px solid var(--c-line);
+  border-radius: var(--r-sm);
+  padding: 4px 8px;
+  max-width: 100%;
+}
+.tp-current .tk {
+  display: inline-block;
+  font-size: 10px; font-weight: 700;
+  color: #fff; background: var(--c-primary-h, #4f8cff);
+  padding: 1px 6px; border-radius: 4px; margin-right: 6px;
+}
+
+.tp-badge {
+  font-size: var(--fs-xs); font-weight: 600;
+  padding: 2px 8px; border-radius: 999px; white-space: nowrap;
+}
+.tp-badge.err { background: color-mix(in srgb, var(--c-danger, #e5484d) 18%, transparent); color: var(--c-danger, #e5484d); }
+.tp-badge.warn { background: color-mix(in srgb, var(--c-warning, #d9a23a) 18%, transparent); color: var(--c-warning, #d9a23a); }
+
+.tp-reasons {
+  display: flex; flex-wrap: wrap; gap: 4px 6px; align-items: center;
+  font-size: var(--fs-xs);
+  border-top: 1px dashed var(--c-line); padding-top: var(--sp-2);
+}
+.tp-reasons .tr-h { color: var(--c-text-3); }
+.tr-chip {
+  padding: 1px 7px; border-radius: 999px;
+  background: var(--c-surface-3); color: var(--c-text-2);
+}
+.tr-chip.err { background: color-mix(in srgb, var(--c-danger, #e5484d) 16%, transparent); color: var(--c-danger, #e5484d); }
+.tr-chip.warn { background: color-mix(in srgb, var(--c-warning, #d9a23a) 16%, transparent); color: var(--c-warning, #d9a23a); }
+
+.tp-clean {
+  font-size: var(--fs-xs); color: var(--c-text-2);
+  display: flex; flex-wrap: wrap; gap: 4px; align-items: center;
+  background: color-mix(in srgb, var(--c-ok, #2e9e5b) 10%, transparent);
+  border: 1px solid color-mix(in srgb, var(--c-ok, #2e9e5b) 30%, transparent);
+  border-radius: var(--r-sm); padding: 3px 8px;
+}
+.tp-clean .tc-ico { margin-right: 2px; }
+
+.tp-actions { display: flex; gap: var(--sp-2); align-items: center; }
+.btn.tiny.ghost.on { color: var(--c-primary-h, #4f8cff); border-color: color-mix(in srgb, var(--c-primary-h, #4f8cff) 50%, transparent); }
+.btn.tiny.ghost.danger { color: var(--c-danger, #e5484d); }
+
+.tp-logs {
+  max-height: 200px;
+  overflow-y: auto;
+  border: 1px solid var(--c-line);
+  border-radius: var(--r-sm);
+  background: var(--c-surface-2);
+  font-size: var(--fs-xs);
+}
+.tp-log {
+  display: flex;
+  gap: 6px;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--c-line);
+  line-height: 1.4; align-items: baseline;
+}
+.tp-log:last-child { border-bottom: 0; }
+.tp-log .lt { color: var(--c-text-3); flex: 0 0 auto; font-variant-numeric: tabular-nums; }
+.tp-log .lc {
+  flex: 0 0 auto; font-weight: 700; font-family: var(--font-mono, monospace);
+  font-size: 11px; padding: 0 4px; border-radius: 4px;
+  background: var(--c-surface-3); color: var(--c-text-2);
+}
+.tp-log .lm { color: var(--c-text-2); flex: 1; word-break: break-all; }
+.tp-log.error .lm { color: var(--c-danger, #e5484d); }
+.tp-log.warn .lm { color: var(--c-warning, #d9a23a); }
+
+.tp-foot {
+  padding: var(--sp-2) var(--sp-3); display: flex; gap: var(--sp-2);
+  border-top: 1px solid var(--c-line); flex: 0 0 auto;
+  background: var(--c-surface);
+}
+
+/* 过渡 */
+.tp-slide-enter-active, .tp-slide-leave-active { transition: opacity .18s, max-height .18s ease; overflow: hidden; }
+.tp-slide-enter-from, .tp-slide-leave-to { opacity: 0; max-height: 0; }
+
+@keyframes tp-pulse {
+  0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--c-primary-h, #4f8cff) 60%, transparent); }
+  70% { box-shadow: 0 0 0 6px transparent; }
+  100% { box-shadow: 0 0 0 0 transparent; }
+}
+@keyframes tp-spin { to { transform: rotate(360deg); } }
+
+/* 历史分区 */
+.tp-section { overflow-y: auto; }
+.tp-section.history {
+  border-top: 1px solid var(--c-line-strong);
+  background: var(--c-surface-2);
+}
+.tp-sec-head {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: var(--sp-2) var(--sp-3);
+  font-size: var(--fs-xs); font-weight: 600; color: var(--c-text-3);
+  position: sticky; top: 0; background: var(--c-surface-2); z-index: 1;
+}
+.tp-hist { border-bottom: 1px solid var(--c-line); }
+.tp-hist:last-child { border-bottom: 0; }
+.tp-hist-row {
+  width: 100%; display: flex; align-items: center; gap: 8px;
+  padding: var(--sp-2) var(--sp-3);
+  background: none; border: 0; cursor: pointer; text-align: left;
+  color: var(--c-text-2); font-size: var(--fs-sm);
+}
+.tp-hist-row:hover { background: var(--c-surface-3); }
+.th-ico { flex: 0 0 auto; font-weight: 700; }
+.th-ico.err { color: var(--c-danger, #e5484d); }
+.th-ico.warn { color: var(--c-warning, #d9a23a); }
+.th-label { font-weight: 500; }
+.th-meta { margin-left: auto; font-size: var(--fs-xs); color: var(--c-text-3); }
+.th-stat { font-size: var(--fs-xs); color: var(--c-text-3); white-space: nowrap; }
+.th-caret { transition: transform .15s; color: var(--c-text-3); }
+.th-caret.open { transform: rotate(180deg); }
+.tp-hist-body { padding: 0 var(--sp-3) var(--sp-2); }
+
+@media (max-width: 900px) {
+  .task-pop { width: calc(100vw - 24px); }
+}
+
 </style>
