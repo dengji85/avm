@@ -1,5 +1,25 @@
 # 更新日志
 
+## [1.9.0] - 2026-08-09
+
+### 新增（后台采集与抓取健壮性）
+
+* **AV-Wiki 源后台自动抓取**：新增 `app/cdp_fetch.py`，通过 Chrome DevTools Protocol 自管理**进程级常驻 headless Chrome**（`ChromeManager` 单例，调试端口 `chrome_debug_port`，默认 9222），自动拉起、自动养会话信任度，**完全后台运行，无需手动开浏览器**。AV-Wiki 数据源改用 `cdp_fetch(..., auto_launch=True)`，首次运行即可绕过 LiteSpeed「请稍候」反爬验证页，可纳入常规后台采集任务。
+* **素人片封面补全**：
+  * `app/providers/javbus.py`：详情页 `#cover` 为空时回退到搜索结果页 `a.movie-box img` 取 cloudfront 封面；`_best_cover` 补全 `/imgs/cover/`、`/pics/cover/` 相对路径。
+  * `app/images.py`：`download(url, cfg, referer="")` 支持 `referer`；对 `cloudfront.net` 自动带 `https://www.javbus.com/` 防盗链 referer。实测为库存补回大量此前缺失的素人片封面（少数图床失效/真无图者无法补救）。
+
+### 改进（筛选侧栏体验）
+
+* 新增 `web_src/src/components/MovieFilter.vue`：低基数维度（类型 / 标记 / 评分 / 年份）置顶常驻；女优 / 厂商 / 系列等长尾维度**默认折叠**（展示前 12 热门 + 总数角标）；组内值 > 20 条时显示**组内搜索框**；已选条件**自动置顶**。修正 `FACET_KINDS` 缺失 `ratings`/`flags` 导致分组 undefined 的 bug。
+
+### 工程
+
+* `.gitignore`：新增 `_*.html` / `_*.mjs` / `_*.txt` / `_*.png` / `_c.txt` / `_cdp_profile/` / `app.db` 等忽略规则，避免运行残留与临时调试脚本混入仓库。
+* `docs/开发文档.md`：补充 `cdp_fetch.py`、`chrome_debug_port` 配置、AV-Wiki 源与封面补全说明，修正筛选侧栏文档归属。
+* `docs/使用手册.md`：补充 AV-Wiki 源说明、筛选维度折叠/搜索说明与更新记录。
+* `web_src/src/views/SettingsView.vue`：Chrome 调试端口说明文案改为「完全后台运行，无需手动开浏览器（需本机安装 Chrome）」。
+
 ## [1.8.0] - 2026-08-01
 
 ### 前端重构（原生 JS → Vue 3 组件化）
