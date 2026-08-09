@@ -50,8 +50,12 @@ def _best_cover(url: str, base_url: str = "") -> str:
     if not url:
         return ""
     low = url.lower()
-    # JavBus 自有图床：保留原样（相对路径补全为绝对）
-    if "/pics/cover/" in low or "pics.javbus.com" in low:
+    # JavBus 自有图床：保留原样（相对路径补全为绝对）。
+    # 注意：站点有两套图床前缀——/pics/cover/ 与 /imgs/cover/，漏掉任何一个
+    # 都会让封面 URL 仍是相对路径，下载时变成 https:///imgs/... 而失败。
+    if ("/pics/cover/" in low or "pics.javbus.com" in low
+            or "/imgs/cover/" in low or "imgs.javbus.com" in low
+            or low.startswith("/imgs/") or low.startswith("/pics/")):
         if url.startswith("/"):
             return (base_url.rstrip("/") + url) if base_url else url
         return url
@@ -102,6 +106,28 @@ class JavBusProvider(BaseProvider):
             return self._search(code, headers)
         return self._parse(code, html)
 
+    def _search_cover(self, code: str) -> Optional[str]:
+        """从站内搜索结果页取封面图（javbus 搜索结果用 cloudfront 图床，
+        部分素人/无码片详情页 #cover 为空但搜索结果有图）。"""
+        try:
+            html = self.http_get(f"{self.base_url}/search/{code}", headers={})
+            if not html or detect_blocker(html):
+                return None
+            soup = BeautifulSoup(html, "html.parser")
+            box = soup.select_one("a.movie-box")
+            if not box:
+                return None
+            img = box.select_one("img")
+            src = (img.get("src") if img else None) or (img.get("data-src") if img else None)
+            if not src:
+                return None
+            # cloudfront / 其它 javbus 图床直接保留（补全相对路径）
+            if src.startswith("/"):
+                return (self.base_url.rstrip("/") + src)
+            return src
+        except Exception:
+            return None
+
     def _search(self, code: str, headers: Dict[str, str]) -> Optional[Dict[str, Any]]:
         """搜索兜底：直接详情拿不到时，用站内搜索定位真实番号再抓详情。"""
         surl = f"{self.base_url}/search/{code}"
@@ -139,6 +165,12 @@ class JavBusProvider(BaseProvider):
             cover = _best_cover(src, self.base_url) or src
             if cover:
                 meta["cover"] = cover
+        # 详情页无封面（素人/无码片常见）时，回退用搜索结果页的封面图
+        # （javbus 搜索结果的图床是 cloudfront，详情页 #cover 为空但搜索结果有图）。
+        if not meta.get("cover"):
+            scover = self._search_cover(code)
+            if scover:
+                meta["cover"] = scover
 
         rows = soup.select(".info p")
         for idx, p in enumerate(rows):

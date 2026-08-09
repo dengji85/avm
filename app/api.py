@@ -587,7 +587,8 @@ def start_scrape(payload: Dict[str, Any] = Body(default={})) -> Dict[str, Any]:
     ids = payload.get("ids")
     scope = str(payload.get("scope", "missing"))
     overwrite = payload.get("overwrite")
-    if not scraper.start_scrape_async(ids, scope, overwrite):
+    force = bool(payload.get("force", False))
+    if not scraper.start_scrape_async(ids, scope, overwrite, force=force):
         raise HTTPException(409, "已有抓取任务在执行中")
     return {"ok": True}
 
@@ -601,6 +602,161 @@ def scrape_status() -> Dict[str, Any]:
 def scrape_cancel() -> Dict[str, Any]:
     SCRAPE.cancel()
     return {"ok": True}
+
+
+@router.get("/scrape/tasks")
+def scrape_tasks(limit: int = 50) -> Dict[str, Any]:
+    """列出历史刮削任务汇总（用于日志查询页选择任务）。"""
+    with db() as conn:
+        rows = query_all(
+            conn,
+            """
+            SELECT task_id,
+                   MIN(started_at) AS started_at,
+                   COUNT(*)        AS total,
+                   SUM(CASE WHEN status='ok' THEN 1 ELSE 0 END)    AS ok,
+                   SUM(CASE WHEN status='miss' THEN 1 ELSE 0 END)   AS miss,
+                   SUM(CASE WHEN status='error' THEN 1 ELSE 0 END)  AS error,
+                   ROUND(AVG(elapsed_ms), 1)                        AS avg_ms
+            FROM scrape_logs
+            GROUP BY task_id
+            ORDER BY MAX(id) DESC
+            LIMIT ?
+            """,
+            (limit,),
+        )
+        return {"items": rows}
+
+
+@router.get("/maintenance/summary")
+def maintenance_summary() -> Dict[str, Any]:
+    """维护中心聚合数据：待办概览 + 最近一次扫描信息。"""
+    with db() as conn:
+        hc = store.health_check(conn)
+        counts = hc.get("counts", {})
+        noscrape = query_one(conn,
+            "SELECT COUNT(*) AS c FROM movies m "
+            "WHERE (m.scraped_at IS NULL OR m.scraped_at='') "
+            "AND EXISTS(SELECT 1 FROM movie_files f WHERE f.movie_id=m.id AND f.missing=0)")["c"]
+        watchlist = query_one(conn, "SELECT COUNT(*) AS c FROM movies WHERE watchlist=1")["c"]
+        total = query_one(conn, "SELECT COUNT(*) AS c FROM movies")["c"]
+        last_scan = query_one(conn,
+            "SELECT started_at, added, updated, removed FROM scan_logs ORDER BY id DESC LIMIT 1")
+        return {
+            "ok": True,
+            "total": total,
+            "noscrape": noscrape,
+            "watchlist": watchlist,
+            "missing_files": counts.get("missing_files", 0),
+            "missing_cover": counts.get("missing_cover", 0),
+            "placeholder_cover": counts.get("placeholder_cover", 0),
+            "unrecognized": counts.get("unrecognized", 0),
+            "duplicates": counts.get("duplicates", 0),
+            "split_incomplete": counts.get("split_incomplete", 0),
+            "last_scan": dict(last_scan) if last_scan else None,
+        }
+
+
+@router.get("/scrape/logs")
+def scrape_logs(task_id: str = "", status: str = "", code: str = "",
+                page: int = 1, size: int = 50) -> Dict[str, Any]:
+    """逐文件刮削日志查询：可按任务、状态、番号过滤，支持分页。
+
+    - task_id：某次刮削任务 id（来自 /scrape/status 的 task_id 或 /scrape/tasks）
+    - status ：ok | miss | error（空=全部）
+    - code   ：番号模糊搜索
+    """
+    page = max(1, int(page))
+    size = max(1, min(200, int(size)))
+    where = []
+    args: List[Any] = []
+    if task_id:
+        where.append("task_id = ?")
+        args.append(task_id)
+    if status:
+        where.append("status = ?")
+        args.append(status)
+    if code:
+        where.append("code LIKE ?")
+        args.append(f"%{code}%")
+    sql_where = ("WHERE " + " AND ".join(where)) if where else ""
+    with db() as conn:
+        total = query_one(conn, f"SELECT COUNT(*) AS n FROM scrape_logs {sql_where}", args)["n"]
+        rows = query_all(
+            conn,
+            f"""SELECT id, task_id, started_at, file_path, code, provider,
+                       status, reason, elapsed_ms, movie_id
+                FROM scrape_logs {sql_where}
+                ORDER BY id DESC LIMIT ? OFFSET ?""",
+            args + [size, (page - 1) * size],
+        )
+    return {
+        "items": rows,
+        "total": total,
+        "page": page,
+        "size": size,
+        "pages": (total + size - 1) // size if total else 0,
+    }
+
+
+@router.delete("/scrape/logs")
+def scrape_logs_delete(task_id: str = "", status: str = "") -> Dict[str, Any]:
+    """清理刮削日志。
+
+    - task_id：仅删除某次任务日志（空=不限）
+    - status ：ok | miss | error（空=全部状态）
+    两者皆空时清空整张 scrape_logs 表，请在前端二次确认。
+    """
+    where = []
+    args: List[Any] = []
+    if task_id:
+        where.append("task_id = ?")
+        args.append(task_id)
+    if status:
+        where.append("status = ?")
+        args.append(status)
+    sql_where = ("WHERE " + " AND ".join(where)) if where else ""
+    with db() as conn:
+        deleted = query_one(
+            conn, f"SELECT COUNT(*) AS n FROM scrape_logs {sql_where}", args
+        )["n"]
+        if deleted:
+            conn.execute(f"DELETE FROM scrape_logs {sql_where}", args)
+            conn.commit()
+    return {"deleted": deleted, "task_id": task_id, "status": status}
+
+
+@router.get("/scrape/skips")
+def scrape_skips() -> Dict[str, Any]:
+    """列出刮削跳过名单（已知稳定失败的影片），供维护页查看与解除。"""
+    with db() as conn:
+        rows = query_all(
+            conn,
+            """SELECT s.id, s.movie_id, s.code, s.reason, s.kind, s.count, s.auto,
+                      s.created_at, s.updated_at, m.title, m.cover
+               FROM scrape_skip s
+               LEFT JOIN movies m ON m.id = s.movie_id
+               ORDER BY s.count DESC, s.updated_at DESC""",
+        )
+    return {"items": rows, "total": len(rows)}
+
+
+@router.delete("/scrape/skips")
+def scrape_skips_delete(movie_id: int = 0) -> Dict[str, Any]:
+    """解除跳过名单。
+
+    - movie_id>0：仅解除该影片（重新纳入刮削候选）。
+    - movie_id=0 ：清空整张 scrape_skip（全部重新尝试），请前端二次确认。
+    返回解除条数。
+    """
+    with db() as conn:
+        if movie_id:
+            cur = conn.execute("DELETE FROM scrape_skip WHERE movie_id = ?", (movie_id,))
+        else:
+            cur = conn.execute("DELETE FROM scrape_skip")
+        conn.commit()
+        removed = cur.rowcount
+    return {"removed": removed, "movie_id": movie_id}
 
 
 @router.post("/reparse-codes")
@@ -883,6 +1039,30 @@ def clear_continue_watching() -> Dict[str, Any]:
 def api_list_collections() -> Dict[str, Any]:
     with db() as conn:
         return {"items": store.list_collections(conn)}
+
+
+@router.get("/tags")
+def api_list_tags() -> Dict[str, Any]:
+    with db() as conn:
+        return {"items": store.list_tags(conn)}
+
+
+@router.post("/tags/rename")
+def api_rename_tag(payload: Dict[str, Any] = Body(default={})) -> Dict[str, Any]:
+    try:
+        with db() as conn:
+            return store.rename_tag(conn, payload.get("old"), payload.get("new"))
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+
+
+@router.post("/tags/delete")
+def api_delete_tag(payload: Dict[str, Any] = Body(default={})) -> Dict[str, Any]:
+    try:
+        with db() as conn:
+            return store.delete_tag(conn, payload.get("name"))
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
 
 
 @router.post("/collections")

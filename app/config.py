@@ -88,8 +88,9 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     },
     "scraper": {
         "enabled": True,
-        # 抓取顺序，先命中的先用；可选 javbus / javdb / local_nfo / http_json / http_html
-        "order": ["javbus", "javdb", "local_nfo"],
+        # 抓取顺序，先命中的先用；可选 javbus / javdb / avwiki / local_nfo / http_json / http_html
+        # avwiki 置前：优先用其素人化名→真名映射补齐素人片元数据，封面回退到 javbus/javdb
+        "order": ["avwiki", "javbus", "javdb", "local_nfo"],
         "timeout": 20,
         # 并发抓取线程数；网络 IO 密集型，适度提高可显著加速（建议 2-8）
         "workers": 4,
@@ -111,6 +112,11 @@ DEFAULT_CONFIG: Dict[str, Any] = {
             "name": "JavDB",
             "base_url": "https://javdb.com",
             "cookie": "",
+        },
+        "avwiki": {
+            "enabled": True,
+            "name": "AV-Wiki (素人)",
+            "base_url": "https://av-wiki.net",
         },
         "http_json": {
             "enabled": False,

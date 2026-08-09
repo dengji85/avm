@@ -784,7 +784,21 @@ def continue_watching(conn: sqlite3.Connection, limit: int = 20) -> Dict[str, An
 
 
 def similar_movies(conn: sqlite3.Connection, movie_id: int, limit: int = 12) -> Dict[str, Any]:
-    """基于共演女优(权重10) / 同类型(4) / 同厂商(3) / 同系列(3) / 同导演(2) 的相似度推荐。"""
+    """基于共演女优(权重10) / 同类型(4) / 同厂商(3) / 同系列(3) / 同导演(2) 的相似度推荐。
+
+    兜底增强：即使影片未刮削（无 series_id / 女优等），只要番号可识别，仍可凭「番号前缀
+    即系列代码」(如 F2C / SSIS) 归入同系列，从而参与相似推荐——命名不同(编号不同)的同一
+    系列影片因此也能被推荐出来。
+    """
+    # 目标影片的番号前缀（大写，取 '-' 之前的部分），无番号则为空串
+    tgt_code = query_one(conn, "SELECT code FROM movies WHERE id = ?", (movie_id,))
+    tgt_prefix = ""
+    if tgt_code and tgt_code["code"]:
+        c = tgt_code["code"].upper()
+        pos = c.find("-")
+        tgt_prefix = c[:pos] if pos > 0 else c
+    has_prefix = tgt_prefix != ""
+
     score_sql = """
         WITH scored AS (
             SELECT m.id AS mid, m.created_at AS cdate,
@@ -795,14 +809,20 @@ def similar_movies(conn: sqlite3.Connection, movie_id: int, limit: int = 12) -> 
                   JOIN movie_genre mg_t ON mg_t.genre_id = mg2.genre_id
                   WHERE mg_t.movie_id = ? AND mg2.movie_id = m.id) * 4
               + (CASE WHEN m.studio_id IS NOT NULL AND m.studio_id = (SELECT studio_id FROM movies WHERE id = ?) THEN 3 ELSE 0 END)
-              + (CASE WHEN m.series_id IS NOT NULL AND m.series_id = (SELECT series_id FROM movies WHERE id = ?) THEN 3 ELSE 0 END)
+              + (CASE
+                   WHEN m.series_id IS NOT NULL AND m.series_id = (SELECT series_id FROM movies WHERE id = ?) THEN 3
+                   WHEN ? = 1 AND m.has_code = 1 THEN
+                     (CASE WHEN substr(UPPER(m.code), 1, CASE WHEN instr(UPPER(m.code), '-') > 1 THEN instr(UPPER(m.code), '-') - 1 ELSE length(m.code) END) = ? THEN 3 ELSE 0 END)
+                   ELSE 0 END)
               + (CASE WHEN m.director <> '' AND m.director = (SELECT director FROM movies WHERE id = ?) THEN 2 ELSE 0 END) AS score
             FROM movies m
             WHERE m.id <> ?
         )
         SELECT mid, score FROM scored WHERE score > 0 ORDER BY score DESC, cdate DESC LIMIT ?
     """
-    rows = query_all(conn, score_sql, [movie_id] * 5 + [movie_id, limit])
+    # 参数顺序: 女优?, 类型?, studio?, series?, has_prefix?, prefix?, 导演?, id, limit
+    rows = query_all(conn, score_sql,
+                     [movie_id, movie_id, movie_id, movie_id, (1 if has_prefix else 0), tgt_prefix, movie_id, movie_id, limit])
     ids = [r["mid"] for r in rows]
     if not ids:
         return {"items": [], "total": 0}
@@ -970,7 +990,7 @@ def facets(conn: sqlite3.Connection, limit: int = 300) -> Dict[str, Any]:
             "ORDER BY count DESC, t.name LIMIT ?"),
         "years": query_all(
             conn,
-            "SELECT year, COUNT(*) AS count FROM movies WHERE year IS NOT NULL "
+            "SELECT year AS name, year, COUNT(*) AS count FROM movies WHERE year IS NOT NULL "
             "GROUP BY year ORDER BY year DESC"),
         "prefixes": query_all(
             conn,
@@ -1006,7 +1026,7 @@ def actress_wall(conn: sqlite3.Connection, q: str = "", sort: str = "count",
 
 
 def storage_stats(conn):
-    """磁盘占用分布：按盘符、厂商、年份，以及整体汇总。"""
+    """磁盘占用分布：按盘符、厂商、年份、文件类型，最大文件，以及整体汇总。"""
     by_disk = conn.execute(
         "SELECT substr(f.path, 1, 3) AS drive, COUNT(*) AS files, "
         "SUM(f.size) AS bytes, COUNT(DISTINCT f.movie_id) AS movies "
@@ -1024,6 +1044,26 @@ def storage_stats(conn):
         "FROM movies m JOIN movie_files f ON f.movie_id = m.id AND f.missing = 0 "
         "GROUP BY year ORDER BY year DESC LIMIT 15"
     ).fetchall()
+    by_ext = conn.execute(
+        "SELECT COALESCE(NULLIF(f.ext, ''), '未知') AS ext, "
+        "COUNT(*) AS files, SUM(f.size) AS bytes "
+        "FROM movie_files f WHERE f.missing = 0 GROUP BY ext ORDER BY bytes DESC"
+    ).fetchall()
+    by_genre = conn.execute(
+        "SELECT COALESCE(g.name, '未分类') AS genre, "
+        "COUNT(DISTINCT m.id) AS movies, SUM(f.size) AS bytes "
+        "FROM movies m "
+        "JOIN movie_files f ON f.movie_id = m.id AND f.missing = 0 "
+        "LEFT JOIN movie_genre mg ON mg.movie_id = m.id "
+        "LEFT JOIN genres g ON g.id = mg.genre_id "
+        "GROUP BY g.id ORDER BY bytes DESC LIMIT 15"
+    ).fetchall()
+    largest = conn.execute(
+        "SELECT f.id AS file_id, f.size AS bytes, f.filename, f.ext, f.movie_id, "
+        "COALESCE(NULLIF(m.title, ''), m.code, '#' || m.id) AS movie_name "
+        "FROM movie_files f JOIN movies m ON m.id = f.movie_id "
+        "WHERE f.missing = 0 ORDER BY f.size DESC LIMIT 8"
+    ).fetchall()
     total = conn.execute(
         "SELECT COUNT(*) AS movies, SUM(file_count) AS files, SUM(size) AS bytes FROM movies"
     ).fetchone()
@@ -1031,6 +1071,9 @@ def storage_stats(conn):
         "by_disk": [dict(r) for r in by_disk],
         "by_studio": [dict(r) for r in by_studio],
         "by_year": [dict(r) for r in by_year],
+        "by_ext": [dict(r) for r in by_ext],
+        "by_genre": [dict(r) for r in by_genre],
+        "largest": [dict(r) for r in largest],
         "total": dict(total),
     }
 
@@ -1122,6 +1165,10 @@ def stats(conn: sqlite3.Connection) -> Dict[str, Any]:
             conn,
             "SELECT g.name, COUNT(*) AS count FROM movie_genre mg "
             "JOIN genres g ON g.id = mg.genre_id GROUP BY g.id ORDER BY count DESC LIMIT 16"),
+        "top_series": query_all(
+            conn,
+            "SELECT se.name, COUNT(*) AS count FROM movies m "
+            "JOIN series se ON se.id = m.series_id GROUP BY se.id ORDER BY count DESC LIMIT 12"),
         "by_year": query_all(
             conn,
             "SELECT year, COUNT(*) AS count FROM movies WHERE year IS NOT NULL "
@@ -1329,6 +1376,59 @@ def stats_enhanced(conn: sqlite3.Connection) -> Dict[str, Any]:
         "runtime_by_year": [dict(r) for r in runtime_by_year],
         "watch_calendar": [dict(r) for r in watch_calendar],
     }
+
+
+# ----------------------------------------------------------------- 标签字典（已有标签）
+def list_tags(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
+    """返回所有已存在的标签及其使用次数，用于详情页标签输入建议。"""
+    rows = conn.execute(
+        "SELECT t.id AS id, t.name AS name, COUNT(mt.movie_id) AS count "
+        "FROM tags t LEFT JOIN movie_tag mt ON mt.tag_id = t.id "
+        "GROUP BY t.id ORDER BY count DESC, t.name"
+    ).fetchall()
+    return [{"id": r["id"], "name": r["name"], "count": r["count"]} for r in rows]
+
+
+def rename_tag(conn: sqlite3.Connection, old_name: str, new_name: str) -> Dict[str, Any]:
+    """重命名标签；若新名称已存在则合并（旧标签关联并入新标签并删除旧条目）。"""
+    old_name = (old_name or "").strip()
+    new_name = (new_name or "").strip()
+    if not old_name or not new_name:
+        raise ValueError("标签名不能为空")
+    if old_name == new_name:
+        return {"ok": True, "merged": False}
+    old = conn.execute("SELECT id FROM tags WHERE name=?", (old_name,)).fetchone()
+    if not old:
+        raise ValueError("原标签不存在")
+    old_id = old["id"]
+    new = conn.execute("SELECT id FROM tags WHERE name=?", (new_name,)).fetchone()
+    if new:
+        new_id = new["id"]
+        # 合并：旧标签关联改指新标签（去重）
+        conn.execute(
+            "UPDATE OR IGNORE movie_tag SET tag_id=? WHERE tag_id=? "
+            "AND movie_id NOT IN (SELECT movie_id FROM movie_tag WHERE tag_id=?)",
+            (new_id, old_id, new_id),
+        )
+        conn.execute("DELETE FROM movie_tag WHERE tag_id=?", (old_id,))
+        conn.execute("DELETE FROM tags WHERE id=?", (old_id,))
+        return {"ok": True, "merged": True, "into": new_name}
+    conn.execute("UPDATE tags SET name=? WHERE id=?", (new_name, old_id))
+    return {"ok": True, "merged": False}
+
+
+def delete_tag(conn: sqlite3.Connection, name: str) -> Dict[str, Any]:
+    """删除标签及其全部影片关联。"""
+    name = (name or "").strip()
+    if not name:
+        raise ValueError("标签名不能为空")
+    row = conn.execute("SELECT id FROM tags WHERE name=?", (name,)).fetchone()
+    if not row:
+        raise ValueError("标签不存在")
+    tid = row["id"]
+    conn.execute("DELETE FROM movie_tag WHERE tag_id=?", (tid,))
+    conn.execute("DELETE FROM tags WHERE id=?", (tid,))
+    return {"ok": True}
 
 
 # ----------------------------------------------------------------- 预览图墙（ffmpeg 抽帧）

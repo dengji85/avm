@@ -23,7 +23,7 @@ SUBCOMMANDS = {"scan", "dedupe", "stats", "export", "organize", "serve"}
 def main() -> int:
     argv = sys.argv[1:]
     if not argv or argv[0] not in SUBCOMMANDS:
-        # 没有子命令时，把 --port/--no-browser 等参数当作 serve 的参数
+        # 无论开发还是打包，默认都走控制台 serve 模式（有日志输出，Ctrl+C 退出）
         argv = ["serve"] + argv
     return cli_main(argv)
 

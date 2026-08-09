@@ -132,7 +132,7 @@ def find_local_cover(video_path: str | Path, code: str = "") -> Optional[Path]:
         return None
 
 
-def download(url: str, cfg: Dict[str, Any]) -> Optional[bytes]:
+def download(url: str, cfg: Dict[str, Any], referer: str = "") -> Optional[bytes]:
     if not url or not url.lower().startswith(("http://", "https://")):
         return None
     try:
@@ -142,11 +142,18 @@ def download(url: str, cfg: Dict[str, Any]) -> Optional[bytes]:
     scraper = cfg.get("scraper", {})
     proxy = scraper.get("proxy") or ""
     proxies = {"http": proxy, "https": proxy} if proxy else None
+    # 默认 Referer 用自身；部分图床（如 javbus cloudfront）需要来源站首页防盗链，
+    # 可由调用方显式传入 referer 覆盖。
+    ref = referer or url
+    low_url = url.lower()
+    # javbus 搜索结果图床（cloudfront）需带 javbus referer 防盗链
+    if "cloudfront.net" in low_url and not referer:
+        ref = "https://www.javbus.com/"
     try:
         resp = requests.get(
             url,
             timeout=cfg.get("cover", {}).get("timeout", 20),
-            headers={"User-Agent": scraper.get("user_agent", "Mozilla/5.0"), "Referer": url},
+            headers={"User-Agent": scraper.get("user_agent", "Mozilla/5.0"), "Referer": ref},
             proxies=proxies,
         )
         resp.raise_for_status()

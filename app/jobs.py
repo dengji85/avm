@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import threading
 import time
+import uuid
 from typing import Any, Dict, List
 
 
@@ -27,6 +28,7 @@ class Job:
             self.message = ""
             self.started_at = 0.0
             self.ended_at = 0.0
+            self.task_id = uuid.uuid4().hex
 
     def start(self) -> bool:
         with self._lock:
@@ -115,6 +117,7 @@ class Job:
                 ],
                 "message": self.message,
                 "elapsed": round(elapsed, 1),
+                "task_id": self.task_id,
             }
 
 

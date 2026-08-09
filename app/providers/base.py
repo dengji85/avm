@@ -14,6 +14,14 @@ FIELDS = (
 )
 
 
+class NetBlocked(Exception):
+    """数据源返回了反爬/人机验证页（如 Cloudflare、av-wiki 的 Loader 验证）。
+
+    这不是「影片不存在」，而是临时性的访问拦截；应当归类为网络错误（不进
+    跳过名单、可重试），而不是当作稳定 missing 污染 scrape_skip。
+    """
+
+
 class BaseProvider:
     name: str = "base"
     label: str = "基础数据源"
@@ -75,6 +83,18 @@ class BaseProvider:
             merged["Referer"] = origin + "/"
         merged.update(self.options.get("headers") or {})
         merged.update(headers or {})
+        # 数据源级 Cookie：用于绕过 av-wiki / JavBus 等站点的反爬验证页。
+        # 支持两种写法：直接的 "k=v; k2=v2" 字符串，或已解析好的 dict。
+        raw_cookie = self.options.get("cookie") or self.options.get("cookies") or ""
+        cookie_dict: Optional[Dict[str, str]] = None
+        if isinstance(raw_cookie, dict):
+            cookie_dict = raw_cookie
+        elif isinstance(raw_cookie, str) and raw_cookie.strip():
+            cookie_dict = {}
+            for part in raw_cookie.split(";"):
+                if "=" in part:
+                    k, v = part.split("=", 1)
+                    cookie_dict[k.strip()] = v.strip()
         retries = int(self.scfg.get("retries", 3)) or 1
         last_exc: Exception = None
         for attempt in range(retries):
@@ -83,6 +103,7 @@ class BaseProvider:
                     url,
                     timeout=self.timeout,
                     headers=merged,
+                    cookies=cookie_dict,
                     proxies={"http": proxy, "https": proxy} if proxy else None,
                     verify=False,
                 )
@@ -115,6 +136,9 @@ def detect_blocker(html: str) -> str:
         return "Cloudflare 人机验证页（需填 cf_clearance Cookie）"
     if "driver-verify" in low or "age verification" in low:
         return "JavBus 自带的 driver-verify / 年龄验证页（需粘贴浏览器整段 Cookie）"
+    # av-wiki.net 的 Loader 验证页：标题「请稍候…」+ 正文「Loader 正在验证您的请求」
+    if ("loader" in low and "正在验证" in html) or "请稍候" in html or "正在验证您的请求" in html:
+        return "av-wiki 反爬验证页（Loader 正在验证您的请求），需等待放行或带 Cookie"
     return ""
 
 def _normalize_meta(meta: Dict[str, Any], source: str) -> MetaResult:

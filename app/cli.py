@@ -172,6 +172,8 @@ def cmd_serve(args) -> int:
     import uvicorn
     url = f"http://{args.host}:{args.port}/"
     print(f"片匣已启动： {url}")
+    print("浏览器已自动打开；如需手动访问，复制上面的地址到浏览器。")
+    print("按 Ctrl+C 退出服务。")
     if not args.no_browser:
         threading.Timer(1.5, lambda: webbrowser.open(url)).start()
     uvicorn.run(app, host=args.host, port=args.port, reload=args.reload, log_level="info")
@@ -193,7 +195,7 @@ def build_parser() -> argparse.ArgumentParser:
     po.add_argument("--root", required=True, help="整理目标根目录")
     po.add_argument("--template", default="{studio}/{code} {title}", help="目录模板，支持 {studio}/{code}/{title}/{prefix}")
     po.add_argument("--apply", action="store_true", help="真正移动文件（默认仅预览）")
-    pv = sub.add_parser("serve", help="启动 Web 服务（默认子命令）")
+    pv = sub.add_parser("serve", help="启动 Web 服务（控制台模式）")
     pv.add_argument("--host", default="127.0.0.1")
     pv.add_argument("--port", type=int, default=8770)
     pv.add_argument("--no-browser", action="store_true", help="不自动打开浏览器")

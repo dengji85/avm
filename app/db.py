@@ -111,6 +111,42 @@ CREATE TABLE IF NOT EXISTS scan_logs (
     message    TEXT DEFAULT ''
 );
 
+-- 刮削逐文件执行日志：记录每个文件/番号的刮削结果，便于查询与定位失败原因
+CREATE TABLE IF NOT EXISTS scrape_logs (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id    TEXT NOT NULL,                       -- 刮削任务标识（与 jobs 快照 key 对应）
+    started_at TEXT DEFAULT (datetime('now','localtime')),
+    file_path  TEXT DEFAULT '',
+    code       TEXT DEFAULT '',                     -- 解析出的番号
+    provider   TEXT DEFAULT '',                     -- 使用的刮削源
+    status     TEXT DEFAULT 'ok',                   -- ok | miss | error
+    reason     TEXT DEFAULT '',                     -- 失败/未命中原因
+    elapsed_ms INTEGER DEFAULT 0,                   -- 单文件耗时（毫秒）
+    movie_id   INTEGER                              -- 命中后写入的影片 id（可选）
+);
+
+CREATE INDEX IF NOT EXISTS idx_sl_task    ON scrape_logs(task_id);
+CREATE INDEX IF NOT EXISTS idx_sl_status  ON scrape_logs(status);
+CREATE INDEX IF NOT EXISTS idx_sl_code    ON scrape_logs(code);
+CREATE INDEX IF NOT EXISTS idx_sl_started ON scrape_logs(started_at);
+
+-- 刮削「跳过名单」：沉淀已知稳定失败的影片，下次刮削自动跳过，避免反复重试浪费时间。
+-- 与 scrape_logs 的区别：logs 是历史流水，skip 是当前生效的「黑名单」。
+-- auto=1 表示由系统根据日志自动加入；auto=0 表示用户手动锁定（更不应被自动移除）。
+CREATE TABLE IF NOT EXISTS scrape_skip (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    movie_id   INTEGER NOT NULL UNIQUE,
+    code       TEXT DEFAULT '',
+    reason     TEXT DEFAULT '',
+    kind       TEXT DEFAULT 'miss',        -- miss | error：失败性质
+    count      INTEGER DEFAULT 1,          -- 连续失败次数
+    auto       INTEGER DEFAULT 1,          -- 1=系统自动加入 0=用户手动
+    created_at TEXT DEFAULT (datetime('now','localtime')),
+    updated_at TEXT DEFAULT (datetime('now','localtime'))
+);
+CREATE INDEX IF NOT EXISTS idx_ss_movie   ON scrape_skip(movie_id);
+CREATE INDEX IF NOT EXISTS idx_ss_code    ON scrape_skip(code);
+
 CREATE INDEX IF NOT EXISTS idx_movies_code    ON movies(code);
 CREATE INDEX IF NOT EXISTS idx_movies_year    ON movies(year);
 CREATE INDEX IF NOT EXISTS idx_movies_studio  ON movies(studio_id);

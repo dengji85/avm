@@ -3,17 +3,29 @@
 from __future__ import annotations
 
 import os
+import tempfile
 import threading
+from itertools import islice
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed, wait, FIRST_COMPLETED
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+try:
+    from requests.exceptions import (
+        Timeout, ConnectionError as ReqConnectionError, ConnectTimeout,
+        ChunkedEncodingError, HTTPError,
+    )
+    _HAS_REQ = True
+except Exception:  # requests 不可用（极少见）时退化为宽松判断
+    _HAS_REQ = False
 
 from . import images, store
 from .config import load_config, avatar_dir
 from .db import connect, query_all
 from .jobs import SCRAPE
 from .providers import build_providers
+from .providers.base import NetBlocked
 
 # 抓取结果里可以直接写回影片表的文本字段
 _TEXT_FIELDS = ("title", "original_title", "plot", "release_date", "director")
@@ -21,6 +33,28 @@ _TEXT_FIELDS = ("title", "original_title", "plot", "release_date", "director")
 
 def _is_empty(value: Any) -> bool:
     return value in (None, "", 0, 0.0)
+
+
+def _classify_error(exc: BaseException) -> str:
+    """把一个数据源异常归类为三类之一，决定它是否写进跳过名单。
+
+    - 'net'  : 临时网络/服务端错误（超时、连接失败、5xx）。下次很可能成功，不该跳过。
+    - 'miss' : 明确无此片（HTTP 4xx）。数据源稳定没有，跳过可省时间。
+    - 'err'  : 其它异常（解析崩溃、字段错误等）。通常稳定失败，计入跳过更省心。
+    """
+    if not _HAS_REQ:
+        return "err"
+    if isinstance(exc, NetBlocked):
+        # 反爬/人机验证页拦截：临时性访问受阻，下次可能放行，不应跳过。
+        return "net"
+    if isinstance(exc, (Timeout, ReqConnectionError, ConnectTimeout, ChunkedEncodingError)):
+        return "net"
+    if isinstance(exc, HTTPError):
+        code = getattr(getattr(exc, "response", None), "status_code", None)
+        if isinstance(code, int) and 500 <= code < 600:
+            return "net"
+        return "miss"  # 4xx：源确实没有这部
+    return "err"
 
 
 def apply_metadata(conn, movie_id: int, meta: Dict[str, Any], cfg: Dict[str, Any],
@@ -175,23 +209,136 @@ def cache_remote_avatars(conn, cfg: Dict[str, Any] | None = None) -> Dict[str, i
 
 
 
+def _prefetch_images(meta: Optional[Dict[str, Any]], cfg: Dict[str, Any]):
+    """把 meta 中的远程图片 URL 预下载为本地临时文件。
+
+    返回 (meta副本, tmp_files)。批量并行时由 worker 调用，主线程据此把临时
+    文件路径交给 apply_metadata（走 save_local_file，不再联网）。临时文件在
+    主线程写库完成后续删。
+    """
+    if not meta:
+        return meta, []
+    m = dict(meta)
+    tmp: List[str] = []
+
+    def _dl(field: str) -> None:
+        url = m.get(field)
+        if isinstance(url, str) and url.lower().startswith(("http://", "https://")):
+            data = images.download(url, cfg)
+            if data:
+                base, ext = os.path.splitext(url.split("?")[0])
+                suf = ext.lower() if ext.lower() in (".jpg", ".jpeg", ".png", ".webp", ".gif") else ".jpg"
+                fd, path = tempfile.mkstemp(suffix=suf)
+                with os.fdopen(fd, "wb") as fh:
+                    fh.write(data)
+                tmp.append(path)
+                m[field] = path
+
+    _dl("cover")
+    _dl("background")
+    _dl("fanart")
+    for av in (m.get("actresses") or []):
+        if isinstance(av, dict) and isinstance(av.get("image"), str) \
+                and av["image"].lower().startswith(("http://", "https://")):
+            url = av["image"]
+            data = images.download(url, cfg)
+            if data:
+                base, ext = os.path.splitext(url.split("?")[0])
+                suf = ext.lower() if ext.lower() in (".jpg", ".jpeg", ".png", ".webp", ".gif") else ".jpg"
+                fd, path = tempfile.mkstemp(suffix=suf)
+                with os.fdopen(fd, "wb") as fh:
+                    fh.write(data)
+                tmp.append(path)
+                av["image"] = path
+    return m, tmp
+
+
 def scrape_one(conn, movie_id: int, providers: List[Any], cfg: Dict[str, Any],
                overwrite: bool = False) -> Dict[str, Any]:
+    """单部刮削（供 API 单部补头像 / 单部抓取）。在主线程同步抓 + 写库。"""
     movie = store.movie_detail(conn, movie_id)
     if not movie:
         return {"ok": False, "reason": "影片不存在"}
     if not providers:
         return {"ok": False, "reason": "没有启用任何元数据源"}
+    if SCRAPE.cancelled:
+        return {"ok": False, "reason": "cancelled"}
 
+    primary_meta = None
+    primary_name = None
     for provider in providers:
         try:
             meta = provider.fetch(movie)
         except Exception as exc:
             return {"ok": False, "reason": f"{provider.name} 出错: {exc}"}
-        if meta:
-            result = apply_metadata(conn, movie_id, meta, cfg, overwrite)
-            return {"ok": True, "provider": provider.name, **result}
-    return {"ok": False, "reason": "所有数据源均未命中"}
+        if not meta:
+            continue
+        if primary_meta is None:
+            # 第一个命中的源作为主源，写入全部元数据
+            primary_meta = meta
+            primary_name = provider.name
+            continue
+        # 后续源：若主源缺封面，用后续源补齐封面（不覆盖已写入的文本字段）
+        if not primary_meta.get("cover") and meta.get("cover"):
+            primary_meta = dict(primary_meta)
+            primary_meta["cover"] = meta["cover"]
+            primary_meta["source"] = f"{primary_name}+{provider.name}"
+
+    if primary_meta is None:
+        return {"ok": False, "reason": "所有数据源均未命中"}
+    try:
+        result = apply_metadata(conn, movie_id, primary_meta, cfg, overwrite)
+    except Exception:
+        conn.rollback()
+        raise
+    conn.commit()
+    return {"ok": True, "provider": primary_name, **result}
+
+
+def scrape_one_parallel(movie: Dict[str, Any], providers: List[Any], cfg: Dict[str, Any],
+                        overwrite: bool = False) -> Dict[str, Any]:
+    """批量并行版：worker 线程内执行，不碰数据库。
+
+    职责：抓取元数据 + 预下载图片到本地临时文件。返回结构化结果，由主线程
+    （唯一写者）写库。单源失败不影响整体，交后续源 / 回退处理。
+
+    结果多了一个 neterr 标记：当所有源都因临时网络/服务端错误失败时置位，
+    主线程据此**不**把该影片写进跳过名单（下次重跑仍可能成功）。
+    """
+    if SCRAPE.cancelled:
+        return {"cancelled": True, "movie_id": movie.get("id"), "code": movie.get("code")}
+    primary_meta = None
+    primary_name = None
+    net_err = False  # 是否存在「临时网络/服务端错误」源
+    try:
+        for provider in providers:
+            try:
+                meta = provider.fetch(movie)
+            except Exception as exc:
+                # 单源异常：分类后继续后续源（异常隔离）
+                if _classify_error(exc) == "net":
+                    net_err = True
+                continue
+            if not meta:
+                continue
+            if primary_meta is None:
+                primary_meta = meta
+                primary_name = provider.name
+                continue
+            if not primary_meta.get("cover") and meta.get("cover"):
+                primary_meta = dict(primary_meta)
+                primary_meta["cover"] = meta["cover"]
+                primary_meta["source"] = f"{primary_name}+{provider.name}"
+
+        if primary_meta is None:
+            # 没有命中：若是网络/服务端临时错误导致，标记 neterr（不进跳过名单）
+            return {"miss": True, "neterr": net_err,
+                    "movie_id": movie.get("id"), "code": movie.get("code")}
+        m, tmp = _prefetch_images(primary_meta, cfg)
+        return {"movie_id": movie.get("id"), "code": movie.get("code"),
+                "meta": m, "tmp": tmp, "provider": primary_name}
+    except Exception as exc:  # 整体兜底，绝不抛出到 future 外
+        return {"error": str(exc)[:300], "movie_id": movie.get("id"), "code": movie.get("code")}
 
 
 def sniff_local_cover(conn, movie_id: int, cfg: Dict[str, Any]) -> Optional[str]:
@@ -208,92 +355,239 @@ def sniff_local_cover(conn, movie_id: int, cfg: Dict[str, Any]) -> Optional[str]
 # ----------------------------------------------------------------- 批量任务
 
 
-def _target_ids(conn, ids: Optional[List[int]], scope: str) -> List[int]:
+def _target_ids(conn, ids: Optional[List[int]], scope: str,
+                skip_ids: Optional[set] = None) -> List[int]:
+    """返回本次要刮削的影片 id 列表。
+
+    skip_ids：来自 scrape_skip 的「已知稳定失败」影片集合。命中其中的项默认
+    被排除（scope='all' 也排除），除非调用方显式传入 force（此时 skip_ids 应为
+    None）。排除用 LEFT JOIN，避免大 IN 列表，也更直观。
+    """
     if ids:
         return [int(i) for i in ids]
+    skip_join = ""
+    skip_where = ""
+    params: List[Any] = []
+    if skip_ids:
+        skip_join = "LEFT JOIN scrape_skip ss ON ss.movie_id = movies.id"
+        skip_where = " AND ss.movie_id IS NULL"
     if scope == "all":
-        sql = "SELECT id FROM movies WHERE has_code = 1 ORDER BY id"
+        sql = f"SELECT movies.id AS mid FROM movies {skip_join} WHERE has_code = 1{skip_where} ORDER BY mid"
     elif scope == "nocover":
-        sql = "SELECT id FROM movies WHERE has_code = 1 AND cover = '' ORDER BY id"
-    else:  # missing：只处理还没抓过的
-        sql = "SELECT id FROM movies WHERE has_code = 1 AND scraped_at = '' ORDER BY id"
-    return [r["id"] for r in query_all(conn, sql)]
+        sql = f"SELECT movies.id AS mid FROM movies {skip_join} WHERE has_code = 1 AND cover = ''{skip_where} ORDER BY mid"
+    elif scope == "retry":
+        # 只重跑被跳过名单里的项（用于「强制重跑失败项」）
+        sql = "SELECT movie_id AS mid FROM scrape_skip ORDER BY mid"
+        return [r["mid"] for r in query_all(conn, sql)]
+    else:  # missing：只处理还没抓过的（且不在跳过名单）
+        sql = (f"SELECT movies.id AS mid FROM movies {skip_join} "
+               f"WHERE has_code = 1 AND scraped_at = ''{skip_where} ORDER BY mid")
+    return [r["mid"] for r in query_all(conn, sql, params)]
 
 
 def run_scrape(ids: Optional[List[int]] = None, scope: str = "missing",
-               overwrite: Optional[bool] = None) -> Dict[str, Any]:
+               overwrite: Optional[bool] = None, task_id: str = "",
+               force: bool = False) -> Dict[str, Any]:
     cfg = load_config(refresh=True)
     if overwrite is None:
         overwrite = bool(cfg["scraper"].get("overwrite", False))
     providers = build_providers(cfg)
     delay = max(0, int(cfg["scraper"].get("delay_ms", 0))) / 1000.0
+    auto_local = bool(cfg["cover"].get("auto_local", True))
+
+    def _touch_skip(conn, mid: int, code: str, reason: str, kind: str) -> None:
+        """稳定失败时把影片加进跳过名单（累计失败次数）；已存在则 +1。"""
+        try:
+            conn.execute(
+                """INSERT INTO scrape_skip (movie_id, code, reason, kind, count, auto, updated_at)
+                       VALUES (?,?,?,?,1,1,datetime('now','localtime'))
+                   ON CONFLICT(movie_id) DO UPDATE SET
+                       reason=excluded.reason, kind=excluded.kind, count=count+1,
+                       updated_at=datetime('now','localtime')""",
+                (mid, code or "", reason[:300], kind),
+            )
+        except Exception as exc:
+            SCRAPE.error(f"更新跳过名单失败：{exc}")
+
+    def _clear_skip(conn, mid: int) -> None:
+        """刮削成功后从跳过名单移除（自愈）。"""
+        try:
+            conn.execute("DELETE FROM scrape_skip WHERE movie_id = ?", (mid,))
+        except Exception:
+            pass
+
+    def _log_row(conn, mid, label, code, provider, status, reason, elapsed_ms, ok):
+        """把单部结果写入持久化刮削日志（主线程唯一写者负责）。"""
+        try:
+            fpath = ""
+            frows = query_all(conn, "SELECT path FROM movie_files WHERE movie_id = ? LIMIT 1", (mid,))
+            if frows:
+                fpath = frows[0]["path"]
+            conn.execute(
+                """INSERT INTO scrape_logs
+                       (task_id, file_path, code, provider, status, reason, elapsed_ms, movie_id)
+                       VALUES (?,?,?,?,?,?,?,?)""",
+                (task_id, fpath, code or "", provider, status, reason[:500], int(elapsed_ms), mid if ok else None),
+            )
+        except Exception as log_exc:
+            SCRAPE.error(f"写入刮削日志失败：{log_exc}")
 
     conn = connect()
     try:
-        targets = _target_ids(conn, ids, scope)
+        # 跳过名单：除非 force（强制全量重跑）或显式指定 ids，否则默认排除已知稳定失败项。
+        skip_ids = None
+        if not force and not ids and scope != "retry":
+            try:
+                skip_ids = {r["movie_id"] for r in
+                            query_all(conn, "SELECT movie_id FROM scrape_skip")}
+            except Exception:
+                skip_ids = None
+        targets = _target_ids(conn, ids, scope, skip_ids)
         SCRAPE.total = len(targets)
         SCRAPE.phase = "scraping"
         if not providers:
             SCRAPE.message = "没有启用任何元数据源，请先到「设置」中配置"
             return {"ok": False, "reason": "no_provider"}
+        if not targets:
+            SCRAPE.message = "没有需要刮削的影片"
+            return {"ok": True, "success": 0, "miss": 0, "cancelled": False}
         SCRAPE.message = f"待处理 {len(targets)} 部，数据源：{', '.join(p.name for p in providers)}"
 
-        # 并发抓取：每个 worker 使用独立 SQLite 连接，避免跨线程共用。
         workers = max(1, int(cfg["scraper"].get("workers", 4)))
-        # 全局限速：把总间隔均摊到各 worker，整体吞吐约提升 workers 倍。
         per_worker_delay = delay / workers if delay else 0.0
 
-        def _job(mid: int) -> Dict[str, Any]:
-            lc = connect()
-            try:
-                if SCRAPE.cancelled:
-                    return {"ok": False, "reason": "cancelled", "mid": mid}
-                res = scrape_one(lc, mid, providers, cfg, overwrite)
-                # 数据源没给封面时，兜底找一次本地图
-                if cfg["cover"].get("auto_local", True):
-                    cur = lc.execute("SELECT cover FROM movies WHERE id = ?", (mid,)).fetchone()
-                    if cur and not cur["cover"] and sniff_local_cover(lc, mid, cfg):
-                        res = dict(res)
-                        res["cover_local"] = True
-                if per_worker_delay:
-                    time.sleep(per_worker_delay)
-                return res
-            finally:
-                lc.close()
+        def _process(mid: int, res: Dict[str, Any], t0: float) -> None:
+            """在主线程（唯一写者）消费一个 worker 的结果：写库 + 记日志。"""
+            row = conn.execute("SELECT code, title, key FROM movies WHERE id = ?", (mid,)).fetchone()
+            label = (row["code"] or row["title"]) if row else str(mid)
+            code = row["code"] if row else ""
+            elapsed_ms = (time.monotonic() - t0) * 1000
+            provider = res.get("source") or res.get("provider") or ""
 
-        done = 0
-        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="scrape") as pool:
-            futs = {pool.submit(_job, mid): mid for mid in targets}
-            for fut in as_completed(futs):
-                mid = futs[fut]
-                done += 1
-                try:
-                    res = fut.result()
-                except Exception as exc:
-                    res = {"ok": False, "reason": f"异常: {exc}", "mid": mid}
-                row = conn.execute("SELECT code, title FROM movies WHERE id = ?", (mid,)).fetchone()
-                label = (row["code"] or row["title"]) if row else str(mid)
-                if res.get("ok"):
+            try:
+                if res.get("cancelled"):
+                    status, reason, ok = "miss", "已取消", False
+                elif res.get("error"):
+                    status, reason, ok = "error", res["error"], False
+                elif res.get("miss"):
+                    # 网络/服务端临时错误导致的整体未命中：不进跳过名单，下次仍可重试
+                    if res.get("neterr"):
+                        status, reason, ok = "miss", "数据源临时网络/服务端错误", False
+                    else:
+                        status, reason, ok = "miss", "所有数据源均未命中", False
+                elif "meta" in res:
+                    # 命中：主线程写库（单写者，封面已是本地临时文件，走 save_local_file 不联网）
+                    meta = res["meta"]
+                    ok = False
+                    try:
+                        ares = apply_metadata(conn, mid, meta, cfg, overwrite)
+                        ok = True
+                        reason = "成功"
+                        status = "ok"
+                        if "cover" in (ares.get("changed") or []):
+                            SCRAPE.bump("cover")
+                        # 数据源没给封面时，主线程兜底找一次本地图
+                        if auto_local and not meta.get("cover"):
+                            if sniff_local_cover(conn, mid, cfg):
+                                SCRAPE.bump("cover_local")
+                                ares.setdefault("cover_local", True)
+                    except Exception as exc:
+                        ok = False
+                        status, reason = "error", f"写库异常: {exc}"
+                        conn.rollback()
+                    finally:
+                        # 无论成败都清理 worker 落盘的临时图片文件
+                        for tp in (res.get("tmp") or []):
+                            try:
+                                os.remove(tp)
+                            except Exception:
+                                pass
+                else:
+                    status, reason, ok = "miss", res.get("reason") or "未命中", False
+
+                # 维护跳过名单：命中=自愈移除；稳定失败=沉淀进名单（临时网络错误例外）。
+                if ok:
+                    _clear_skip(conn, mid)
+                elif status == "ok":
+                    pass
+                elif res.get("neterr") and res.get("miss"):
+                    pass  # 临时错误不进名单
+                elif status in ("miss", "error"):
+                    if "取消" in reason:
+                        pass  # 取消导致的未命中不沉淀
+                    else:
+                        kind = "error" if status == "error" else "miss"
+                        _touch_skip(conn, mid, code, reason, kind)
+
+                if ok:
                     SCRAPE.bump("success")
-                    if "cover" in (res.get("changed") or []):
-                        SCRAPE.bump("cover")
-                    if res.get("cover_local"):
-                        SCRAPE.bump("cover_local")
                 else:
                     SCRAPE.counters.setdefault("reasons", {})
-                    reason = (res.get("reason") or "未知原因")
                     SCRAPE.counters["reasons"][reason] = SCRAPE.counters["reasons"].get(reason, 0) + 1
-                    # 真正的异常（接口报错/超时）记为 error 级别，便于前端区分「刮削失败」与「未刮到」
-                    if str(reason).startswith("异常") or res.get("error"):
+                    if status == "error":
                         SCRAPE.bump("fail")
                         SCRAPE.error(f"{label}：{reason}")
                     else:
                         SCRAPE.bump("miss")
-                        SCRAPE.log(f"{label}：{reason}", "warn", code=row["code"] if row else "")
+                        SCRAPE.log(f"{label}：{reason}", "warn", code=code)
+                _log_row(conn, mid, label, code, provider, status, reason, elapsed_ms, ok)
+                conn.commit()
+            finally:
                 SCRAPE.tick(label)
-                # 周期性提交主线程连接（仅用于读取 row，提交开销极小）
-                if done % 20 == 0:
-                    conn.commit()
+
+        done = 0
+        cancelled = False
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="scrape") as pool:
+            # 分批提交，每批前检查取消；取消后不再提交剩余、且果断停止收集在途结果。
+            it = iter(targets)
+            batch = list(islice(it, workers))
+            pending = {}
+            while batch and not cancelled:
+                for mid in batch:
+                    if SCRAPE.cancelled:
+                        cancelled = True
+                        break
+                    t0 = time.monotonic()
+                    fut = pool.submit(scrape_one_parallel, store.movie_detail(conn, mid), providers, cfg, overwrite)
+                    pending[fut] = (mid, t0)
+                    if per_worker_delay:
+                        time.sleep(per_worker_delay)
+                # 收集本批结果：用 wait(timeout) 周期轮询，保证取消信号在 ~0.5s 内响应，
+                # 不被卡在网络阻塞的 worker 长时间挂起（线程无法强制中断，只能等其超时返回）。
+                while pending:
+                    if SCRAPE.cancelled:
+                        cancelled = True
+                        break
+                    done_set = wait(pending.keys(), timeout=0.5,
+                                    return_when=FIRST_COMPLETED).done
+                    if not done_set:
+                        continue  # 0.5s 内无完成，继续轮询取消
+                    for fut in done_set:
+                        if fut not in pending:
+                            continue
+                        mid, t0 = pending.pop(fut)
+                        done += 1
+                        try:
+                            res = fut.result()
+                        except Exception as exc:
+                            res = {"error": str(exc)[:300]}
+                        if SCRAPE.cancelled and not res.get("cancelled"):
+                            res = {"cancelled": True}
+                        _process(mid, res, t0)
+                        if SCRAPE.cancelled:
+                            cancelled = True
+                            break
+                if cancelled:
+                    break
+                batch = list(islice(it, workers))
+
+            if cancelled:
+                # 丢弃未开始/在途的任务，停止线程池（不等待网络阻塞的 worker）
+                try:
+                    pool.shutdown(wait=False, cancel_futures=True)
+                except TypeError:
+                    pool.shutdown(wait=False)
+                SCRAPE.message = f"已取消：完成 {done}/{SCRAPE.total}"
         conn.commit()
     finally:
         conn.close()
@@ -302,13 +596,14 @@ def run_scrape(ids: Optional[List[int]] = None, scope: str = "missing",
 
 
 def start_scrape_async(ids: Optional[List[int]] = None, scope: str = "missing",
-                       overwrite: Optional[bool] = None) -> bool:
+                       overwrite: Optional[bool] = None, force: bool = False) -> bool:
     if not SCRAPE.start():
         return False
+    task_id = SCRAPE.task_id
 
     def worker() -> None:
         try:
-            res = run_scrape(ids, scope, overwrite)
+            res = run_scrape(ids, scope, overwrite, task_id=task_id, force=force)
             if not res.get("ok"):
                 SCRAPE.finish(SCRAPE.message or "抓取未执行")
             else:

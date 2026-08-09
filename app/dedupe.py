@@ -28,15 +28,22 @@ def find_exact_duplicates(conn) -> List[Dict[str, Any]]:
 
 
 def find_version_groups(conn) -> List[Dict[str, Any]]:
-    """按番号归组，识别同一作品的不同版本（不同分辨率/压制/字幕/分片）。"""
+    """按番号归组，识别同一作品的不同版本（不同分辨率/压制/字幕/分片）。
+
+    若同番号下的多个文件其实是分卷（xxx_1/xxx_2 这类去序号后基础名相同），
+    则标记 multi_part=True，整组不计入版本冗余、也不参与劣质/损坏误判。
+    """
     by_movie: Dict[int, List[dict]] = {}
     for r in _file_rows(conn):
         by_movie.setdefault(r["movie_id"], []).append(dict(r))
-    return [
-        {"kind": "version", "movie_id": mid, "code": files[0]["code"],
-         "title": files[0]["title"], "files": files}
-        for mid, files in by_movie.items() if len(files) > 1
-    ]
+    groups = []
+    for mid, files in by_movie.items():
+        if len(files) < 2:
+            continue
+        group_mp = _mark_multi_part(files)
+        groups.append({"kind": "version", "movie_id": mid, "code": files[0]["code"],
+                       "title": files[0]["title"], "files": files, "multi_part": group_mp})
+    return groups
 
 
 def pick_best(files: List[dict]) -> dict:
@@ -85,7 +92,8 @@ def scan(conn) -> Dict[str, Any]:
     exact = find_exact_duplicates(conn)
     version = find_version_groups(conn)
     exact_files = sum(len(g["files"]) - 1 for g in exact)
-    version_files = sum(len(g["files"]) - 1 for g in version)
+    # 分卷组（multi_part）是合法多文件，不计入版本冗余
+    version_files = sum(len(g["files"]) - 1 for g in version if not g.get("multi_part"))
     return {
         "exact": exact,
         "version": version,
@@ -110,6 +118,45 @@ _AD_KEYWORDS = (
 )
 import re as _re
 _AD_RE = _re.compile("|".join(f"(?:{p})" for p in _AD_KEYWORDS), _re.I)
+
+# 分卷/分片识别：同一影片被切成多段保存，文件名形如 xxx_1 / xxx_2 / xxx-cd1 / xxx.part3
+# 这类多文件是「合法分卷」，不应算作同番号重复版本，也不应被当成劣质/损坏误删。
+# 仅当组内多个文件去掉末尾序号后缀后「基础名相同」且序号不同，才判定为分卷。
+_PART_RE = _re.compile(r"^(?P<base>.*?)(?:[-_.\s]?(?:cd|part|disk|vol))?(\d+)$", _re.I)
+
+
+def _split_part(stem_name: str):
+    """把文件名主干拆成 (基础名, 序号)。无序号返回 (原名, None)。
+
+    基础名会去掉末尾的分隔符（_ - . 空格），避免 'ABC-123_' 这类残留。
+    """
+    m = _PART_RE.match(stem_name or "")
+    if not m:
+        return (stem_name or "", None)
+    return (m.group("base").rstrip("_-. "), int(m.group(2)))
+
+
+def _mark_multi_part(files: List[dict]) -> bool:
+    """就地给 files 标注 multi_part。返回整组是否全部为分卷。
+
+    规则：按「去序号后的基础名」聚合，若某基础名下出现 ≥2 个不同序号，
+    则这些文件属于同一影片的分卷集合。
+    """
+    bases: Dict[str, set] = {}
+    for f in files:
+        stem = os.path.splitext(f.get("filename") or "")[0]
+        base, num = _split_part(stem)
+        f["_base"] = base
+        bases.setdefault(base, set()).add(num)
+    mp_ids = set()
+    for base, nums in bases.items():
+        if len(nums) >= 2:  # 同一基础名、多个不同序号 → 分卷
+            for f in files:
+                if f.get("_base") == base:
+                    mp_ids.add(f["id"])
+    for f in files:
+        f["multi_part"] = f["id"] in mp_ids
+    return bool(mp_ids) and len(mp_ids) == len(files)
 
 # 分辨率档位 → 权重（用于跨档位质量比较）
 _RES_ORDER = {"": 0, "480p": 1, "720p": 2, "1080p": 3, "1440p": 4, "2160p": 5}
@@ -182,6 +229,8 @@ def find_version_losers(conn) -> List[Dict[str, Any]]:
         files = g["files"]
         if len(files) < 2:
             continue
+        if g.get("multi_part"):  # 分卷：单卷体积小是正常的，不判劣质
+            continue
         best = pick_best(files)
         best_size = best.get("size") or 0
         if best_size <= 0:
@@ -219,6 +268,8 @@ def find_broken(conn) -> List[Dict[str, Any]]:
     for g in find_version_groups(conn):
         files = g["files"]
         if len(files) < 2:
+            continue
+        if g.get("multi_part"):  # 分卷：单卷体积小是正常的，不判损坏
             continue
         best = pick_best(files)
         best_size = best.get("size") or 0
