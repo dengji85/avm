@@ -28,6 +28,8 @@ const cfg = reactive({
   media: { avatar_dir: 'avatars', fanart_dir: 'fanarts', avatar_download: false, fanart_download: true },
   scraper: {
     order: [], timeout: 20, delay_ms: 0, workers: 4, proxy: '', overwrite: false,
+    chrome_debug_port: 9222,
+    avwiki: { base_url: '', cookie: '' },
     javbus: { base_url: '', cookie: '' },
     javdb: { base_url: '', cookie: '' },
     http_json: {}, http_html: {},
@@ -59,9 +61,10 @@ async function load() {
       c.media,
     )
     cfg.scraper = Object.assign(
-      { order: [], timeout: 20, delay_ms: 0, workers: 4, proxy: '', overwrite: false, javbus: {}, javdb: {}, http_json: {}, http_html: {} },
+      { order: [], timeout: 20, delay_ms: 0, workers: 4, proxy: '', overwrite: false, chrome_debug_port: 9222, avwiki: {}, javbus: {}, javdb: {}, http_json: {}, http_html: {} },
       c.scraper,
     )
+    cfg.scraper.avwiki = Object.assign({ base_url: '', cookie: '' }, cfg.scraper.avwiki)
     cfg.scraper.javbus = Object.assign({ base_url: '', cookie: '' }, cfg.scraper.javbus)
     cfg.scraper.javdb = Object.assign({ base_url: '', cookie: '' }, cfg.scraper.javdb)
 
@@ -209,8 +212,10 @@ async function saveScraper() {
         workers: Math.max(1, Number(cfg.scraper.workers) || 1),
         proxy: cfg.scraper.proxy || '',
         overwrite: !!cfg.scraper.overwrite,
+        chrome_debug_port: Number(cfg.scraper.chrome_debug_port) || 9222,
         http_json: hj,
         http_html: hh,
+        avwiki: cfg.scraper.avwiki,
         javbus: cfg.scraper.javbus,
         javdb: cfg.scraper.javdb,
       },
@@ -238,9 +243,11 @@ async function runTest() {
   testOut.cls = ''
   try {
     const order = providers.available.filter((p) => provOn[p.id]).map((p) => p.id)
-    const override = { scraper: { order, proxy: cfg.scraper.proxy || '' } }
-    if (cfg.scraper.javbus.base_url) override.scraper.javbus = { ...cfg.scraper.javbus }
-    if (cfg.scraper.javdb.base_url) override.scraper.javdb = { ...cfg.scraper.javdb }
+    const override = { scraper: { order, proxy: cfg.scraper.proxy || '', chrome_debug_port: Number(cfg.scraper.chrome_debug_port) || 9222 } }
+    const aw = cfg.scraper.avwiki || {}
+    if (aw.base_url || aw.cookie) override.scraper.avwiki = { ...aw }
+    if (cfg.scraper.javbus.base_url || cfg.scraper.javbus.cookie) override.scraper.javbus = { ...cfg.scraper.javbus }
+    if (cfg.scraper.javdb.base_url || cfg.scraper.javdb.cookie) override.scraper.javdb = { ...cfg.scraper.javdb }
 
     const r = await apiTest({ code: testCode.value.trim() || undefined, override })
     const lines = [`测试番号：${r.code || '(库内第一个)'}`]
@@ -477,6 +484,12 @@ onMounted(load)
         <div class="panel">
           <div class="panel-head">站点参数</div>
           <div class="panel-body">
+            <div class="site">
+              <b>AV-Wiki</b>
+              <div class="field"><label>Base URL</label><input v-model="cfg.scraper.avwiki.base_url" placeholder="https://av-wiki.net" /></div>
+              <div class="field"><label>Cookie</label><input v-model="cfg.scraper.avwiki.cookie" placeholder="可选，如 cf_clearance=xxx; 用于绕过 Loader 验证" /></div>
+              <div class="field"><label>Chrome 调试端口</label><input v-model="cfg.scraper.chrome_debug_port" type="number" style="width:120px" /><span class="muted">默认 9222。后端会自动拉起一个独立的无窗口 Chrome（profile 存于 data/chrome_profile）抓取 av-wiki，绕过「请稍候」验证；完全后台运行，无需手动开浏览器（需本机安装 Chrome）。</span></div>
+            </div>
             <div class="site">
               <b>JavBus</b>
               <div class="field"><label>Base URL</label><input v-model="cfg.scraper.javbus.base_url" placeholder="https://www.javbus.com" /></div>

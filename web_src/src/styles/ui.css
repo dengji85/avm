@@ -348,7 +348,7 @@ input[type='range'] { accent-color: var(--c-primary); cursor: pointer; height: a
 [data-tip]::after {
   content: attr(data-tip);
   position: absolute;
-  bottom: calc(100% + 6px); left: 50%;
+  top: calc(100% + 6px); left: 50%;
   transform: translateX(-50%);
   padding: 3px var(--sp-2);
   border-radius: var(--r-xs);
@@ -359,7 +359,7 @@ input[type='range'] { accent-color: var(--c-primary); cursor: pointer; height: a
   white-space: nowrap;
   opacity: 0; pointer-events: none;
   transition: opacity var(--t-fast);
-  z-index: var(--z-toast);
+  z-index: 2147483000;
   box-shadow: var(--sh-2);
 }
 [data-tip]:hover::after { opacity: 1; }

@@ -1,12 +1,12 @@
 <script setup>
 import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
-import { state } from '../state.js'
-import { useTasks, pct, etaSec, phaseLabel, fmtDur } from '../composables/useTasks.js'
+import { state, NAV_TABS } from '../state.js'
+import { useTasks, pct, etaSec, phaseLabel, fmtDur, fetchScrapeLogs } from '../composables/useTasks.js'
 import { aiStatus, aiSearchIntent } from '../api.js'
 import { toast, fmtAgo } from '../utils.js'
 
 const emit = defineEmits(['search'])
-const { anyRunning, activeTasks, lastFinished, taskHistory, overallPct, runScan, runScrape, abort, clearHistory } = useTasks()
+const { anyRunning, activeTasks, lastFinished, taskHistory, overallPct, abort, clearHistory } = useTasks()
 const showScrapeLogs = ref(null)   // 当前展开的明细所属任务 key（或历史 id）
 const openHistory = ref(new Set()) // 展开的历史记录 id 集合
 
@@ -83,6 +83,12 @@ onMounted(() => { window.addEventListener('keydown', onKey); refreshAi() })
 onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
 
 function toggleTheme() { state.theme = state.theme === 'dark' ? 'light' : 'dark' }
+
+// 任务中心「前往维护中心」：切到维护视图并关闭任务面板，避免浮层遮挡
+function goMaintenance() {
+  state.taskPanelOpen = false
+  state.view = 'maintenance'
+}
 const themeIcon = computed(() => (state.theme === 'dark' ? '☾' : '☀'))
 
 // 进度环：用 conic-gradient 模拟（indeterminate 时走 CSS 旋转动画）
@@ -111,16 +117,47 @@ function cleanedOrphans(t) {
   }
   return out
 }
+
+// 历史展开：刮削任务的逐文件日志（来自 DB 持久化记录）
+const scrapeFilters = [
+  { v: '', label: '全部' },
+  { v: 'error', label: '失败' },
+  { v: 'miss', label: '未命中' },
+  { v: 'ok', label: '成功' },
+]
+const scrapeFilter = ref('')
+const scrapeLogItems = ref([])
+const scrapeLogTotal = ref(0)
+const scrapeLogBusy = ref(false)
+
+async function setScrapeFilter(taskId, f) {
+  scrapeFilter.value = f
+  scrapeLogBusy.value = true
+  const r = await fetchScrapeLogs(taskId, { status: f, page: 1, size: 100 })
+  scrapeLogItems.value = r.items || []
+  scrapeLogTotal.value = r.total || 0
+  scrapeLogBusy.value = false
+}
 </script>
 
 <template>
   <header class="topnav">
     <button class="btn ghost icon only-mobile" @click="state.mobileNavOpen = !state.mobileNavOpen" data-tip="菜单">☰</button>
 
-    <div class="brand" @click="state.view = 'gallery'">
-      <div class="logo">A</div>
-      <span class="brand-text">AV 博物馆</span>
+    <div class="brand" @click="state.view = 'home'">
+      <div class="logo">匣</div>
+      <span class="brand-text">片匣</span>
     </div>
+
+    <nav class="main-tabs" aria-label="主导航">
+      <button
+        v-for="t in NAV_TABS"
+        :key="t.id"
+        class="tab"
+        :class="{ active: state.view === t.id }"
+        @click="state.view = t.id"
+      >{{ t.label }}</button>
+    </nav>
 
     <div class="search">
       <span class="si">⌕</span>
@@ -154,7 +191,7 @@ function cleanedOrphans(t) {
           data-tip="任务中心"
         >
           <span v-if="anyRunning" class="spinner"></span>
-          <span v-else class="ico">⟳</span>
+          <span v-else class="ico">≣</span>
           <span v-if="anyRunning" class="pctn">{{ overallPct }}%</span>
         </button>
 
@@ -288,23 +325,52 @@ function cleanedOrphans(t) {
                     <span class="tr-h">失败原因 TOP：</span>
                     <span v-for="r in h.reasons" :key="r.name" class="tr-chip" :class="r.cls">{{ r.name }} ×{{ r.n }}</span>
                   </div>
-                  <!-- 明细 -->
-                  <div v-if="h.logs && h.logs.length" class="tp-logs">
+                  <!-- 扫描类：运行期日志明细 -->
+                  <div v-if="h.key === 'scan' && h.logs && h.logs.length" class="tp-logs">
                     <div v-for="(l, i) in h.logs.slice().reverse()" :key="i" class="tp-log" :class="l.level">
                       <span class="lt tabular">{{ l.t }}</span>
                       <span v-if="l.code" class="lc">{{ l.code }}</span>
                       <span class="lm">{{ l.msg }}</span>
                     </div>
                   </div>
-                  <p v-else class="muted sm" style="padding:6px 8px">本次没有未命中或错误记录</p>
+                  <!-- 刮削类：从 DB 拉取逐文件日志，可定位失败文件与原因 -->
+                  <div v-if="h.key === 'scrape' && h.task_id" class="tp-scrapelogs">
+                    <div class="ts-filters">
+                      <button
+                        v-for="f in scrapeFilters"
+                        :key="f.v"
+                        class="ts-f"
+                        :class="{ on: scrapeFilter === f.v }"
+                        @click="setScrapeFilter(h.task_id, f.v)"
+                      >{{ f.label }}</button>
+                      <span class="ts-meta tabular">共 {{ scrapeLogTotal }} 条</span>
+                    </div>
+                    <div v-if="scrapeLogBusy" class="muted sm" style="padding:6px 8px">加载中…</div>
+                    <div v-else-if="!scrapeLogItems.length" class="muted sm" style="padding:6px 8px">暂无记录</div>
+                    <div v-else class="tp-logs slim">
+                      <div
+                        v-for="(l, i) in scrapeLogItems"
+                        :key="l.id"
+                        class="tp-log" :class="l.status"
+                        @click="state.view = 'detail'; state.currentId = l.movie_id"
+                        :data-tip="l.movie_id ? '点击查看影片' : ''"
+                      >
+                        <span class="ls-dot" :class="l.status"></span>
+                        <span class="lc">{{ l.code || '—' }}</span>
+                        <span class="lm">{{ l.reason }}</span>
+                        <span class="lt tabular">{{ l.elapsed_ms }}ms</span>
+                      </div>
+                    </div>
+                  </div>
+                  <p v-if="h.key !== 'scrape' && !(h.key === 'scan' && h.logs?.length) && !(h.reasons?.length)" class="muted sm" style="padding:6px 8px">本次没有未命中或错误记录</p>
                 </div>
               </transition>
             </div>
           </div>
 
           <div class="tp-foot">
-            <button class="btn tiny" :disabled="state.task.scan.running" @click="runScan({})">扫描媒体库</button>
-            <button class="btn tiny" :disabled="state.task.scrape.running" @click="runScrape({ missing_only: true })">刮削缺失</button>
+            <span class="muted sm" style="margin-right:auto">维护操作请在「维护中心」发起</span>
+            <button class="btn tiny ghost" @click="goMaintenance">前往维护中心 →</button>
           </div>
         </div>
       </div>
@@ -318,6 +384,10 @@ function cleanedOrphans(t) {
 </template>
 
 <style scoped>
+.topnav {
+  position: relative;
+  z-index: 60;
+}
 .only-mobile { display: none; }
 @media (max-width: 900px) {
   .only-mobile { display: grid; }
@@ -325,6 +395,40 @@ function cleanedOrphans(t) {
 }
 
 .brand { cursor: pointer; }
+
+.main-tabs {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin: 0 4px;
+  padding: 3px;
+  background: var(--c-surface-2, #161a22);
+  border: 1px solid var(--c-line, #232833);
+  border-radius: var(--r-pill, 999px);
+}
+.tab {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: var(--c-text-dim, #9aa3b2);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  padding: 6px 14px;
+  border-radius: var(--r-pill, 999px);
+  cursor: pointer;
+  transition: background .15s, color .15s;
+  white-space: nowrap;
+}
+.tab:hover { color: var(--c-text, #e8ebf0); background: var(--c-surface-3, #1e232e); }
+.tab.active {
+  color: #fff;
+  background: linear-gradient(180deg, var(--c-primary, #4f8cff), var(--c-primary-2, #3a6fd8));
+  box-shadow: 0 1px 6px rgba(79,140,255,.35);
+}
+@media (max-width: 900px) {
+  .main-tabs { display: none; }
+}
 
 .search .clr {
   position: absolute; right: 10px; top: 50%;
@@ -351,6 +455,9 @@ function cleanedOrphans(t) {
 .task-btn.busy { color: var(--c-primary-h); }
 .task-btn .ico { font-size: 15px; }
 .task-btn .pctn { font-size: var(--fs-xs); font-variant-numeric: tabular-nums; }
+
+/* 任务中心按钮在最右侧，tooltip 改为右对齐，避免超出视口被裁切 */
+.task-btn[data-tip]::after { left: auto; right: 0; transform: none; }
 
 .pop-catcher { position: fixed; inset: 0; z-index: 40; }
 
@@ -501,6 +608,7 @@ function cleanedOrphans(t) {
 .tp-actions { display: flex; gap: var(--sp-2); align-items: center; }
 .btn.tiny.ghost.on { color: var(--c-primary-h, #4f8cff); border-color: color-mix(in srgb, var(--c-primary-h, #4f8cff) 50%, transparent); }
 .btn.tiny.ghost.danger { color: var(--c-danger, #e5484d); }
+.btn.tiny.ghost.danger:hover { background: color-mix(in srgb, var(--c-danger, #e5484d) 16%, transparent); color: var(--c-danger, #e5484d); border-color: color-mix(in srgb, var(--c-danger, #e5484d) 50%, transparent); }
 
 .tp-logs {
   max-height: 200px;
@@ -527,6 +635,24 @@ function cleanedOrphans(t) {
 .tp-log .lm { color: var(--c-text-2); flex: 1; word-break: break-all; }
 .tp-log.error .lm { color: var(--c-danger, #e5484d); }
 .tp-log.warn .lm { color: var(--c-warning, #d9a23a); }
+
+/* 刮削逐文件日志（持久化 DB） */
+.tp-scrapelogs { margin-top: var(--sp-2); border-top: 1px dashed var(--c-line); padding-top: var(--sp-2); }
+.ts-filters { display: flex; gap: 4px; align-items: center; margin-bottom: 6px; }
+.ts-f {
+  font-size: var(--fs-xs); padding: 1px 8px; border-radius: 999px; cursor: pointer;
+  border: 1px solid var(--c-line-strong); background: var(--c-surface-2); color: var(--c-text-2);
+}
+.ts-f.on { color: #fff; background: var(--c-primary-h, #4f8cff); border-color: var(--c-primary-h, #4f8cff); }
+.ts-meta { margin-left: auto; color: var(--c-text-3); font-size: var(--fs-xs); }
+.tp-logs.slim { max-height: 240px; }
+.tp-logs.slim .tp-log { cursor: default; }
+.tp-logs.slim .tp-log[data-tip] { cursor: pointer; }
+.ls-dot { width: 7px; height: 7px; border-radius: 50%; flex: 0 0 auto; align-self: center; }
+.ls-dot.ok { background: var(--c-ok, #2e9e5b); }
+.ls-dot.miss { background: var(--c-warning, #d9a23a); }
+.ls-dot.error { background: var(--c-danger, #e5484d); }
+.tp-log .ls-dot + .lc { margin-left: 2px; }
 
 .tp-foot {
   padding: var(--sp-2) var(--sp-3); display: flex; gap: var(--sp-2);

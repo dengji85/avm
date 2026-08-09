@@ -1,6 +1,6 @@
 import { computed } from 'vue'
 import { state } from '../state.js'
-import { scanStatus, scrapeStatus, startScan, startScrape, cancelScan, cancelScrape } from '../api.js'
+import { scanStatus, scrapeStatus, startScan, startScrape, cancelScan, cancelScrape, scrapeLogs } from '../api.js'
 import { toast } from '../utils.js'
 
 let timer = null
@@ -25,6 +25,7 @@ function normalize(raw) {
     error_count: Number(r.error_count) || 0,
     counters: (r.counters && typeof r.counters === 'object') ? r.counters : {},
     logs: Array.isArray(r.logs) ? r.logs : [],
+    task_id: r.task_id || '',
   }
 }
 
@@ -143,10 +144,17 @@ export function useTasks() {
   }
 
   async function abort(key) {
+    // 乐观更新：立即给出反馈，避免「点了没反应」的错觉（后端正在停止在途 worker）
+    const t = state.task[key]
+    if (t) {
+      t.running = false
+      t.cancelled = true
+      t.message = '正在取消…'
+    }
     try {
       await (key === 'scan' ? cancelScan() : cancelScrape())
       toast('已请求取消', 'ok')
-      schedule(300)
+      schedule(200)
     } catch (e) { toast(e.message, 'err') }
   }
 
@@ -181,6 +189,16 @@ function buildOne(key, label, t) {
     .sort((a, b) => b.n - a.n)
     .slice(0, 4)
   return { key, label, ...t, logCounts: { error: err, miss }, reasons }
+}
+
+// 拉取某次刮削任务的逐文件日志（持久化 DB 查询），供历史展开查看
+export async function fetchScrapeLogs(taskId, { status = '', code = '', page = 1, size = 50 } = {}) {
+  if (!taskId) return { items: [], total: 0, page, size, pages: 0 }
+  try {
+    return await scrapeLogs({ task_id: taskId, status, code, page, size })
+  } catch (e) {
+    return { items: [], total: 0, page, size, pages: 0 }
+  }
 }
 
 export function pct(t) {

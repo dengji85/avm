@@ -4,7 +4,7 @@ import { state } from '../state.js'
 import {
   getMovie, updateMovie, deleteMovie, toggleFlag, playMovie,
   exportNfo, getPreviews, getSimilar, coverUrl, coverThumbUrl, uploadCover, clearCover,
-  listCollections, addToCollection,
+  listCollections, addToCollection, createCollection, listTags, renameTag, deleteTag,
   aiGenerateSynopsis, aiSuggestTags, aiStatus,
 } from '../api.js'
 import {
@@ -75,18 +75,30 @@ async function load() {
   similar.value = []
   editing.value = false
   try {
-    mv.value = await getMovie(id.value)
+    const m = await getMovie(id.value)
+    // 后端 tags 可能为数组或逗号分隔字符串，统一规整为数组，避免 .filter 报错
+    if (m) {
+      let t = m.tags
+      if (typeof t === 'string') t = t ? t.split(',').map((s) => s.trim()).filter(Boolean) : []
+      else if (!Array.isArray(t)) t = []
+      m.tags = t
+    }
+    mv.value = m
     checkAi()
   } catch (e) {
     toast(e.message, 'err')
     close()
-  } finally { loading.value = false }
+  } finally {
+    loading.value = false
+    loadSimilar()
+  }
 }
 
 function close() {
   state.currentId = null
   playing.value = false
   lightbox.value = ''
+  showColl.value = false
 }
 
 /* ---------- 操作 ---------- */
@@ -196,7 +208,124 @@ async function saveEdit() {
   } catch (e) { toast(e.message, 'err') }
 }
 
-/* ---------- 封面 ---------- */
+/* ---------- 自定义标签（轻量增删，支持选择已有标签 / 创建新标签） ---------- */
+const newTag = ref('')
+const tagBusy = ref(false)
+const allTags = ref([])            // 全库已有标签，用于输入建议
+const showTagSuggest = ref(false)
+function curTags() {
+  const t = mv.value && mv.value.tags
+  if (Array.isArray(t)) return t
+  if (typeof t === 'string' && t) return t.split(',').map((s) => s.trim()).filter(Boolean)
+  return []
+}
+async function ensureTags() {
+  if (!allTags.value.length) {
+    try { allTags.value = await listTags() } catch (e) { /* 忽略 */ }
+  }
+}
+const tagSuggest = computed(() => {
+  const q = newTag.value.trim().toLowerCase()
+  const picked = new Set(curTags())
+  return allTags.value
+    .filter((t) => !picked.has(t.name))
+    .filter((t) => !q || t.name.toLowerCase().includes(q))
+    .slice(0, 8)
+})
+async function addTag() {
+  const name = newTag.value.trim()
+  if (!name || tagBusy.value) return
+  if (curTags().includes(name)) { newTag.value = ''; showTagSuggest.value = false; return }
+  tagBusy.value = true
+  try {
+    const next = [...curTags(), name]
+    await updateMovie(id.value, { tags: next })
+    mv.value = { ...mv.value, tags: next }
+    if (!allTags.value.some((t) => t.name === name)) allTags.value.push({ name, count: 1 })
+    newTag.value = ''
+    showTagSuggest.value = false
+    window.dispatchEvent(new CustomEvent('avm-refresh'))
+  } catch (e) { toast(e.message, 'err') }
+  finally { tagBusy.value = false }
+}
+function pickTag(name) {
+  if (curTags().includes(name)) return
+  newTag.value = name
+  addTag()
+}
+async function removeTag(name) {
+  if (tagBusy.value) return
+  tagBusy.value = true
+  try {
+    const next = curTags().filter((t) => t !== name)
+    await updateMovie(id.value, { tags: next })
+    mv.value = { ...mv.value, tags: next }
+    window.dispatchEvent(new CustomEvent('avm-refresh'))
+  } catch (e) { toast(e.message, 'err') }
+  finally { tagBusy.value = false }
+}
+
+/* ---------- 全局标签管理（改名 / 删除无关联标签） ---------- */
+const showTagMgr = ref(false)
+const allTagList = ref([])
+const tagMgrBusy = ref(false)
+const editingTag = ref('')
+const editingTagNew = ref('')
+async function openTagMgr() {
+  showTagMgr.value = true
+  await refreshTagMgr()
+}
+async function refreshTagMgr() {
+  try { allTagList.value = await listTags() } catch (e) { toast(e.message, 'err') }
+}
+async function doRenameTag() {
+  const oldN = editingTag.value
+  const newN = (editingTagNew.value || '').trim()
+  if (!oldN || !newN || tagMgrBusy.value) return
+  tagMgrBusy.value = true
+  try {
+    const r = await renameTag(oldN, newN)
+    toast(r.merged ? `已合并到「${newN}」` : '已改名', 'ok')
+    editingTag.value = ''
+    editingTagNew.value = ''
+    await refreshTagMgr()
+    // 若当前影片命中该标签，同步显示名
+    if (curTags().includes(oldN)) {
+      mv.value = { ...mv.value, tags: curTags().map((t) => (t === oldN ? newN : t)) }
+    }
+    window.dispatchEvent(new CustomEvent('avm-refresh'))
+  } catch (e) { toast(e.message, 'err') }
+  finally { tagMgrBusy.value = false }
+}
+async function doDeleteTag(name) {
+  if (tagMgrBusy.value) return
+  if (!confirm(`确定删除标签「${name}」？此操作会移除该标签与所有影片的关联。`)) return
+  tagMgrBusy.value = true
+  try {
+    await deleteTag(name)
+    toast('已删除标签：' + name, 'ok')
+    await refreshTagMgr()
+    if (curTags().includes(name)) {
+      const next = curTags().filter((t) => t !== name)
+      await updateMovie(id.value, { tags: next })
+      mv.value = { ...mv.value, tags: next }
+    }
+    window.dispatchEvent(new CustomEvent('avm-refresh'))
+  } catch (e) { toast(e.message, 'err') }
+  finally { tagMgrBusy.value = false }
+}
+const suggestIdx = ref(-1)
+function onTagBlur() { setTimeout(() => { showTagSuggest.value = false; suggestIdx.value = -1 }, 150) }
+function moveSuggest(dir) {
+  const n = tagSuggest.value.length
+  if (!n) return
+  // -1 表示停留在输入框文本；0..n-1 表示选中某建议
+  let i = suggestIdx.value + dir
+  if (i < -1) i = n - 1
+  if (i > n - 1) i = -1
+  suggestIdx.value = i
+  if (i >= 0) newTag.value = tagSuggest.value[i].name
+}
 const fileInput = ref(null)
 async function onUpload(e) {
   const f = e.target.files && e.target.files[0]
@@ -218,19 +347,43 @@ async function removeCover() {
 }
 
 /* ---------- 片单 ---------- */
+const newCollName = ref('')
+const creatingColl = ref(false)
+const collWrap = ref(null)
 async function openColl() {
   showColl.value = !showColl.value
   if (showColl.value && !collList.value.length) {
-    try { collList.value = (await listCollections()) || [] } catch (e) { toast(e.message, 'err') }
+    try { const r = await listCollections(); collList.value = (r && r.items) || [] } catch (e) { toast(e.message, 'err') }
   }
+}
+function onDocClick(e) {
+  if (showColl.value && collWrap.value && !collWrap.value.contains(e.target)) showColl.value = false
+}
+function onCollBtn(e) {
+  e.stopPropagation()
+  openColl()
 }
 async function addColl(cid) {
   try { await addToCollection(cid, id.value); toast('已加入片单', 'ok'); showColl.value = false }
   catch (e) { toast(e.message, 'err') }
 }
+async function createColl() {
+  const name = newCollName.value.trim()
+  if (!name || creatingColl.value) return
+  creatingColl.value = true
+  try {
+    const c = await createCollection({ name })
+    const item = c && c.collection ? c.collection : { id: c && c.id, name }
+    collList.value = [...collList.value, item]
+    newCollName.value = ''
+    toast('片单已创建，可加入', 'ok')
+  } catch (e) { toast(e.message, 'err') }
+  finally { creatingColl.value = false }
+}
 
 /* ---------- 跳转筛选 ---------- */
 function filterBy(key, value) {
+  state.returnFromFilter = { id: id.value, title: (mv.value && (mv.value.title || mv.value.code)) || '' }
   if (key === 'actress' || key === 'genre') {
     state[key] = [value]
     state.actress = key === 'actress' ? [value] : []
@@ -252,19 +405,32 @@ function openActress(name) {
   close()
 }
 
+/* ---------- 跳转筛选（按自定义标签） ---------- */
+function filterByTag(tag) {
+  state.returnFromFilter = { id: id.value, title: (mv.value && (mv.value.title || mv.value.code)) || '' }
+  state.actress = []
+  state.genre = []
+  state.studio = ''
+  state.series = ''
+  state.tag = [tag]
+  state.q = ''
+  state.page = 1
+  state.view = 'gallery'
+  close()
+}
+
 /* ---------- 生命周期 ---------- */
 watch(id, (v) => { if (v) { bust.value = Date.now(); load() } })
 watch(tab, (t) => {
   if (t === 'preview' && !previews.value.length) loadPreviews(false)
-  if (t === 'similar' && !similar.value.length) loadSimilar()
 })
 
 function onKey(e) {
   if (!open.value) return
   if (e.key === 'Escape') { lightbox.value ? (lightbox.value = '') : close() }
 }
-onMounted(() => window.addEventListener('keydown', onKey))
-onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
+onMounted(() => { window.addEventListener('keydown', onKey); document.addEventListener('click', onDocClick, true) })
+onBeforeUnmount(() => { window.removeEventListener('keydown', onKey); document.removeEventListener('click', onDocClick, true) })
 </script>
 
 <template>
@@ -282,184 +448,270 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
         </header>
 
         <div class="drawer-body">
-          <!-- 播放器 -->
-          <VideoPlayer
-            v-if="playing"
-            :movie-id="mv.id"
-            :start-at="progressPos"
-            @progress="(p) => { if (mv.progress) mv.progress.position = p.position }"
-          />
+          <!-- 左侧主内容 -->
+          <div class="dd-content">
+            <!-- 播放器 -->
+            <VideoPlayer
+              v-if="playing"
+              :movie-id="mv.id"
+              :start-at="progressPos"
+              @progress="(p) => { if (mv.progress) mv.progress.position = p.position }"
+            />
 
-          <!-- 主区 -->
-          <div class="dd-top">
-            <div class="dd-cover">
-              <img :src="coverSrc" alt="" @error="coverFallback" @click="lightbox = coverSrc" />
-              <div v-if="progressPct > 0" class="cw-bar"><i :style="{ width: progressPct + '%' }"></i></div>
-              <div class="cov-acts">
-                <button class="btn tiny" @click="fileInput.click()">换封面</button>
-                <button class="btn tiny ghost" @click="removeCover">清除</button>
-                <input ref="fileInput" type="file" accept="image/*" hidden @change="onUpload" />
+            <!-- 主区 -->
+            <div class="dd-top">
+              <div class="dd-cover">
+                <img :src="coverSrc" alt="" @error="coverFallback" @click="lightbox = coverSrc" />
+                <div v-if="progressPct > 0" class="cw-bar"><i :style="{ width: progressPct + '%' }"></i></div>
+                <div class="cov-acts">
+                  <button class="btn tiny" @click="fileInput.click()">换封面</button>
+                  <button class="btn tiny ghost" @click="removeCover">清除</button>
+                  <input ref="fileInput" type="file" accept="image/*" hidden @change="onUpload" />
+                </div>
               </div>
-            </div>
 
-            <div class="dd-main">
-              <!-- 主操作 -->
-              <div class="dd-actions">
-                <button class="btn primary" @click="playing = !playing">
-                  {{ playing ? '收起播放器' : (progressPct > 0 ? `继续观看 ${progressPct}%` : '在线播放') }}
-                </button>
-                <button class="btn" @click="play">系统播放器</button>
-                <button class="btn icon" :class="{ active: mv.favorite }" @click="flip('favorite')" data-tip="收藏">{{ mv.favorite ? '♥' : '♡' }}</button>
-                <button class="btn icon" :class="{ active: mv.watchlist }" @click="flip('watchlist')" data-tip="想看">⌚</button>
-                <button class="btn icon" :class="{ active: mv.watched }" @click="flip('watched')" data-tip="已看">{{ mv.watched ? '●' : '○' }}</button>
+              <div class="dd-main">
+                <!-- 主操作 -->
+                <div class="dd-actions">
+                  <button class="btn primary" @click="playing = !playing">
+                    {{ playing ? '收起播放器' : (progressPct > 0 ? `继续观看 ${progressPct}%` : '在线播放') }}
+                  </button>
+                  <button class="btn" @click="play">系统播放器</button>
+                  <button class="btn icon" :class="{ active: mv.favorite }" @click="flip('favorite')" data-tip="收藏">{{ mv.favorite ? '♥' : '♡' }}</button>
+                  <button class="btn icon" :class="{ active: mv.watchlist }" @click="flip('watchlist')" data-tip="想看">⌚</button>
+                  <button class="btn icon" :class="{ active: mv.watched }" @click="flip('watched')" data-tip="已看">{{ mv.watched ? '●' : '○' }}</button>
 
-                <div class="coll-wrap">
-                  <button class="btn icon" @click="openColl" data-tip="加入片单">＋</button>
-                  <div v-if="showColl" class="coll-pop">
-                    <div v-if="!collList.length" class="cp-empty muted">还没有片单</div>
-                    <button v-for="c in collList" :key="c.id" class="cp-item" @click="addColl(c.id)">{{ c.name }}</button>
+                  <div class="coll-wrap" ref="collWrap">
+                    <button class="btn icon" @click="onCollBtn" data-tip="加入片单">＋</button>
+                    <div v-if="showColl" class="coll-pop" @click.stop>
+                      <div v-if="!collList.length" class="cp-empty muted">还没有片单</div>
+                      <button v-for="c in collList" :key="c.id" class="cp-item" @click="addColl(c.id)">{{ c.name }}</button>
+                      <div class="cp-new">
+                        <input
+                          v-model="newCollName"
+                          class="tag-input"
+                          placeholder="新建片单名称"
+                          @keydown.enter.prevent="createColl"
+                        />
+                        <button class="btn tiny" :disabled="creatingColl || !newCollName.trim()" @click="createColl">新建</button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- 评分 -->
+                <div class="dd-rate">
+                  <div class="stars">
+                    <span v-for="i in 5" :key="i" class="s" :class="{ on: i <= (mv.rating || 0) }" @click="setRating(i)">★</span>
+                  </div>
+                  <span class="muted">{{ mv.rating ? mv.rating + ' 星' : '未评分' }}</span>
+                  <div class="spacer"></div>
+                  <span v-if="mv.play_count" class="badge">播放 {{ mv.play_count }} 次</span>
+                </div>
+
+                <!-- 标记 -->
+                <div class="chip-list">
+                  <span v-if="mv.subtitle" class="badge ok">中文字幕</span>
+                  <span v-if="mv.uncensored" class="badge warn">无码</span>
+                  <span v-if="quality" class="badge accent">{{ quality }}</span>
+                  <span v-if="mv.vr" class="badge">VR</span>
+                  <span v-if="mv.leak" class="badge err">流出</span>
+                </div>
+
+                <!-- 关键信息 -->
+                <dl class="dd-facts">
+                  <template v-if="mv.actresses && mv.actresses.length">
+                    <dt>女优</dt>
+                    <dd class="chip-list">
+                      <button v-for="a in mv.actresses" :key="a" class="chip" @click="openActress(a)">{{ a }}</button>
+                    </dd>
+                  </template>
+                  <template v-if="mv.genres && mv.genres.length">
+                    <dt>类型</dt>
+                    <dd class="chip-list">
+                      <button v-for="g in mv.genres" :key="g" class="chip" @click="filterBy('genre', g)">{{ g }}</button>
+                    </dd>
+                  </template>
+                  <template v-if="mv.studio"><dt>厂商</dt><dd><a @click="filterBy('studio', mv.studio)">{{ mv.studio }}</a></dd></template>
+                  <template v-if="mv.series"><dt>系列</dt><dd><a @click="filterBy('series', mv.series)">{{ mv.series }}</a></dd></template>
+                  <template v-if="mv.director"><dt>导演</dt><dd>{{ mv.director }}</dd></template>
+                  <template v-if="mv.release_date"><dt>发行</dt><dd>{{ fmtDate(mv.release_date) }}</dd></template>
+                  <template v-if="mv.runtime"><dt>时长</dt><dd>{{ mv.runtime }} 分钟</dd></template>
+                  <template v-if="mv.resolution"><dt>分辨率</dt><dd>{{ mv.resolution }}</dd></template>
+                  <dt>体积</dt><dd>{{ fmtSize(totalSize) }}<span v-if="mv.files && mv.files.length > 1" class="dim"> · {{ mv.files.length }} 个文件</span></dd>
+                  <template v-if="mv.added_at"><dt>入库</dt><dd>{{ fmtAgo(mv.added_at) }}</dd></template>
+                </dl>
+
+                <!-- 自定义标签：常驻主区可见，随时增删 -->
+                <div class="dd-tags">
+                  <div class="dd-tags-head">
+                    <span class="lbl">自定义标签</span>
+                    <button class="link-btn" @click="openTagMgr">管理全部标签</button>
+                    <span v-if="aiReady" class="dim">可点「AI 补充标签」自动生成</span>
+                  </div>
+                  <div v-if="mv.tags && mv.tags.length" class="chip-list wrap">
+                    <span v-for="t in mv.tags" :key="t" class="badge tag-removable clickable" @click="filterByTag(t)">
+                      {{ t }}
+                      <button class="tag-x" :title="'移除 ' + t" @click.stop="removeTag(t)">×</button>
+                    </span>
+                  </div>
+                  <div v-else class="dim small">暂无标签，添加后可在「影片库」按标签筛选。</div>
+                  <div class="tag-edit">
+                    <div class="tag-input-wrap">
+                      <input
+                        v-model="newTag"
+                        class="tag-input"
+                        placeholder="选择或输入新标签，回车创建"
+                        @focus="ensureTags(); showTagSuggest = true"
+                        @blur="onTagBlur"
+                        @keydown.enter.prevent="addTag"
+                        @keydown.down.prevent="moveSuggest(1)"
+                        @keydown.up.prevent="moveSuggest(-1)"
+                        @keydown.esc="showTagSuggest = false"
+                      />
+                      <div v-if="showTagSuggest && tagSuggest.length" class="tag-suggest">
+                        <button
+                          v-for="(s, i) in tagSuggest"
+                          :key="s.name"
+                          class="tag-suggest-item"
+                          :class="{ on: i === suggestIdx }"
+                          @mousedown.prevent="pickTag(s.name)"
+                          @mouseenter="suggestIdx = i"
+                        >
+                          <span>{{ s.name }}</span>
+                          <span class="dim small">已用 {{ s.count }}</span>
+                        </button>
+                      </div>
+                    </div>
+                    <button class="btn tiny" :disabled="tagBusy || !newTag.trim()" @click="addTag">添加</button>
+                  </div>
+
+                  <!-- 全局标签管理弹窗 -->
+                  <div v-if="showTagMgr" class="tag-mgr" @click.self="showTagMgr = false">
+                    <div class="tag-mgr-box">
+                      <div class="tm-head">
+                        <b>管理全部标签</b>
+                        <button class="icon-btn" title="关闭" @click="showTagMgr = false">×</button>
+                      </div>
+                      <p class="muted small">改名会同步到所有影片；删除会移除该标签与所有影片的关联（无关联标签可直接删除）。</p>
+                      <div v-if="!allTagList.length" class="dim">暂无标签</div>
+                      <ul class="tm-list">
+                        <li v-for="t in allTagList" :key="t.id" class="tm-item">
+                          <template v-if="editingTag === t.name">
+                            <input v-model="editingTagNew" class="tm-input" @keydown.enter.prevent="doRenameTag" placeholder="新名称" />
+                            <button class="btn tiny" :disabled="tagMgrBusy || !editingTagNew.trim()" @click="doRenameTag">保存</button>
+                            <button class="btn tiny ghost" @click="editingTag = ''">取消</button>
+                          </template>
+                          <template v-else>
+                            <span class="tm-name">{{ t.name }}</span>
+                            <span class="dim small">已用 {{ t.count }}</span>
+                            <span class="tm-actions">
+                              <button class="link-btn" @click="editingTag = t.name; editingTagNew = t.name">改名</button>
+                              <button class="link-btn danger" @click="doDeleteTag(t.name)">删除</button>
+                            </span>
+                          </template>
+                        </li>
+                      </ul>
+                    </div>
                   </div>
                 </div>
               </div>
+            </div>
 
-              <!-- 评分 -->
-              <div class="dd-rate">
-                <div class="stars">
-                  <span v-for="i in 5" :key="i" class="s" :class="{ on: i <= (mv.rating || 0) }" @click="setRating(i)">★</span>
+            <!-- 标签页 -->
+            <div class="tabs dd-tabs">
+              <button class="tab" :class="{ on: tab === 'info' }" @click="tab = 'info'">简介</button>
+              <button class="tab" :class="{ on: tab === 'preview' }" @click="tab = 'preview'">预览图</button>
+              <button class="tab" :class="{ on: tab === 'files' }" @click="tab = 'files'">文件</button>
+              <div class="spacer"></div>
+              <button class="btn tiny ghost" @click="doScrape" :disabled="loading">重新刮削</button>
+              <button class="btn tiny ghost" @click="doNfo">导出 NFO</button>
+            </div>
+
+            <div class="dd-pane">
+              <!-- 简介 -->
+              <template v-if="tab === 'info'">
+                <div v-if="!editing">
+                  <p v-if="mv.plot" class="plot">{{ mv.plot }}</p>
+                  <p v-else class="muted">暂无简介。</p>
+                  <div v-if="mv.note" class="note-box"><b>备注</b><p>{{ mv.note }}</p></div>
+                  <div v-if="aiReady" class="hstack mt wrap">
+                    <button class="btn tiny ghost" :disabled="aiBusy" @click="doAiSynopsis">{{ aiBusy ? '生成中…' : 'AI 生成简介' }}</button>
+                    <button class="btn tiny ghost" :disabled="aiBusy" @click="doAiTags">AI 补充标签</button>
+                  </div>
+                  <button class="btn tiny mt" @click="startEdit">编辑元数据</button>
                 </div>
-                <span class="muted">{{ mv.rating ? mv.rating + ' 星' : '未评分' }}</span>
-                <div class="spacer"></div>
-                <span v-if="mv.play_count" class="badge">播放 {{ mv.play_count }} 次</span>
-              </div>
 
-              <!-- 标记 -->
-              <div class="chip-list">
-                <span v-if="mv.subtitle" class="badge ok">中文字幕</span>
-                <span v-if="mv.uncensored" class="badge warn">无码</span>
-                <span v-if="quality" class="badge accent">{{ quality }}</span>
-                <span v-if="mv.vr" class="badge">VR</span>
-                <span v-if="mv.leak" class="badge err">流出</span>
-              </div>
+                <div v-else class="edit-form">
+                  <div class="field"><label>标题</label><input v-model="draft.title" /></div>
+                  <div class="two">
+                    <div class="field"><label>番号</label><input v-model="draft.code" /></div>
+                    <div class="field"><label>发行日期</label><input v-model="draft.release_date" placeholder="YYYY-MM-DD" /></div>
+                  </div>
+                  <div class="two">
+                    <div class="field"><label>时长（分钟）</label><input v-model="draft.runtime" type="number" min="0" /></div>
+                    <div class="field"><label>导演</label><input v-model="draft.director" /></div>
+                  </div>
+                  <div class="field"><label>简介</label><textarea v-model="draft.plot" rows="4"></textarea></div>
+                  <div class="field"><label>备注</label><textarea v-model="draft.note" rows="2"></textarea></div>
+                  <div class="hstack">
+                    <button class="btn primary" @click="saveEdit">保存</button>
+                    <button class="btn ghost" @click="editing = false">取消</button>
+                  </div>
+                </div>
+              </template>
 
-              <!-- 关键信息 -->
-              <dl class="dd-facts">
-                <template v-if="mv.actresses && mv.actresses.length">
-                  <dt>女优</dt>
-                  <dd class="chip-list">
-                    <button v-for="a in mv.actresses" :key="a" class="chip" @click="openActress(a)">{{ a }}</button>
-                  </dd>
-                </template>
-                <template v-if="mv.genres && mv.genres.length">
-                  <dt>类型</dt>
-                  <dd class="chip-list">
-                    <button v-for="g in mv.genres" :key="g" class="chip" @click="filterBy('genre', g)">{{ g }}</button>
-                  </dd>
-                </template>
-                <template v-if="mv.studio"><dt>厂商</dt><dd><a @click="filterBy('studio', mv.studio)">{{ mv.studio }}</a></dd></template>
-                <template v-if="mv.series"><dt>系列</dt><dd><a @click="filterBy('series', mv.series)">{{ mv.series }}</a></dd></template>
-                <template v-if="mv.director"><dt>导演</dt><dd>{{ mv.director }}</dd></template>
-                <template v-if="mv.release_date"><dt>发行</dt><dd>{{ fmtDate(mv.release_date) }}</dd></template>
-                <template v-if="mv.runtime"><dt>时长</dt><dd>{{ mv.runtime }} 分钟</dd></template>
-                <template v-if="mv.resolution"><dt>分辨率</dt><dd>{{ mv.resolution }}</dd></template>
-                <dt>体积</dt><dd>{{ fmtSize(totalSize) }}<span v-if="mv.files && mv.files.length > 1" class="dim"> · {{ mv.files.length }} 个文件</span></dd>
-                <template v-if="mv.added_at"><dt>入库</dt><dd>{{ fmtAgo(mv.added_at) }}</dd></template>
-              </dl>
+              <!-- 预览图 -->
+              <template v-else-if="tab === 'preview'">
+                <div class="hstack mb">
+                  <button class="btn tiny" :disabled="pvLoading" @click="loadPreviews(true)">
+                    {{ pvLoading ? '生成中…' : '生成预览图' }}
+                  </button>
+                  <span class="muted">需要配置 ffmpeg 路径</span>
+                </div>
+                <div v-if="previews.length" class="pv-grid">
+                  <img v-for="(u, i) in previews" :key="i" :src="u" alt="" @click="lightbox = u" />
+                </div>
+                <div v-else-if="!pvLoading" class="empty"><div class="icon">▤</div><div class="desc">还没有预览图</div></div>
+              </template>
+
+              <!-- 文件 -->
+              <template v-else>
+                <table class="ftable">
+                  <thead><tr><th>文件名</th><th>大小</th><th>状态</th></tr></thead>
+                  <tbody>
+                    <tr v-for="f in mv.files" :key="f.id">
+                      <td class="fname" :title="f.path">{{ f.filename }}</td>
+                      <td class="tabular">{{ fmtSize(f.size) }}</td>
+                      <td><span class="badge" :class="f.missing ? 'err' : 'ok'">{{ f.missing ? '丢失' : '正常' }}</span></td>
+                    </tr>
+                  </tbody>
+                </table>
+                <div class="danger-zone">
+                  <b>危险操作</b>
+                  <div class="hstack">
+                    <button class="btn tiny" @click="doDelete(false)">从库中移除</button>
+                    <button class="btn tiny danger" @click="doDelete(true)">删除影片和文件</button>
+                  </div>
+                </div>
+              </template>
             </div>
           </div>
 
-          <!-- 标签页 -->
-          <div class="tabs dd-tabs">
-            <button class="tab" :class="{ on: tab === 'info' }" @click="tab = 'info'">简介</button>
-            <button class="tab" :class="{ on: tab === 'preview' }" @click="tab = 'preview'">预览图</button>
-            <button class="tab" :class="{ on: tab === 'similar' }" @click="tab = 'similar'">相似推荐</button>
-            <button class="tab" :class="{ on: tab === 'files' }" @click="tab = 'files'">文件</button>
-            <div class="spacer"></div>
-            <button class="btn tiny ghost" @click="doScrape" :disabled="loading">重新刮削</button>
-            <button class="btn tiny ghost" @click="doNfo">导出 NFO</button>
-          </div>
-
-          <div class="dd-pane">
-            <!-- 简介 -->
-            <template v-if="tab === 'info'">
-              <div v-if="!editing">
-                <p v-if="mv.plot" class="plot">{{ mv.plot }}</p>
-                <p v-else class="muted">暂无简介。</p>
-                <div v-if="mv.note" class="note-box"><b>备注</b><p>{{ mv.note }}</p></div>
-                <div v-if="mv.tags && mv.tags.length" class="chip-list mt">
-                  <span v-for="t in mv.tags" :key="t" class="badge">{{ t }}</span>
-                </div>
-                <div v-if="aiReady" class="hstack mt wrap">
-                  <button class="btn tiny ghost" :disabled="aiBusy" @click="doAiSynopsis">{{ aiBusy ? '生成中…' : 'AI 生成简介' }}</button>
-                  <button class="btn tiny ghost" :disabled="aiBusy" @click="doAiTags">AI 补充标签</button>
-                </div>
-                <button class="btn tiny mt" @click="startEdit">编辑元数据</button>
+          <!-- 右侧：相似推荐常驻，打开即展示，无需手动点击 -->
+          <aside class="dd-similar-rail">
+            <div class="rail-head">
+              <span class="rail-title">相似推荐</span>
+              <span class="rail-sub">同类型 · 猜你喜欢</span>
+            </div>
+            <div class="rail-list">
+              <div v-for="s in similar" :key="s.id" class="sim" @click="state.currentId = s.id">
+                <img :src="coverThumbUrl(s.id, 220)" alt="" @error="coverFallback" />
+                <div class="sim-t ellipsis">{{ s.title || s.code }}</div>
               </div>
-
-              <div v-else class="edit-form">
-                <div class="field"><label>标题</label><input v-model="draft.title" /></div>
-                <div class="two">
-                  <div class="field"><label>番号</label><input v-model="draft.code" /></div>
-                  <div class="field"><label>发行日期</label><input v-model="draft.release_date" placeholder="YYYY-MM-DD" /></div>
-                </div>
-                <div class="two">
-                  <div class="field"><label>时长（分钟）</label><input v-model="draft.runtime" type="number" min="0" /></div>
-                  <div class="field"><label>导演</label><input v-model="draft.director" /></div>
-                </div>
-                <div class="field"><label>简介</label><textarea v-model="draft.plot" rows="4"></textarea></div>
-                <div class="field"><label>备注</label><textarea v-model="draft.note" rows="2"></textarea></div>
-                <div class="hstack">
-                  <button class="btn primary" @click="saveEdit">保存</button>
-                  <button class="btn ghost" @click="editing = false">取消</button>
-                </div>
-              </div>
-            </template>
-
-            <!-- 预览图 -->
-            <template v-else-if="tab === 'preview'">
-              <div class="hstack mb">
-                <button class="btn tiny" :disabled="pvLoading" @click="loadPreviews(true)">
-                  {{ pvLoading ? '生成中…' : '生成预览图' }}
-                </button>
-                <span class="muted">需要配置 ffmpeg 路径</span>
-              </div>
-              <div v-if="previews.length" class="pv-grid">
-                <img v-for="(u, i) in previews" :key="i" :src="u" alt="" @click="lightbox = u" />
-              </div>
-              <div v-else-if="!pvLoading" class="empty"><div class="icon">▤</div><div class="desc">还没有预览图</div></div>
-            </template>
-
-            <!-- 相似 -->
-            <template v-else-if="tab === 'similar'">
-              <div v-if="similar.length" class="sim-grid">
-                <div v-for="s in similar" :key="s.id" class="sim" @click="state.currentId = s.id">
-                  <img :src="coverThumbUrl(s.id, 220)" alt="" @error="coverFallback" />
-                  <div class="sim-t ellipsis">{{ s.title || s.code }}</div>
-                </div>
-              </div>
-              <div v-else class="empty"><div class="icon">≈</div><div class="desc">暂无相似影片</div></div>
-            </template>
-
-            <!-- 文件 -->
-            <template v-else>
-              <table class="ftable">
-                <thead><tr><th>文件名</th><th>大小</th><th>状态</th></tr></thead>
-                <tbody>
-                  <tr v-for="f in mv.files" :key="f.id">
-                    <td class="fname" :title="f.path">{{ f.filename }}</td>
-                    <td class="tabular">{{ fmtSize(f.size) }}</td>
-                    <td><span class="badge" :class="f.missing ? 'err' : 'ok'">{{ f.missing ? '丢失' : '正常' }}</span></td>
-                  </tr>
-                </tbody>
-              </table>
-              <div class="danger-zone">
-                <b>危险操作</b>
-                <div class="hstack">
-                  <button class="btn tiny" @click="doDelete(false)">从库中移除</button>
-                  <button class="btn tiny danger" @click="doDelete(true)">删除影片和文件</button>
-                </div>
-              </div>
-            </template>
-          </div>
+              <div v-if="!similar.length" class="empty small"><div class="icon">≈</div><div class="desc">暂无相似影片</div></div>
+            </div>
+          </aside>
         </div>
       </template>
 
@@ -476,8 +728,63 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
 <style scoped>
 .dh-title { font-size: var(--fs-lg); font-weight: 600; flex: 1; min-width: 0; }
 
-.dd-top { display: flex; gap: var(--sp-5); padding: var(--sp-5); }
-.dd-cover { position: relative; width: 216px; flex: none; }
+/* 主体：左主区 + 右相似推荐侧栏，常驻并排 */
+.drawer-body { display: flex; flex-direction: row; overflow: hidden; }
+.dd-content { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; overflow-y: auto; }
+.dd-similar-rail {
+  flex: none; width: 300px;
+  border-left: 1px solid var(--c-line);
+  background: var(--c-surface);
+  display: flex; flex-direction: column;
+  min-height: 0;
+}
+.rail-head {
+  flex: none; padding: var(--sp-4) var(--sp-4) var(--sp-3);
+  border-bottom: 1px solid var(--c-line);
+  display: flex; flex-direction: column; gap: 2px;
+}
+.rail-title { font-size: var(--fs-md); font-weight: 700; color: var(--c-text-1); }
+.rail-sub { font-size: var(--fs-xs); color: var(--c-text-3); }
+.rail-list {
+  flex: 1; min-height: 0; overflow-y: auto;
+  padding: var(--sp-3); display: flex; flex-direction: column; gap: var(--sp-3);
+}
+.rail-list .sim img { box-shadow: var(--sh-1); }
+.empty.small { padding: var(--sp-6) var(--sp-2); }
+
+/* 自定义标签管理 */
+.tag-removable { display: inline-flex; align-items: center; gap: 4px; }
+.tag-removable.clickable { cursor: pointer; }
+.tag-removable.clickable:hover { filter: brightness(1.12); border-color: var(--c-primary); }
+.tag-x {
+  border: 0; background: transparent; color: var(--c-text-dim, #aaa); cursor: pointer;
+  font-size: 14px; line-height: 1; width: 18px; height: 18px; border-radius: 50%;
+  display: inline-flex; align-items: center; justify-content: center; opacity: .8; padding: 0;
+}
+.tag-x:hover { opacity: 1; background: #e5484d; color: #fff; }
+.tag-edit { display: flex; gap: var(--sp-2); align-items: center; }
+.tag-input-wrap { position: relative; flex: 1; min-width: 0; }
+.tag-input {
+  width: 100%; box-sizing: border-box;
+  background: var(--c-surface-2); border: 1px solid var(--c-line); color: var(--c-text);
+  border-radius: 8px; padding: 6px 10px; font: inherit; font-size: var(--fs-sm);
+}
+.tag-input:focus { outline: none; border-color: var(--c-primary); }
+.tag-suggest {
+  position: absolute; top: calc(100% + 4px); left: 0; right: 0; z-index: 60;
+  background: var(--c-surface-3); border: 1px solid var(--c-line-strong);
+  border-radius: 8px; box-shadow: var(--sh-3); max-height: 220px; overflow-y: auto; padding: 4px;
+}
+.tag-suggest-item {
+  width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  border: 0; background: transparent; color: var(--c-text); cursor: pointer;
+  font: inherit; font-size: var(--fs-sm); text-align: left;
+  padding: 6px 8px; border-radius: 6px;
+}
+.tag-suggest-item:hover, .tag-suggest-item.on { background: var(--c-primary-soft); color: var(--c-primary-text); }
+
+.dd-top { display: flex; gap: var(--sp-4); padding: var(--sp-4) var(--sp-5); }
+.dd-cover { position: relative; width: 168px; flex: none; }
 .dd-cover img {
   width: 100%; aspect-ratio: 2/3; object-fit: cover;
   border-radius: var(--r-md);
@@ -489,7 +796,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
 .cw-bar > i { display: block; height: 100%; background: var(--c-primary); }
 .cov-acts { display: flex; gap: var(--sp-2); margin-top: var(--sp-2); }
 
-.dd-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: var(--sp-3); }
+.dd-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: var(--sp-2); }
 .dd-actions { display: flex; flex-wrap: wrap; gap: var(--sp-2); }
 .dd-rate { display: flex; align-items: center; gap: var(--sp-3); }
 
@@ -509,18 +816,20 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
 
 .dd-facts {
   display: grid;
-  grid-template-columns: 62px 1fr;
-  gap: var(--sp-2) var(--sp-3);
+  grid-template-columns: 52px 1fr;
+  gap: 6px var(--sp-2);
   margin: 0;
-  font-size: var(--fs-md);
-  align-items: start;
+  font-size: var(--fs-sm);
+  align-items: center;
+  padding-top: var(--sp-2);
+  border-top: 1px dashed var(--c-line);
 }
-.dd-facts dt { color: var(--c-text-3); font-size: var(--fs-sm); padding-top: 2px; }
-.dd-facts dd { margin: 0; min-width: 0; }
+.dd-facts dt { color: var(--c-text-3); font-size: var(--fs-xs); }
+.dd-facts dd { margin: 0; min-width: 0; color: var(--c-text-1); }
 .dd-facts a { cursor: pointer; }
 
-.dd-tabs { padding: 0 var(--sp-5); align-items: center; gap: var(--sp-2); }
-.dd-pane { padding: var(--sp-4) var(--sp-5) var(--sp-8); }
+.dd-tabs { padding: 0 var(--sp-5); align-items: center; gap: var(--sp-2); border-top: 1px solid var(--c-line); }
+.dd-pane { padding: var(--sp-4) var(--sp-5) var(--sp-6); }
 
 .plot { line-height: 1.8; color: var(--c-text-2); white-space: pre-wrap; }
 .note-box {
@@ -544,6 +853,14 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
 .sim img { width: 100%; aspect-ratio: 2/3; object-fit: cover; border-radius: var(--r-sm); background: var(--c-surface-2); transition: transform var(--t-base); }
 .sim:hover img { transform: translateY(-2px); box-shadow: var(--sh-2); }
 .sim-t { font-size: var(--fs-xs); color: var(--c-text-2); margin-top: 4px; }
+
+/* 窄屏：相似推荐侧栏移到主区下方，全宽 */
+@media (max-width: 1100px) {
+  .drawer-body { flex-direction: column; }
+  .dd-similar-rail { width: auto; border-left: 0; border-top: 1px solid var(--c-line); }
+  .rail-list { flex-direction: row; flex-wrap: wrap; }
+  .rail-list .sim { width: 112px; }
+}
 
 .ftable { width: 100%; border-collapse: collapse; font-size: var(--fs-md); }
 .ftable th, .ftable td { text-align: left; padding: var(--sp-2); border-bottom: 1px solid var(--c-line); }
@@ -574,4 +891,37 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
   .dd-cover { width: 160px; }
   .edit-form .two { grid-template-columns: 1fr; }
 }
+
+/* 头部按钮贴近 drawer 顶边，tooltip 改为朝下显示，避免被顶边裁切 */
+.drawer-head [data-tip]::after {
+  bottom: auto; top: calc(100% + 6px);
+}
+/* 主区操作按钮（收藏/想看/已看/片单）上方有封面与标题，tooltip 改为朝下，避免被遮挡 */
+.dd-actions [data-tip]::after {
+  bottom: auto; top: calc(100% + 6px);
+}
+/* 片单弹窗内的新建行 */
+.cp-new { display: flex; gap: var(--sp-2); padding: var(--sp-2) 0 0; margin-top: var(--sp-2); border-top: 1px dashed var(--c-line); }
+.cp-new .tag-input { flex: 1; }
+
+/* 标签区头部「管理全部标签」链接 + 通用小按钮 */
+.link-btn { border: 0; background: transparent; color: var(--c-primary); cursor: pointer; font: inherit; font-size: var(--fs-sm); padding: 0 2px; }
+.link-btn:hover { text-decoration: underline; }
+.link-btn.danger { color: var(--c-danger, #e5484d); }
+.dd-tags-head { display: flex; align-items: center; gap: var(--sp-3); flex-wrap: wrap; }
+
+/* 全局标签管理弹窗 */
+.tag-mgr { position: fixed; inset: 0; z-index: 1200; background: rgba(0,0,0,.5); display: flex; align-items: center; justify-content: center; padding: var(--sp-4); }
+.tag-mgr-box { width: min(520px, 100%); max-height: 80vh; display: flex; flex-direction: column; background: var(--c-surface-2); border: 1px solid var(--c-line-strong); border-radius: var(--r-lg); box-shadow: var(--sh-3); overflow: hidden; }
+.tm-head { display: flex; align-items: center; justify-content: space-between; padding: var(--sp-4) var(--sp-5); border-bottom: 1px solid var(--c-line); }
+.tag-mgr-box .muted { margin: 0; padding: var(--sp-3) var(--sp-5); }
+.tm-list { list-style: none; margin: 0; padding: var(--sp-2) var(--sp-3) var(--sp-4); overflow-y: auto; }
+.tm-item { display: flex; align-items: center; gap: var(--sp-3); padding: var(--sp-2) var(--sp-3); border-radius: var(--r-sm); }
+.tm-item:nth-child(odd) { background: var(--c-surface); }
+.tm-name { font-weight: 600; }
+.tm-actions { margin-left: auto; display: flex; gap: var(--sp-3); }
+.tm-input { flex: 1; box-sizing: border-box; background: var(--c-surface-2); border: 1px solid var(--c-line); color: var(--c-text); border-radius: 8px; padding: 6px 10px; font: inherit; font-size: var(--fs-sm); }
+.tm-input:focus { outline: none; border-color: var(--c-primary); }
+.icon-btn { border: 0; background: transparent; color: var(--c-text-3); cursor: pointer; font-size: 20px; line-height: 1; padding: 0 4px; }
+.icon-btn:hover { color: var(--c-text-1); }
 </style>

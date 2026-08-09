@@ -18,6 +18,7 @@ export function useLibrary() {
     q: state.q || undefined,
     actress: state.actress.length ? state.actress.join(',') : undefined,
     genre: state.genre.length ? state.genre.join(',') : undefined,
+    tag: state.tag.length ? state.tag.join(',') : undefined,
     studio: state.studio || undefined,
     series: state.series || undefined,
     prefix: state.prefix || undefined,
@@ -27,6 +28,7 @@ export function useLibrary() {
     page: state.page,
     page_size: state.page_size,
     op: state.multiOp,
+    min_rating: state.minRating || undefined,
   }))
 
   const pageCount = computed(() =>
@@ -61,8 +63,8 @@ export function useLibrary() {
 
   /* 条件变化自动重载；改筛选条件时重置页码 */
   watch(
-    () => [state.q, state.actress.slice(), state.genre.slice(), state.studio,
-           state.series, state.prefix, state.year, state.flags.slice(), state.multiOp],
+    () => [state.q, state.actress.slice(), state.genre.slice(), state.tag.slice(), state.studio,
+           state.series, state.prefix, state.year, state.flags.slice(), state.multiOp, state.minRating],
     () => { state.page = 1; reload() },
     { deep: true },
   )

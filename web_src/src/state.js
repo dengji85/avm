@@ -1,4 +1,4 @@
-import { reactive, watch } from 'vue'
+﻿import { reactive, watch } from 'vue'
 
 const PREF_KEY = 'avm.prefs.v2'
 
@@ -10,16 +10,21 @@ const saved = loadPrefs()
 /** 全局响应式状态 */
 export const state = reactive({
   // ---- 路由 / 视图 ----
-  view: 'gallery',
+  view: 'home',
+
+  // ---- 维护中心子标签 ----
+  maintTab: 'overview',
 
   // ---- 影片查询条件 ----
   q: '',
   actress: [],
   genre: [],
+  tag: [],
   studio: '',
   series: '',
   prefix: '',
   year: null,
+  minRating: 0,
   flags: [],
   sort: saved.sort || 'added_desc',
   page: 1,
@@ -36,6 +41,8 @@ export const state = reactive({
 
   // ---- 详情 ----
   currentId: null,
+  // 从详情页点击筛选条件跳转时，记录来源影片，便于在影片库一键返回
+  returnFromFilter: null,   // { id, title }
 
   // ---- 女优 ----
   actFollowOnly: false,
@@ -81,6 +88,51 @@ watch(
   { deep: true },
 )
 
+/* ---------------- URL hash 路由（刷新/分享/前进后退 保持当前视图） ----------------
+ * 规则：#/<view>                普通视图
+ *       #/maintenance/<tab>     维护中心并定位到指定子 tab
+ * 仅在合法视图 id 内生效，非法 hash 退回默认 home。
+ */
+const VALID_VIEWS = ['home', 'gallery', 'stats', 'maintenance', 'actress',
+  'collections', 'rankings', 'swipe', 'settings']
+const VALID_MAINT = ['overview', 'storage', 'logs']
+
+function parseHash() {
+  const raw = (location.hash || '').replace(/^#\/?/, '')
+  if (!raw) return null
+  const [view, sub] = raw.split('/')
+  if (!VALID_VIEWS.includes(view)) return null
+  return { view, sub }
+}
+
+function applyHashToState() {
+  const r = parseHash()
+  if (!r) return
+  state.view = r.view
+  if (r.view === 'maintenance' && r.sub && VALID_MAINT.includes(r.sub)) {
+    state.maintTab = r.sub
+  }
+}
+
+function stateToHash() {
+  if (state.view === 'maintenance' && state.maintTab && VALID_MAINT.includes(state.maintTab)) {
+    return `#/maintenance/${state.maintTab}`
+  }
+  return `#/${state.view}`
+}
+
+// 1) 启动即根据当前 URL 还原视图（在 state 初始化后调用一次）
+applyHashToState()
+
+// 2) 视图/子标签变化 → 写回 hash（不触发 hashchange 回环，因值一致时浏览器不派发）
+watch(
+  () => [state.view, state.maintTab],
+  () => { if (VALID_VIEWS.includes(state.view) && location.hash !== stateToHash()) location.hash = stateToHash() },
+)
+
+// 3) 浏览器前进/后退 → 同步回 state
+window.addEventListener('hashchange', applyHashToState)
+
 /* 主题 / 密度应用到 <html> */
 export function applyTheme() {
   const el = document.documentElement
@@ -102,7 +154,9 @@ export function resetFilters() {
   state.prefix = ''
   state.year = null
   state.flags = []
+  state.tag = []
   state.page = 1
+  state.returnFromFilter = null
 }
 
 /** 当前是否有任何激活筛选 */
@@ -124,6 +178,7 @@ export const FLAGS = [
 export const FACET_KINDS = [
   ['actresses', 'actress', true, '女优'],
   ['genres', 'genre', true, '类型'],
+  ['tags', 'tag', true, '标签'],
   ['studios', 'studio', false, '厂商'],
   ['series', 'series', false, '系列'],
   ['prefixes', 'prefix', false, '番号前缀'],
@@ -148,32 +203,43 @@ export const NAV_ICONS = {
   swipe: 'M6.59 6.17a1 1 0 0 0-1.42 1.42L7.17 9.59 3.29 13.46a3 3 0 0 0 0 4.25l.17.17a3 3 0 0 0 4.25 0l2.29-2.29V19a1 1 0 1 0 2 0v-3.59a3 3 0 0 0-.88-2.12L9.83 11l1.42-1.41-4.66-3.42zm10.82 0l4.66 3.42-1.42 1.41 2.29 2.29a3 3 0 0 1 .88 2.12V19a1 1 0 1 1-2 0v-3.41l-2.29 2.29a3 3 0 0 1-4.25 0l-.17-.17a3 3 0 0 1 0-4.25l3.88-3.87-1.42-1.42a1 1 0 0 1 1.42-1.42z',
   stats: 'M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.41 0-8-3.59-8-8s3.59-8 8-8 8 3.59 8 8-3.59 8-8 8zm.75-13h-1.5v6l5.25 3.15.75-1.23-4.5-2.67V7z',
   storage: 'M12 2L2 7l10 5 10-5-10-5zm0 13.09L4.55 11 3 11.82l9 4.5 9-4.5-1.55-.82L12 15.09zM3 15.18V20l9 4 9-4v-4.82l-9 4.5-9-4.5z',
+  scrapelogs: 'M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8l-6-6zm2 16H8v-2h8v2zm0-4H8v-2h8v2zm-3-5V3.5L18.5 9H13z',
+  maintenance: 'M22.7 19l-9.1-9.1c.9-2.3.4-5-1.5-6.9-2-2-5-2.4-7.4-1.3L9 6 6 9 1.6 4.7C.4 7.1.9 10.1 2.9 12.1c1.9 1.9 4.6 2.4 6.9 1.5l9.1 9.1c.4.4 1 .4 1.4 0l2.9-2.9c.4-.4.4-1 0-1.4z',
   settings: 'M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58a.49.49 0 0 0 .12-.61l-1.92-3.32a.488.488 0 0 0-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54a.484.484 0 0 0-.48-.41h-3.84a.484.484 0 0 0-.48.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96a.488.488 0 0 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58a.49.49 0 0 0-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.27.41.48.41h3.84c.24 0 .44-.17.48-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z',
 }
 
-export const NAV_GROUPS = [
-  {
-    title: '浏览',
-    items: [
-      { id: 'gallery', label: '影片库' },
-      { id: 'actress', label: '女优墙' },
-      { id: 'collections', label: '片单' },
-    ],
-  },
-  {
-    title: '发现',
-    items: [
-      { id: 'rankings', label: '排行榜' },
-      { id: 'swipe', label: '滑动评分' },
-    ],
-  },
-  {
-    title: '管理',
-    items: [
-      { id: 'stats', label: '统计分析' },
-      { id: 'storage', label: '存储体检' },
-      { id: 'health', label: '数据健康' },
-      { id: 'settings', label: '设置' },
-    ],
-  },
+/* 顶部主导航（Tab）：首页 / 影片库 / 统计 / 维护中心 */
+export const NAV_TABS = [
+  { id: 'home', label: '首页', icon: 'home' },
+  { id: 'gallery', label: '影片库', icon: 'gallery' },
+  { id: 'stats', label: '统计', icon: 'stats' },
+  { id: 'maintenance', label: '维护中心', icon: 'maintenance' },
 ]
+
+/* 次级入口（仍可通过顶栏菜单/路由直达，不在主 Tab 强暴露） */
+export const NAV_SECONDARY = [
+  { id: 'actress', label: '女优墙' },
+  { id: 'collections', label: '片单' },
+  { id: 'rankings', label: '排行榜' },
+  { id: 'swipe', label: '滑动评分' },
+  { id: 'settings', label: '设置' },
+]
+
+/* 侧边栏分组导航（Sidebar.vue 使用，注意字段为 id/label/icon） */
+export const NAV_GROUPS = [
+  { title: '浏览', items: [
+    { id: 'home', label: '推荐', icon: 'gallery' },
+    { id: 'gallery', label: '影片库', icon: 'gallery' },
+    { id: 'actress', label: '女优墙', icon: 'actress' },
+    { id: 'collections', label: '片单', icon: 'collections' },
+    { id: 'rankings', label: '排行榜', icon: 'rankings' },
+    { id: 'swipe', label: '滑动评分', icon: 'swipe' },
+  ] },
+  { title: '维护', items: [
+    { id: 'maintenance', label: '维护中心', icon: 'maintenance' },
+    { id: 'settings', label: '设置', icon: 'settings' },
+  ] },
+]
+
+
+

@@ -95,6 +95,14 @@ export const getCollection = (cid) => get(`/collections/${cid}`)
 export const addToCollection = (cid, movieId) => post(`/collections/${cid}/movies`, { movie_id: movieId })
 export const removeFromCollection = (cid, movieId) => del(`/collections/${cid}/movies/${movieId}`)
 
+/* ---------------- 标签字典 ---------------- */
+export const listTags = async () => {
+  const r = await get('/tags')
+  return (r && r.items) || []
+}
+export const renameTag = (oldName, newName) => post('/tags/rename', { old: oldName, new: newName })
+export const deleteTag = (name) => post('/tags/delete', { name })
+
 /* ---------------- 统计 / 存储 ---------------- */
 export const getStats = () => get('/stats')
 export const getStatsEnhanced = () => get('/stats-enhanced')
@@ -116,8 +124,14 @@ export const scanStatus = () => get('/scan/status')
 export const cancelScan = () => post('/scan/cancel', {})
 export const startScrape = (body = {}) => post('/scrape', body)
 export const scrapeStatus = () => get('/scrape/status')
-export const reparseCodes = (body = {}) => post('/reparse-codes', body)
 export const cancelScrape = () => post('/scrape/cancel', {})
+export const scrapeTasks = (limit = 50) => get('/scrape/tasks', { limit })
+export const scrapeLogs = (qs = {}) => get('/scrape/logs', qs)
+export const scrapeLogsClear = (qs = {}) => del('/scrape/logs', qs)
+export const scrapeSkips = () => get('/scrape/skips')
+export const scrapeSkipsClear = (movie_id = 0) => del('/scrape/skips', { movie_id })
+export const maintenanceSummary = () => get('/maintenance/summary')
+export const reparseCodes = (body = {}) => post('/reparse-codes', body)
 
 /* ---------------- AI 增强 ---------------- */
 export const aiStatus = () => get('/ai/status')

@@ -6,11 +6,11 @@ import { toast } from './utils.js'
 import { useTasks } from './composables/useTasks.js'
 
 import TopNav from './components/TopNav.vue'
-import Sidebar from './components/Sidebar.vue'
 import ToastLayer from './components/ToastLayer.vue'
 import ConfirmDialog from './components/ConfirmDialog.vue'
 import DetailDrawer from './components/DetailDrawer.vue'
 
+import HomeView from './views/HomeView.vue'
 import GalleryView from './views/GalleryView.vue'
 import ActressView from './views/ActressView.vue'
 import ActressDetailView from './views/ActressDetailView.vue'
@@ -18,11 +18,11 @@ import CollectionsView from './views/CollectionsView.vue'
 import RankingsView from './views/RankingsView.vue'
 import SwipeView from './views/SwipeView.vue'
 import StatsView from './views/StatsView.vue'
-import StorageView from './views/StorageView.vue'
-import HealthView from './views/HealthView.vue'
+import MaintenanceView from './views/MaintenanceView.vue'
 import SettingsView from './views/SettingsView.vue'
 
 const VIEWS = {
+  home: HomeView,
   gallery: GalleryView,
   actress: ActressView,
   actressDetail: ActressDetailView,
@@ -30,8 +30,7 @@ const VIEWS = {
   rankings: RankingsView,
   swipe: SwipeView,
   stats: StatsView,
-  storage: StorageView,
-  health: HealthView,
+  maintenance: MaintenanceView,
   settings: SettingsView,
 }
 
@@ -74,11 +73,10 @@ function onFilterChange() { /* 由各视图自行响应 state 变化 */ }
 
 <template>
   <div class="app">
-    <TopNav @search="onFilterChange" />
+    <TopNav />
 
     <div class="app-main">
-      <Sidebar @change="onFilterChange" />
-      <component :is="VIEWS[state.view] || VIEWS.gallery" />
+      <component :is="VIEWS[state.view] || VIEWS.home" />
     </div>
 
     <DetailDrawer />
