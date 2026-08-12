@@ -113,7 +113,7 @@ onMounted(load)
       <span class="tb-sub tabular" v-if="!loading">{{ total }} 部作品</span>
       <span v-else class="spinner"></span>
       <div class="spacer"></div>
-      <button class="btn tiny" @click="browseAll">在影片库中筛选</button>
+      <button class="btn tiny" @click="browseAll">{{ $t('actress.filterInGallery') }}</button>
     </div>
 
     <div class="view-body">

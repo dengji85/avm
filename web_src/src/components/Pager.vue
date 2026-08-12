@@ -31,7 +31,7 @@ function go(p) {
 
 <template>
   <nav v-if="pageCount > 1" class="pager">
-    <button class="btn tiny" :disabled="page <= 1" @click="go(1)">首页</button>
+    <button class="btn tiny" :disabled="page <= 1" @click="go(1)">{{ $t('pager.first') }}</button>
     <button class="btn tiny" :disabled="page <= 1" @click="go(page - 1)">‹</button>
 
     <button
@@ -44,9 +44,9 @@ function go(p) {
     >{{ p }}</button>
 
     <button class="btn tiny" :disabled="page >= pageCount" @click="go(page + 1)">›</button>
-    <button class="btn tiny" :disabled="page >= pageCount" @click="go(pageCount)">末页</button>
+    <button class="btn tiny" :disabled="page >= pageCount" @click="go(pageCount)">{{ $t('pager.last') }}</button>
 
-    <span class="pinfo">共 {{ total }} 部 · {{ pageCount }} 页</span>
+    <span class="pinfo">{{ $t('pager.info', { n: total, p: pageCount }) }}</span>
   </nav>
 </template>
 

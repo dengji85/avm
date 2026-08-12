@@ -7,24 +7,24 @@ import ScrapeLogsTab from './maintenance/ScrapeLogsTab.vue'
 
 // 维护中心子标签：直接绑定全局 state.maintTab，便于跨视图/重渲染保持位置
 const TABS = [
-  { id: 'overview', label: '总览', icon: '🏠' },
-  { id: 'storage', label: '存储·体检', icon: '🩺' },
-  { id: 'logs', label: '刮削日志', icon: '📜' },
+  { id: 'overview', label: 'maint.overview', icon: '🏠' },
+  { id: 'storage', label: 'maint.storage', icon: '🩺' },
+  { id: 'logs', label: 'maint.logs', icon: '📜' },
 ]
 const setTab = (id) => { state.maintTab = id }
 </script>
 
 <template>
   <section class="view maint">
-    <PageHead title="维护中心" sub="库体诊断 · 任务调度 · 数据治理" icon="🛠️">
+    <PageHead :title="$t('view.maintenance')" :sub="$t('maint.sub')" icon="🛠️">
       <template #actions>
-        <span class="hint">所有写操作与诊断集中于此</span>
+        <span class="hint">{{ $t('maint.hint') }}</span>
       </template>
     </PageHead>
 
     <div class="tabs tabbar" role="tablist">
       <button v-for="t in TABS" :key="t.id" class="tab" :class="{ on: state.maintTab === t.id }" role="tab" @click="setTab(t.id)">
-        <span class="t-ico">{{ t.icon }}</span>{{ t.label }}
+        <span class="t-ico">{{ t.icon }}</span>{{ $t(t.label) }}
       </button>
     </div>
 

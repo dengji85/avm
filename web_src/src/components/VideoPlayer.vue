@@ -1,7 +1,8 @@
 <script setup>
 import { ref, onBeforeUnmount, watch } from 'vue'
-import { streamUrl, setProgress, playMovie } from '../api.js'
+import { streamUrl, setProgress, playMovie, markPlayed } from '../api.js'
 import { toast, fmtClock } from '../utils.js'
+import { t } from '../i18n/index.js'
 
 const props = defineProps({
   movieId: { type: Number, required: true },
@@ -26,9 +27,11 @@ function onLoaded() {
   dur.value = v.duration || 0
   if (props.startAt > 0 && props.startAt < (v.duration || 0) - 5) {
     v.currentTime = props.startAt
-    toast(`已跳转至 ${fmtClock(props.startAt)}`, '', 2200)
+    toast(t('player.jumpedTo', { time: fmtClock(props.startAt) }), '', 2200)
   }
   v.play().catch(() => {})
+  // 网页播放器开始播放时记录一次播放次数（与外部播放器保持一致）
+  markPlayed(props.movieId).catch(() => {})
 }
 
 function onTime() {
@@ -58,7 +61,7 @@ function onError() {
 async function openExternal() {
   try {
     await playMovie(props.movieId)
-    toast('已调用系统播放器', 'ok')
+    toast(t('player.launchedExternal'), 'ok')
   } catch (e) { toast(e.message, 'err') }
 }
 
@@ -100,17 +103,17 @@ watch(() => props.movieId, () => {
 
     <div v-if="failed" class="p-fail">
       <div class="icon">▶</div>
-      <div class="title">浏览器无法解码此视频</div>
-      <p class="desc">MKV / AVI 等封装格式浏览器通常不支持内嵌播放，请使用系统播放器打开。</p>
-      <button class="btn primary" @click="openExternal">用系统播放器打开</button>
+      <div class="title">{{ $t('player.cannotDecode') }}</div>
+      <p class="desc">{{ $t('player.cannotDecodeDesc') }}</p>
+      <button class="btn primary" @click="openExternal">{{ $t('player.openExternal') }}</button>
     </div>
 
     <div v-if="ready && !failed" class="p-bar">
-      <button class="btn tiny ghost" @click="seek(-10)" data-tip="后退 10 秒">« 10s</button>
-      <button class="btn tiny ghost" @click="seek(30)" data-tip="快进 30 秒">30s »</button>
+      <button class="btn tiny ghost" @click="seek(-10)" :data-tip="$t('player.back10')">« 10s</button>
+      <button class="btn tiny ghost" @click="seek(30)" :data-tip="$t('player.fwd30')">30s »</button>
       <span class="t tabular">{{ fmtClock(cur) }} / {{ fmtClock(dur) }}</span>
       <div class="spacer"></div>
-      <button class="btn tiny ghost" @click="openExternal">系统播放器</button>
+      <button class="btn tiny ghost" @click="openExternal">{{ $t('player.external') }}</button>
     </div>
   </div>
 </template>

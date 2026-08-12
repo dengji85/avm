@@ -3,6 +3,7 @@ import { computed, ref } from 'vue'
 import { state } from '../state.js'
 import { coverThumbUrl, toggleFlag, playMovie } from '../api.js'
 import { coverFallback, fmtMin, fmtSize, toast, qualityTag } from '../utils.js'
+import { t } from '../i18n/index.js'
 
 const props = defineProps({
   movie: { type: Object, required: true },
@@ -61,7 +62,7 @@ async function play(e) {
   e.stopPropagation()
   try {
     await playMovie(m.value.id)
-    toast('已调用播放器', 'ok')
+    toast(t('player.launchedExternal'), 'ok')
   } catch (err) { toast(err.message, 'err') }
 }
 </script>
@@ -112,7 +113,7 @@ async function play(e) {
       </div>
 
       <!-- 中央播放 -->
-      <button class="play-fab" @click="play" data-tip="播放">▶</button>
+      <button class="play-fab" @click="play" :data-tip="$t('player.external')">▶</button>
 
       <!-- 底部标记 -->
       <div class="bl-tags">

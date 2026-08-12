@@ -1,8 +1,9 @@
 <script setup>
-import { ref, reactive, computed, onMounted } from 'vue'
+import { ref, reactive, computed, onMounted, watch } from 'vue'
 import { state } from '../state.js'
 import { getStats, getStatsEnhanced, getRankings, listMovies, getStorage } from '../api.js'
 import { fmtMin, fmtSize } from '../utils.js'
+import { t } from '../i18n/index.js'
 import PageHead from '../components/PageHead.vue'
 import StatGrid from '../components/StatGrid.vue'
 import EmptyState from '../components/EmptyState.vue'
@@ -70,6 +71,26 @@ function drillTo(dim, name) {
 
 function openDetail(id) { state.currentId = id }
 
+/* 顶部全局搜索：统计页展示的是全量指标，搜索不应过滤上方数据。
+   这里仅查询匹配影片数量，并引导用户跳到影片库查看结果。 */
+const searchCount = ref(null)
+const searchBusy = ref(false)
+let searchToken = 0
+function querySearchCount() {
+  const q = (state.q || '').trim()
+  if (!q) { searchCount.value = null; return }
+  const token = ++searchToken
+  searchBusy.value = true
+  listMovies({ q, size: 1, page: 1 })
+    .then((r) => { if (token === searchToken) searchCount.value = (r && r.total) || 0 })
+    .catch(() => { if (token === searchToken) searchCount.value = 0 })
+    .finally(() => { if (token === searchToken) searchBusy.value = false })
+}
+function gotoSearchResults() {
+  state.view = 'gallery'   // state.q 已写入，影片库会自动应用该关键词
+}
+watch(() => state.q, querySearchCount, { immediate: true })
+
 /* 跳转到 gallery 指定筛选态 */
 function gotoFilter(flag) {
   state.favorite = false
@@ -97,9 +118,9 @@ const quality = computed(() => {
   const total = overview.totalMovies || 0
   const pct = (n) => (total ? Math.round((n / total) * 100) : 0)
   return [
-    { label: '有封面', value: overview.withCover, pct: pct(overview.withCover), tone: 'ok' },
-    { label: '已刮削', value: overview.scraped, pct: pct(overview.scraped), tone: 'accent' },
-    { label: '无番号', value: overview.noCode, pct: pct(overview.noCode), tone: overview.noCode ? 'warn' : 'ok' },
+    { label: t('stats.hasCover'), value: overview.withCover, pct: pct(overview.withCover), tone: 'ok' },
+    { label: t('stats.scraped'), value: overview.scraped, pct: pct(overview.scraped), tone: 'accent' },
+    { label: t('stats.noCode'), value: overview.noCode, pct: pct(overview.noCode), tone: overview.noCode ? 'warn' : 'ok' },
   ]
 })
 
@@ -141,7 +162,7 @@ function setSort(k) {
   else { sortKey.value = k; sortDir.value = 'desc' }
 }
 
-const favNote = computed(() => (favDim.value === 'actress' ? '样本较少，多数女优仅 1 部' : ''))
+const favNote = computed(() => (favDim.value === 'actress' ? t('stats.favNote') : ''))
 
 /* 存储：各硬盘占比条形 */
 const diskBars = computed(() => {
@@ -173,9 +194,9 @@ const avgSize = computed(() =>
 const storageHero = computed(() => {
   const t = storage.total || {}
   return [
-    { label: '文件总数', value: (t.files || 0).toLocaleString() },
-    { label: '影片数', value: (t.movies || 0).toLocaleString() },
-    { label: '平均 / 部', value: fmtSize(avgSize.value) },
+    { label: t('stats.heroFiles'), value: (t.files || 0).toLocaleString() },
+    { label: t('stats.heroMovies'), value: (t.movies || 0).toLocaleString() },
+    { label: t('stats.heroAvg'), value: fmtSize(avgSize.value) },
   ]
 })
 const diskCount = computed(() => (storage.byDisk || []).length)
@@ -242,7 +263,7 @@ async function loadAll() {
       .sort((a, b) => (b.runtime || 0) - (a.runtime || 0))
       .slice(0, 10)
   } catch (e) {
-    error.value = e.message || '统计加载失败'
+    error.value = e.message || t('stats.loadFail')
   } finally {
     loading.value = false
   }
@@ -257,10 +278,10 @@ const ring = computed(() => {
 })
 
 const favFilterCards = computed(() => [
-  { key: 'favorite', label: '收藏', value: overview.favorite, icon: '⭐', tone: 'gold' },
-  { key: 'watchlist', label: '想看', value: overview.watchlist, icon: '🔖', tone: 'accent' },
-  { key: 'watched', label: '已看', value: overview.watched, icon: '✅', tone: 'ok' },
-  { key: 'unwatched', label: '未看', value: overview.totalMovies - overview.watched, icon: '⏳', tone: 'muted' },
+  { key: 'favorite', label: t('flag.favorite'), value: overview.favorite, icon: '⭐', tone: 'gold' },
+  { key: 'watchlist', label: t('flag.watchlist'), value: overview.watchlist, icon: '🔖', tone: 'accent' },
+  { key: 'watched', label: t('flag.watched'), value: overview.watched, icon: '✅', tone: 'ok' },
+  { key: 'unwatched', label: t('stats.favUnwatched'), value: overview.totalMovies - overview.watched, icon: '⏳', tone: 'muted' },
 ])
 
 /* 存储分布：按文件类型、最大文件 */
@@ -294,52 +315,65 @@ const byGenreBars = computed(() => {
 <template>
   <section class="view">
     <div class="view-body stats block-scroll">
-    <PageHead title="统计" :sub="`${overview.totalMovies} 部影片的收藏全景`">
+    <PageHead :title="$t('view.stats')" :sub="$t('stats.sub', { n: overview.totalMovies })">
       <template #actions>
-        <button class="btn ghost" @click="loadAll">刷新</button>
+        <button class="btn ghost" @click="loadAll">{{ $t('stats.refresh') }}</button>
       </template>
     </PageHead>
 
     <div v-if="loading" class="loading-block">
       <div class="spinner big"></div>
-      <p class="muted">正在统计你的收藏…</p>
+      <p class="muted">{{ $t('stats.loading') }}</p>
     </div>
 
-    <EmptyState v-else-if="error" icon="!" :title="error" action="重试" @action="loadAll" />
+    <EmptyState v-else-if="error" icon="!" :title="error" :action="$t('stats.retry')" @action="loadAll" />
 
     <template v-else>
+      <!-- 全局搜索提示：统计为全量数据，搜索不筛选上方指标，引导到影片库查看结果 -->
+      <div v-if="state.q" class="search-hint">
+        <span class="sh-ico">🔍</span>
+        <span class="sh-text">
+          <b>{{ state.q }}</b> · {{ $t('stats.searchIsGlobal') }}
+        </span>
+        <button class="sh-go" :disabled="searchBusy" @click="gotoSearchResults">
+          <span v-if="searchBusy" class="spinner sm"></span>
+          <template v-else>{{ $t('stats.viewInGallery', { n: searchCount == null ? '…' : searchCount }) }}</template>
+          →
+        </button>
+      </div>
+
       <!-- ===== 核心 KPI 行 ===== -->
       <div class="kpi-row">
         <div class="kpi storage" :class="{ empty: !diskTotal }">
           <span class="kpi-ico">💾</span>
           <div class="kpi-body">
-            <span class="kpi-label">总存储占用</span>
+            <span class="kpi-label">{{ $t('stats.totalStorage') }}</span>
             <span class="kpi-value tabular">{{ fmtSize(diskTotal) || '—' }}</span>
-            <span class="kpi-sub muted">{{ (storage.total.files || 0).toLocaleString() }} 文件 · 均 {{ fmtSize(avgSize) }}/部</span>
+            <span class="kpi-sub muted">{{ $t('stats.storageSub', { files: (storage.total.files || 0).toLocaleString(), avg: fmtSize(avgSize) }) }}</span>
           </div>
         </div>
         <div class="kpi">
           <span class="kpi-ico">🎞️</span>
           <div class="kpi-body">
-            <span class="kpi-label">影片总数</span>
+            <span class="kpi-label">{{ $t('stats.moviesTotal') }}</span>
             <span class="kpi-value tabular">{{ overview.totalMovies.toLocaleString() }}</span>
-            <span class="kpi-sub muted">本月 +{{ overview.addedThisMonth }}</span>
+            <span class="kpi-sub muted">{{ $t('stats.thisMonth', { n: overview.addedThisMonth }) }}</span>
           </div>
         </div>
         <div class="kpi">
           <span class="kpi-ico">⏱️</span>
           <div class="kpi-body">
-            <span class="kpi-label">总时长</span>
+            <span class="kpi-label">{{ $t('stats.totalRuntime') }}</span>
             <span class="kpi-value tabular">{{ fmtRuntime(overview.runtimeMin) }}</span>
-            <span class="kpi-sub muted">{{ overview.actresses }} 女优 · {{ overview.series }} 系列</span>
+            <span class="kpi-sub muted">{{ $t('stats.actressSeries', { a: overview.actresses, s: overview.series }) }}</span>
           </div>
         </div>
         <div class="kpi">
           <span class="kpi-ico">👁️</span>
           <div class="kpi-body">
-            <span class="kpi-label">已看占比</span>
+            <span class="kpi-label">{{ $t('stats.watchedPct') }}</span>
             <span class="kpi-value tabular">{{ overview.watchedPct }}%</span>
-            <span class="kpi-sub muted">{{ overview.watched }}/{{ overview.totalMovies }} 部</span>
+            <span class="kpi-sub muted">{{ $t('stats.watchedOf', { w: overview.watched, t: overview.totalMovies }) }}</span>
           </div>
           <span class="kpi-ring" :style="{ '--p': ring.pct }"></span>
         </div>
@@ -364,35 +398,35 @@ const byGenreBars = computed(() => {
 
       <!-- ===== Tab 分区 ===== -->
       <div class="tabs">
-        <button :class="{on: activeTab==='storage'}" @click="activeTab='storage'">存储分布</button>
-        <button :class="{on: activeTab==='collect'}" @click="activeTab='collect'">收藏健康</button>
-        <button :class="{on: activeTab==='favorite'}" @click="activeTab='favorite'">最爱榜单</button>
-        <button :class="{on: activeTab==='trend'}" @click="activeTab='trend'">年份趋势</button>
-        <button :class="{on: activeTab==='fun'}" @click="activeTab='fun'">趣味榜单</button>
-        <button :class="{on: activeTab==='movies'}" @click="activeTab='movies'">影片一览</button>
+        <button :class="{on: activeTab==='storage'}" @click="activeTab='storage'">{{ $t('stats.storageDist') }}</button>
+        <button :class="{on: activeTab==='collect'}" @click="activeTab='collect'">{{ $t('stats.collectHealth') }}</button>
+        <button :class="{on: activeTab==='favorite'}" @click="activeTab='favorite'">{{ $t('stats.favTop') }}</button>
+        <button :class="{on: activeTab==='trend'}" @click="activeTab='trend'">{{ $t('stats.yearTrend') }}</button>
+        <button :class="{on: activeTab==='fun'}" @click="activeTab='fun'">{{ $t('stats.funTop') }}</button>
+        <button :class="{on: activeTab==='movies'}" @click="activeTab='movies'">{{ $t('stats.allMovies', { n: allMovies.length }) }}</button>
       </div>
 
       <!-- 存储分布 -->
       <div v-show="activeTab==='storage'">
         <section class="card panel">
           <div class="panel-head">
-            <h2>存储分布</h2>
-            <span class="muted small">共 {{ storage.total.bytes ? fmtSize(diskTotal) : '0' }} · {{ storage.total.movies || 0 }} 部</span>
+            <h2>{{ $t('stats.storageDist') }}</h2>
+            <span class="muted small">{{ $t('stats.storageHead', { size: storage.total.bytes ? fmtSize(diskTotal) : '0', n: storage.total.movies || 0 }) }}</span>
           </div>
 
-          <div v-if="!diskBars.length" class="muted pad">暂无文件记录</div>
+          <div v-if="!diskBars.length" class="muted pad">{{ $t('stats.noFiles') }}</div>
           <template v-else>
             <div class="bars">
               <div v-for="d in diskBars" :key="d.label" class="bar-row" style="cursor: default">
                 <span class="rank disk">{{ d.label }}</span>
-                <span class="name ellipsis">{{ fmtSize(d.value) }} · {{ d.movies }} 部 / {{ d.files }} 文件</span>
+                <span class="name ellipsis">{{ fmtSize(d.value) }} · {{ $t('stats.diskInfo', { movies: d.movies, files: d.files }) }}</span>
                 <span class="track"><i class="disk" :style="{ width: d.pct + '%' }"></i></span>
                 <span class="val tabular">{{ Math.round((d.value / diskTotal) * 100) }}%</span>
               </div>
             </div>
 
-            <h3 class="sub">厂商占用 Top</h3>
-            <div v-if="!studioBars.length" class="muted pad">暂无数据</div>
+            <h3 class="sub">{{ $t('stats.studioTop') }}</h3>
+            <div v-if="!studioBars.length" class="muted pad">{{ $t('stats.noData') }}</div>
             <div v-else class="bars">
               <div v-for="d in studioBars" :key="d.label" class="bar-row" style="cursor: default">
                 <span class="rank disk">{{ fmtSize(d.value) }}</span>
@@ -402,30 +436,30 @@ const byGenreBars = computed(() => {
               </div>
             </div>
 
-            <h3 class="sub">按内容类型</h3>
-            <div v-if="!byGenreBars.length" class="muted pad">暂无数据</div>
+            <h3 class="sub">{{ $t('stats.byGenre') }}</h3>
+            <div v-if="!byGenreBars.length" class="muted pad">{{ $t('stats.noData') }}</div>
             <div v-else class="bars">
               <div v-for="d in byGenreBars" :key="d.label" class="bar-row" style="cursor: default">
                 <span class="rank disk">{{ d.label }}</span>
-                <span class="name ellipsis">{{ d.movies }} 部 · 占 {{ d.share }}%</span>
+                <span class="name ellipsis">{{ $t('stats.genreInfo', { movies: d.movies, share: d.share }) }}</span>
                 <span class="track"><i class="disk" :style="{ width: d.pct + '%' }"></i></span>
                 <span class="val tabular">{{ fmtSize(d.value) }}</span>
               </div>
             </div>
 
-            <h3 class="sub">按文件格式</h3>
-            <div v-if="!byExtBars.length" class="muted pad">暂无数据</div>
+            <h3 class="sub">{{ $t('stats.byExt') }}</h3>
+            <div v-if="!byExtBars.length" class="muted pad">{{ $t('stats.noData') }}</div>
             <div v-else class="bars">
               <div v-for="d in byExtBars" :key="d.label" class="bar-row" style="cursor: default">
                 <span class="rank disk">{{ d.label }}</span>
-                <span class="name ellipsis">{{ d.files }} 个文件 · 占 {{ d.share }}%</span>
+                <span class="name ellipsis">{{ $t('stats.fileInfo', { files: d.files, share: d.share }) }}</span>
                 <span class="track"><i class="disk2" :style="{ width: d.pct + '%' }"></i></span>
                 <span class="val tabular">{{ fmtSize(d.value) }}</span>
               </div>
             </div>
 
-            <h3 class="sub">最大文件 Top</h3>
-            <div v-if="!largestFiles.length" class="muted pad">暂无数据</div>
+            <h3 class="sub">{{ $t('stats.largestTop') }}</h3>
+            <div v-if="!largestFiles.length" class="muted pad">{{ $t('stats.noData') }}</div>
             <div v-else class="bars">
               <div
                 v-for="f in largestFiles"
@@ -448,7 +482,7 @@ const byGenreBars = computed(() => {
       <div v-show="activeTab==='collect'">
         <div class="row">
           <section class="card panel">
-            <div class="panel-head"><h2>收藏质量</h2></div>
+            <div class="panel-head"><h2>{{ $t('stats.collectQuality') }}</h2></div>
             <div class="quality">
               <div v-for="q in quality" :key="q.label" class="q-row">
                 <div class="q-top">
@@ -458,13 +492,13 @@ const byGenreBars = computed(() => {
                 <span class="track"><i :class="q.tone" :style="{ width: q.pct + '%' }"></i></span>
               </div>
               <p class="q-hint muted">
-                收藏 {{ overview.favorite }} · 想看 {{ overview.watchlist }} · 有字幕 {{ overview.subtitle }} · 无码 {{ overview.uncensored }}
+                {{ $t('stats.qualityHint', { f: overview.favorite, w: overview.watchlist, s: overview.subtitle, u: overview.uncensored }) }}
               </p>
             </div>
           </section>
 
           <section class="card panel watch-ring">
-            <div class="panel-head"><h2>观看进度</h2></div>
+            <div class="panel-head"><h2>{{ $t('stats.watchProgress') }}</h2></div>
             <div class="ring-wrap">
               <svg viewBox="0 0 100 100" class="ring">
                 <circle cx="50" cy="50" :r="42" class="ring-bg" />
@@ -476,7 +510,7 @@ const byGenreBars = computed(() => {
               </svg>
               <div class="ring-center">
                 <b>{{ ring.pct }}%</b>
-                <small>已看 {{ overview.watched }}/{{ overview.totalMovies }}</small>
+                <small>{{ $t('stats.watchedOfShort', { w: overview.watched, t: overview.totalMovies }) }}</small>
               </div>
             </div>
           </section>
@@ -487,23 +521,23 @@ const byGenreBars = computed(() => {
       <div v-show="activeTab==='favorite'">
         <section class="card panel">
           <div class="panel-head">
-            <h2>最爱榜单</h2>
+            <h2>{{ $t('stats.favTop') }}</h2>
             <div class="seg">
-              <button :class="{on: favDim==='actress'}" @click="favDim='actress'">女优</button>
-              <button :class="{on: favDim==='studio'}" @click="favDim='studio'">厂商</button>
-              <button :class="{on: favDim==='series'}" @click="favDim='series'">系列</button>
-              <button :class="{on: favDim==='genre'}" @click="favDim='genre'">类型</button>
+              <button :class="{on: favDim==='actress'}" @click="favDim='actress'">{{ $t('stats.favActress') }}</button>
+              <button :class="{on: favDim==='studio'}" @click="favDim='studio'">{{ $t('stats.favStudio') }}</button>
+              <button :class="{on: favDim==='series'}" @click="favDim='series'">{{ $t('stats.favSeries') }}</button>
+              <button :class="{on: favDim==='genre'}" @click="favDim='genre'">{{ $t('stats.favGenre') }}</button>
             </div>
           </div>
           <p v-if="favNote" class="dim-note muted">{{ favNote }}</p>
-          <div v-if="!favBars.length" class="muted pad">暂无数据</div>
+          <div v-if="!favBars.length" class="muted pad">{{ $t('stats.noData') }}</div>
           <div v-else class="bars">
             <button
               v-for="(b, i) in favBars"
               :key="b.label"
               class="bar-row"
               @click="drillTo(favDim, b.label)"
-              :title="`查看 ${b.label} 的全部影片`"
+              :title="$t('stats.drillTip', { name: b.label })"
             >
               <span class="rank">{{ i + 1 }}</span>
               <span class="name ellipsis">{{ b.label }}</span>
@@ -518,13 +552,13 @@ const byGenreBars = computed(() => {
       <div v-show="activeTab==='trend'">
         <section class="card panel">
           <div class="panel-head">
-            <h2>年份趋势</h2>
+            <h2>{{ $t('stats.yearTrend') }}</h2>
             <div class="legend">
-              <span class="lg count">收藏数</span>
-              <span class="lg mins">时长</span>
+              <span class="lg count">{{ $t('stats.legendCount') }}</span>
+              <span class="lg mins">{{ $t('stats.legendMins') }}</span>
             </div>
           </div>
-          <div v-if="!yearTrend.length" class="muted pad">暂无数据</div>
+          <div v-if="!yearTrend.length" class="muted pad">{{ $t('stats.noData') }}</div>
           <div v-else class="year-trend">
             <div v-for="y in yearTrend" :key="y.year" class="yt-row">
               <span class="yt-year">{{ y.year }}</span>
@@ -532,7 +566,7 @@ const byGenreBars = computed(() => {
                 <span class="track sm"><i class="count" :style="{ width: y.countPct + '%' }"></i></span>
                 <span class="track sm"><i class="mins" :style="{ width: y.minPct + '%' }"></i></span>
               </div>
-              <span class="yt-val tabular">{{ y.count }} 部 · {{ fmtRuntime(Math.round(y.minutes / 60)) }}</span>
+              <span class="yt-val tabular">{{ $t('stats.yearInfo', { count: y.count, mins: fmtRuntime(Math.round(y.minutes / 60)) }) }}</span>
             </div>
           </div>
         </section>
@@ -541,42 +575,42 @@ const byGenreBars = computed(() => {
       <!-- 趣味榜单 -->
       <div v-show="activeTab==='fun'">
         <section class="card panel">
-          <div class="panel-head"><h2>趣味榜单</h2></div>
+          <div class="panel-head"><h2>{{ $t('stats.funTop') }}</h2></div>
           <div class="fun-grid">
             <div class="fun-col">
-              <h3>🏆 评分最高</h3>
+              <h3>🏆 {{ $t('stats.rateHigh') }}</h3>
               <ol class="fun-list">
                 <li v-for="m in ratingTop" :key="m.id" @click="openDetail(m.id)">
                   <span class="t ellipsis">{{ m.title || m.code }}</span><span class="gold">★{{ m.rating }}</span>
                 </li>
-                <li v-if="!ratingTop.length" class="muted">暂无评分记录</li>
+                <li v-if="!ratingTop.length" class="muted">{{ $t('stats.noRating') }}</li>
               </ol>
             </div>
             <div class="fun-col">
-              <h3>💩 评分最低</h3>
+              <h3>💩 {{ $t('stats.rateLow') }}</h3>
               <ol class="fun-list">
                 <li v-for="m in ratingLow" :key="m.id" @click="openDetail(m.id)">
                   <span class="t ellipsis">{{ m.title || m.code }}</span><span class="dim">★{{ m.rating }}</span>
                 </li>
-                <li v-if="!ratingLow.length" class="muted">暂无评分记录</li>
+                <li v-if="!ratingLow.length" class="muted">{{ $t('stats.noRating') }}</li>
               </ol>
             </div>
             <div class="fun-col">
-              <h3>🔥 播放最多</h3>
+              <h3>🔥 {{ $t('stats.playMost') }}</h3>
               <ol class="fun-list">
                 <li v-for="m in playTop" :key="m.id" @click="openDetail(m.id)">
                   <span class="t ellipsis">{{ m.title || m.code }}</span><span class="dim">×{{ m.play_count }}</span>
                 </li>
-                <li v-if="!playTop.length" class="muted">暂无播放记录</li>
+                <li v-if="!playTop.length" class="muted">{{ $t('stats.noPlay') }}</li>
               </ol>
             </div>
             <div class="fun-col">
-              <h3>📺 观看最久</h3>
+              <h3>📺 {{ $t('stats.watchLong') }}</h3>
               <ol class="fun-list">
                 <li v-for="m in watchedTop" :key="m.id" @click="openDetail(m.id)">
                   <span class="t ellipsis">{{ m.title || m.code }}</span><span class="dim">{{ fmtMin(Math.round((m.watched_sec || 0) / 60)) }}</span>
                 </li>
-                <li v-if="!watchedTop.length" class="muted">暂无观看记录</li>
+                <li v-if="!watchedTop.length" class="muted">{{ $t('stats.noWatch') }}</li>
               </ol>
             </div>
           </div>
@@ -596,22 +630,22 @@ const byGenreBars = computed(() => {
       <div v-show="activeTab==='movies'">
         <section class="card panel">
           <div class="panel-head">
-            <h2>所有影片一览（{{ allMovies.length }}）</h2>
+            <h2>{{ $t('stats.allMovies', { n: allMovies.length }) }}</h2>
             <div class="sort-tabs">
-              <button :class="{on: sortKey==='rating'}" @click="setSort('rating')">评分</button>
-              <button :class="{on: sortKey==='runtime'}" @click="setSort('runtime')">时长</button>
-              <button :class="{on: sortKey==='year'}" @click="setSort('year')">年份</button>
-              <button :class="{on: sortKey==='watched'}" @click="setSort('watched')">已看</button>
-              <button :class="{on: sortKey==='favorite'}" @click="setSort('favorite')">收藏</button>
+              <button :class="{on: sortKey==='rating'}" @click="setSort('rating')">{{ $t('stats.sortRating') }}</button>
+              <button :class="{on: sortKey==='runtime'}" @click="setSort('runtime')">{{ $t('stats.sortRuntime') }}</button>
+              <button :class="{on: sortKey==='year'}" @click="setSort('year')">{{ $t('stats.sortYear') }}</button>
+              <button :class="{on: sortKey==='watched'}" @click="setSort('watched')">{{ $t('stats.sortWatched') }}</button>
+              <button :class="{on: sortKey==='favorite'}" @click="setSort('favorite')">{{ $t('stats.sortFavorite') }}</button>
             </div>
           </div>
           <div class="tbl">
             <div class="trow th">
-              <span class="c-title">影片</span>
-              <span class="c-rating">评分</span>
-              <span class="c-runtime">时长</span>
-              <span class="c-year">年份</span>
-              <span class="c-flags">状态</span>
+              <span class="c-title">{{ $t('stats.colMovie') }}</span>
+              <span class="c-rating">{{ $t('stats.colRating') }}</span>
+              <span class="c-runtime">{{ $t('stats.colRuntime') }}</span>
+              <span class="c-year">{{ $t('stats.colYear') }}</span>
+              <span class="c-flags">{{ $t('stats.colStatus') }}</span>
             </div>
             <div
               v-for="m in sortedMovies"
@@ -628,9 +662,9 @@ const byGenreBars = computed(() => {
               <span class="c-year tabular muted">{{ m.year || '—' }}</span>
               <span class="c-flags">
                 <span v-if="m.favorite" class="pill gold">★</span>
-                <span v-if="m.watchlist" class="pill accent">想看</span>
-                <span v-if="m.watched" class="pill ok">已看</span>
-                <span v-if="!m.watched && !m.watchlist && !m.favorite" class="pill muted">—</span>
+                <span v-if="m.watchlist" class="pill accent">{{ $t('stats.stateWatchlist') }}</span>
+                <span v-if="m.watched" class="pill ok">{{ $t('stats.stateWatched') }}</span>
+                <span v-if="!m.watched && !m.watchlist && !m.favorite" class="pill muted">{{ $t('stats.dash') }}</span>
               </span>
             </div>
           </div>
@@ -662,6 +696,39 @@ const byGenreBars = computed(() => {
 .dim-note { font-size: 12px; margin: -4px 0 10px; }
 
 /* ===== 核心 KPI 行 ===== */
+/* 全局搜索提示条 */
+.search-hint {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 18px;
+  padding: 10px 14px;
+  background: color-mix(in srgb, var(--c-primary-h, #4f8cff) 10%, var(--c-surface-2, #161a22));
+  border: 1px solid color-mix(in srgb, var(--c-primary-h, #4f8cff) 35%, transparent);
+  border-radius: var(--r-md, 12px);
+}
+.search-hint .sh-ico { font-size: 16px; flex: 0 0 auto; }
+.search-hint .sh-text { flex: 1; min-width: 0; font-size: var(--fs-sm); color: var(--c-text-2); }
+.search-hint .sh-text b { color: var(--c-text); word-break: break-all; }
+.search-hint .sh-go {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--c-primary-h, #4f8cff) 50%, transparent);
+  background: color-mix(in srgb, var(--c-primary-h, #4f8cff) 16%, transparent);
+  color: var(--c-primary-h, #4f8cff);
+  font: inherit;
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.search-hint .sh-go:hover:not(:disabled) { background: color-mix(in srgb, var(--c-primary-h, #4f8cff) 26%, transparent); }
+.search-hint .sh-go:disabled { opacity: .6; cursor: default; }
+
 .kpi-row {
   margin-top: 18px;
   display: grid;

@@ -121,8 +121,8 @@ def _open_path(path: str, reveal: bool = False) -> Optional[int]:
 
 @router.post("/movies/{movie_id}/play")
 def play_movie(movie_id: int, payload: Dict[str, Any] = Body(default={})) -> Dict[str, Any]:
-    file_id = payload.get("file_id")
     reveal = bool(payload.get("reveal"))
+    file_id = payload.get("file_id")
     with db() as conn:
         movie = store.movie_detail(conn, movie_id)
         if not movie or not movie["files"]:
@@ -150,6 +150,16 @@ def play_movie(movie_id: int, payload: Dict[str, Any] = Body(default={})) -> Dic
             )
             return {"ok": True, "path": target["path"], "session_id": session_id}
         return {"ok": True, "path": target["path"]}
+
+
+@router.post("/movies/{movie_id}/played")
+def mark_played(movie_id: int) -> Dict[str, Any]:
+    with db() as conn:
+        movie = store.movie_detail(conn, movie_id)
+        if not movie:
+            raise HTTPException(404, "找不到影片")
+        store.mark_played(conn, movie_id)
+    return {"ok": True}
 
 
 # ------------------------------------------------------------------ 封面

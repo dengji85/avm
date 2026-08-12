@@ -4,6 +4,7 @@ import { state, SORTS, FLAGS, resetFilters, hasActiveFilter } from '../state.js'
 import { useLibrary } from '../composables/useLibrary.js'
 import { getContinueWatching, clearContinueWatching, deleteMovie, scrapeOne, addToCollection, coverThumbUrl } from '../api.js'
 import { toast, confirmDialog, coverFallback } from '../utils.js'
+import { t } from '../i18n'
 import { useTasks } from '../composables/useTasks.js'
 
 import MovieGrid from '../components/MovieGrid.vue'
@@ -49,10 +50,10 @@ function returnToDetail() {
 /* 右键菜单 */
 const ctx = reactive({ visible: false, x: 0, y: 0, movie: null })
 const ctxItems = computed(() => [
-  { label: '编辑元数据', icon: '✎', action: 'edit' },
-  { label: '重新刮削', icon: '⟳', action: 'scrape' },
-  { label: '加入片单', icon: '＋', action: 'collection' },
-  { label: '删除', icon: '🗑', danger: true, action: 'delete' },
+  { label: 'common.editMeta', icon: '✎', action: 'edit' },
+  { label: 'common.rescrape', icon: '⟳', action: 'scrape' },
+  { label: 'detail.addToCollection', icon: '＋', action: 'collection' },
+  { label: 'common.delete', icon: '🗑', danger: true, action: 'delete' },
 ])
 function openCtx(movie, ev) {
   ctx.movie = movie
@@ -64,8 +65,8 @@ function onCtxSelect(it) {
   const m = ctx.movie
   if (!m) return
   if (it.action === 'edit') { state.currentId = m.id; state.detailOpen = true }
-  else if (it.action === 'scrape') { scrapeOne(m.id).then(() => toast('已加入刮削队列', 'ok')).catch(e => toast('失败：' + e.message, 'err')) }
-  else if (it.action === 'collection') { addToCollection(m.id).then(() => toast('已加入片单', 'ok')).catch(e => toast('失败：' + e.message, 'err')) }
+  else if (it.action === 'scrape') { scrapeOne(m.id).then(() => toast(t('common.scrapeQueued'), 'ok')).catch(e => toast('失败：' + e.message, 'err')) }
+  else if (it.action === 'collection') { addToCollection(m.id).then(() => toast(t('detail.joinedCollection'), 'ok')).catch(e => toast('失败：' + e.message, 'err')) }
   else if (it.action === 'delete') {
     if (window.confirm(`确定删除《${m.title || m.code}》？`)) {
       deleteMovie(m.id).then(() => { toast('已删除', 'ok'); load() }).catch(e => toast('删除失败：' + e.message, 'err'))
@@ -169,7 +170,7 @@ onMounted(() => {
     <div class="gallery-main">
       <!-- 工具栏 -->
       <div class="toolbar">
-        <h1 class="tb-title">影片库</h1>
+        <h1 class="tb-title">{{ $t('view.gallery') }}</h1>
         <button v-if="state.returnFromFilter" class="btn tiny back-detail" @click="returnToDetail" data-tip="返回你刚才看的详情">
           ← 返回《{{ state.returnFromFilter.title }}》
         </button>
@@ -181,7 +182,7 @@ onMounted(() => {
         <!-- 多条件逻辑 -->
         <div class="btn-group" v-if="state.actress.length > 1 || state.genre.length > 1">
           <button class="btn tiny" :class="{ active: state.multiOp === 'OR' }" @click="state.multiOp = 'OR'" data-tip="任一匹配">任一</button>
-          <button class="btn tiny" :class="{ active: state.multiOp === 'AND' }" @click="state.multiOp = 'AND'" data-tip="全部匹配">全部</button>
+          <button class="btn tiny" :class="{ active: state.multiOp === 'AND' }" @click="state.multiOp = 'AND'" :data-tip="$t('view.andMatch')">{{ $t('common.all') }}</button>
         </div>
 
         <div class="seg">
@@ -190,7 +191,7 @@ onMounted(() => {
         </div>
 
         <select class="sort-sel" v-model="state.sort">
-          <option v-for="[v, t] in SORTS" :key="v" :value="v">{{ t }}</option>
+          <option v-for="[v, t] in SORTS" :key="v" :value="v">{{ $t(t) }}</option>
         </select>
 
         <!-- 卡片尺寸 -->
@@ -210,11 +211,11 @@ onMounted(() => {
 
       <!-- 激活筛选条 -->
       <div v-if="activeChips.length" class="filter-bar">
-        <span class="fb-label">筛选</span>
+        <span class="fb-label">{{ $t('view.filter') }}</span>
         <button v-for="(c, i) in activeChips" :key="i" class="chip on" @click="removeChip(c)">
           {{ c.label }} <span class="x">✕</span>
         </button>
-        <button class="btn tiny ghost" @click="resetFilters">全部清除</button>
+        <button class="btn tiny ghost" @click="resetFilters">{{ $t('view.clearAll') }}</button>
       </div>
 
       <!-- 内容 -->
@@ -240,7 +241,7 @@ onMounted(() => {
 
         <section class="lib">
           <div class="section-title" v-if="showContinue">
-            全部影片 <span class="count">{{ total }}</span>
+            {{ $t('view.allMovies') }} <span class="count">{{ total }}</span>
           </div>
 
           <!-- 网格 -->
@@ -252,7 +253,7 @@ onMounted(() => {
             @changed="() => {}"
           >
             <template #empty-action>
-              <button v-if="hasActiveFilter()" class="btn" @click="resetFilters">清除筛选条件</button>
+              <button v-if="hasActiveFilter()" class="btn" @click="resetFilters">{{ $t('view.clearFilters') }}</button>
               <button v-else class="btn primary" @click="runScan({})">扫描媒体库</button>
             </template>
           </MovieGrid>

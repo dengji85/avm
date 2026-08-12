@@ -3,12 +3,13 @@ import { ref, computed, onMounted } from 'vue'
 import { state } from '../state.js'
 import { getRankings, getWatchHistory, coverThumbUrl } from '../api.js'
 import { toast, coverFallback, fmtDuration, fmtSize, fmtAgo, fmtDate } from '../utils.js'
+import { t } from '../i18n/index.js'
 
 const KINDS = [
-  ['watched', '观看时长', (m) => fmtDuration(m.watched_sec)],
-  ['play', '播放次数', (m) => `${m.play_count || 0} 次`],
-  ['rating', '最高评分', (m) => `${m.rating || 0} 星`],
-  ['favorite', '收藏精选', (m) => `${m.rating || 0} 星`],
+  ['watched', 'rankings.watched', (m) => fmtDuration(m.watched_sec)],
+  ['play', 'rankings.play', (m) => t('rankings.times', { n: m.play_count || 0 })],
+  ['rating', 'rankings.rating', (m) => `${m.rating || 0} 星`],
+  ['favorite', 'rankings.favorite', (m) => `${m.rating || 0} 星`],
 ]
 
 const TABS = [...KINDS.map((k) => k[0]), 'history']
@@ -57,7 +58,7 @@ function open(id) { state.currentId = id }
 function medal(i) { return i === 0 ? 'gold' : i === 1 ? 'silver' : i === 2 ? 'bronze' : '' }
 function sub(m) { return [m.code, m.studio, m.year].filter(Boolean).join(' · ') }
 function methodLabel(method) {
-  return { builtin: '内置播放', external: '外部打开', system: '系统播放器' }[method] || method || '—'
+  return { builtin: t('rankings.methodBuiltin'), external: t('rankings.methodExternal'), system: t('rankings.methodSystem') }[method] || method || '—'
 }
 function histSub(h) { return [h.code, h.studio, h.year].filter(Boolean).join(' · ') }
 
@@ -67,7 +68,7 @@ onMounted(() => load('watched'))
 <template>
   <section class="view">
     <div class="toolbar">
-      <h1 class="tb-title">排行榜</h1>
+      <h1 class="tb-title">{{ $t('view.rankings') }}</h1>
       <span class="tb-sub tabular" v-if="!loading && !isHistory">Top {{ items.length }}</span>
       <span class="tb-sub tabular" v-else-if="!loading && isHistory">共 {{ historyTotal }} 次观看</span>
       <span v-else class="spinner"></span>
@@ -79,12 +80,12 @@ onMounted(() => load('watched'))
           class="btn tiny"
           :class="{ active: kind === k }"
           @click="load(k)"
-        >{{ label }}</button>
+        >{{ $t(label) }}</button>
         <button
           class="btn tiny"
           :class="{ active: kind === 'history' }"
           @click="historyPage = 1; load('history')"
-        >观看历史</button>
+        >{{ $t('rankings.history') }}</button>
       </div>
     </div>
 
@@ -99,8 +100,8 @@ onMounted(() => load('watched'))
 
       <div v-else-if="!items.length" class="empty">
         <div class="icon">↑</div>
-        <div class="title">暂无{{ isHistory ? '观看记录' : '排行数据' }}</div>
-        <div class="desc">{{ isHistory ? '每次观看都会记录在「观看历史」中。' : '观看、评分或收藏影片后，这里会显示排名。' }}</div>
+        <div class="title">{{ isHistory ? $t('rankings.emptyHistory') : $t('rankings.emptyRank') }}</div>
+        <div class="desc">{{ isHistory ? $t('rankings.emptyHistoryDesc') : $t('rankings.emptyRankDesc') }}</div>
       </div>
 
       <template v-else>

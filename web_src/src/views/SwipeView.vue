@@ -17,10 +17,10 @@ const dragging = ref(false)
 let startX = 0
 
 const MODES = [
-  ['unrated', '未评分', { sort: 'added_desc' }],
-  ['unwatched', '未看过', { flags: 'unwatched' }],
-  ['random', '随机漫游', { sort: 'random' }],
-  ['favorite', '我的收藏', { flags: 'favorite' }],
+  ['unrated', 'swipe.unrated', { sort: 'added_desc' }],
+  ['unwatched', 'swipe.unwatched', { flags: 'unwatched' }],
+  ['random', 'swipe.random', { sort: 'random' }],
+  ['favorite', 'swipe.favorite', { flags: 'favorite' }],
 ]
 
 const cur = computed(() => deck.value[idx.value] || null)
@@ -29,8 +29,8 @@ const done = computed(() => started.value && idx.value >= deck.value.length)
 const progress = computed(() => (deck.value.length ? Math.round((idx.value / deck.value.length) * 100) : 0))
 
 const hint = computed(() => {
-  if (dragX.value > 60) return { text: '想看', cls: 'like' }
-  if (dragX.value < -60) return { text: '跳过', cls: 'nope' }
+  if (dragX.value > 60) return { text: 'swipe.want', cls: 'like' }
+  if (dragX.value < -60) return { text: 'swipe.skip', cls: 'nope' }
   return null
 })
 
@@ -43,7 +43,7 @@ async function start() {
     const m = MODES.find((x) => x[0] === mode.value)
     const r = await listMovies(Object.assign({ page: 1, page_size: 100 }, m ? m[2] : {}))
     deck.value = r.items || []
-    if (!deck.value.length) toast('没有符合条件的影片', 'err')
+    if (!deck.value.length) toast(t('swipe.noMatch'), 'err')
   } catch (e) { toast(e.message, 'err'); deck.value = [] } finally { loading.value = false }
 }
 
@@ -120,14 +120,14 @@ function openDetail() { if (cur.value) state.currentId = cur.value.id }
 <template>
   <section class="view">
     <div class="toolbar">
-      <h1 class="tb-title">滑动评分</h1>
+      <h1 class="tb-title">{{ $t('view.swipe') }}</h1>
       <span class="tb-sub" v-if="started && deck.length">{{ idx }} / {{ deck.length }}</span>
       <div class="spacer"></div>
       <select class="sel" v-model="mode">
-        <option v-for="[v, t] in MODES" :key="v" :value="v">{{ t }}</option>
+        <option v-for="[v, t] in MODES" :key="v" :value="v">{{ $t(t) }}</option>
       </select>
       <button class="btn tiny primary" :disabled="loading" @click="start">
-        {{ started ? '重新开始' : '开始' }}
+        {{ started ? $t('swipe.restart') : $t('swipe.start') }}
       </button>
     </div>
 
@@ -137,12 +137,11 @@ function openDetail() { if (cur.value) state.currentId = cur.value.id }
       <!-- 未开始 -->
       <div v-if="!started" class="empty">
         <div class="icon">⇄</div>
-        <div class="title">快速整理你的片库</div>
+        <div class="title">{{ $t('swipe.introTitle') }}</div>
         <div class="desc">
-          逐张浏览影片并快速标记。支持鼠标拖拽或键盘操作：<br />
-          <kbd>←</kbd> 跳过 · <kbd>→</kbd> 想看 · <kbd>F</kbd> 收藏 · <kbd>1-5</kbd> 评分 · <kbd>Z</kbd> 撤销
+          {{ $t('swipe.kbdHint') }}
         </div>
-        <button class="btn primary large" @click="start">开始</button>
+        <button class="btn primary large" @click="start">{{ $t('swipe.start') }}</button>
       </div>
 
       <div v-else-if="loading" class="empty"><span class="spinner large"></span></div>
@@ -150,11 +149,11 @@ function openDetail() { if (cur.value) state.currentId = cur.value.id }
       <!-- 完成 -->
       <div v-else-if="done" class="empty">
         <div class="icon">✓</div>
-        <div class="title">本轮已全部过完</div>
+        <div class="title">{{ $t('swipe.doneTitle') }}</div>
         <div class="desc">
-          评分/标记 {{ stats.rated }} 部 · 收藏 {{ stats.faved }} 部 · 跳过 {{ stats.skipped }} 部
+          {{ $t('swipe.stats', stats) }}
         </div>
-        <button class="btn primary" @click="start">再来一轮</button>
+        <button class="btn primary" @click="start">{{ $t('swipe.again') }}</button>
       </div>
 
       <!-- 卡片堆 -->
@@ -173,7 +172,7 @@ function openDetail() { if (cur.value) state.currentId = cur.value.id }
         >
           <img :src="coverUrl(cur.id)" alt="" draggable="false" @error="coverFallback" @dblclick="openDetail" />
 
-          <div v-if="hint" class="sw-hint" :class="hint.cls">{{ hint.text }}</div>
+          <div v-if="hint" class="sw-hint" :class="hint.cls">{{ $t(hint.text) }}</div>
 
           <div class="sw-info">
             <div class="sw-title clamp-2">{{ cur.title || cur.code }}</div>
@@ -187,16 +186,16 @@ function openDetail() { if (cur.value) state.currentId = cur.value.id }
 
         <!-- 操作 -->
         <div class="sw-acts">
-          <button class="rb skip" @click="act('skip')" data-tip="跳过 (←)">✕</button>
-          <button class="rb undo" :disabled="idx === 0" @click="undo" data-tip="撤销 (Z)">↺</button>
+          <button class="rb skip" @click="act('skip')" :data-tip="$t('swipe.skip') + ' (←)'">✕</button>
+          <button class="rb undo" :disabled="idx === 0" @click="undo" :data-tip="$t('swipe.undo') + ' (Z)'">↺</button>
           <div class="star-rate">
-            <button v-for="v in 5" :key="v" class="sr" @click="rate(v)" :data-tip="`${v} 星`">★</button>
+            <button v-for="v in 5" :key="v" class="sr" @click="rate(v)" :data-tip="`${v} ★`">★</button>
           </div>
-          <button class="rb fav" @click="act('fav')" data-tip="收藏 (F)">♥</button>
-          <button class="rb want" @click="act('want')" data-tip="想看 (→)">✓</button>
+          <button class="rb fav" @click="act('fav')" :data-tip="$t('swipe.fav') + ' (F)'">♥</button>
+          <button class="rb want" @click="act('want')" :data-tip="$t('swipe.want') + ' (→)'">✓</button>
         </div>
 
-        <p class="sw-tip muted">拖拽卡片左右滑动 · 双击封面查看详情</p>
+        <p class="sw-tip muted">{{ $t('swipe.dragHint') }}</p>
       </div>
     </div>
   </section>

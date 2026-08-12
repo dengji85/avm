@@ -46,7 +46,7 @@ function onSelect(it) {
         @click="onSelect(it)"
       >
         <span v-if="it.icon" class="ci">{{ it.icon }}</span>
-        <span class="cl">{{ it.label }}</span>
+        <span class="cl">{{ $t(it.label) }}</span>
       </button>
     </div>
   </transition>

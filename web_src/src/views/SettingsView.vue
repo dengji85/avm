@@ -8,16 +8,18 @@ import {
 } from '../api.js'
 import { toast, confirmDialog } from '../utils.js'
 import { useTasks } from '../composables/useTasks.js'
+import { LANGUAGES, i18nState, setLang } from '../i18n'
+import { t } from '../i18n/index.js'
 
 const { runScan, runScrape } = useTasks()
 
 const TABS = [
-  ['library', '媒体库'],
-  ['scraper', '刮削数据源'],
-  ['parser', '文件名解析'],
-  ['ai', 'AI 增强'],
-  ['appearance', '外观'],
-  ['about', '关于'],
+  ['library', 'settings.tab.library'],
+  ['scraper', 'settings.tab.scraper'],
+  ['parser', 'settings.tab.parser'],
+  ['ai', 'settings.tab.ai'],
+  ['appearance', 'settings.tab.appearance'],
+  ['about', 'settings.tab.about'],
 ]
 const tab = ref('library')
 
@@ -103,7 +105,7 @@ async function saveLibrary() {
       },
     }
     await putConfig(patch)
-    toast('媒体库设置已保存', 'ok')
+    toast(t('settings.libSaved'), 'ok')
     await load()
   } catch (e) { toast(e.message, 'err') } finally { saving.value = false }
 }
@@ -112,14 +114,14 @@ const newPath = ref('')
 async function addPath() {
   const v = newPath.value.trim()
   if (!v) return
-  if ((cfg.library.paths || []).includes(v)) { toast('该目录已存在', 'err'); return }
+  if ((cfg.library.paths || []).includes(v)) { toast(t('settings.dirExists'), 'err'); return }
   cfg.library.paths.push(v)
   newPath.value = ''
   await saveLibrary()
 }
 async function delPath(i) {
   const p = cfg.library.paths[i]
-  if (!(await confirmDialog('移除目录', `将不再扫描：\n${p}\n已入库影片不会被删除。`, { danger: true, okText: '移除' }))) return
+  if (!(await confirmDialog(t('settings.removeDirTitle'), t('settings.removeDirDesc') + '\n' + p, { danger: true, okText: t('settings.remove') }))) return
   cfg.library.paths.splice(i, 1)
   await saveLibrary()
 }
@@ -143,7 +145,7 @@ function pickDir() {
 async function doSniff() {
   try {
     const r = await sniffCovers()
-    toast(`检查 ${r.checked || 0} 部，新增 ${r.found || 0} 张封面`, 'ok')
+    toast(t('settings.coverCheck', { n: r.checked || 0, m: r.found || 0 }), 'ok')
   } catch (e) { toast(e.message, 'err') }
 }
 
@@ -151,19 +153,19 @@ async function doSniff() {
 const cachingAvatars = ref(false)
 async function doCacheAvatars() {
   if (!cfg.media.avatar_download) {
-    toast('请先开启「下载女优头像」开关并保存，再执行缓存', 'warn')
+    toast(t('settings.avatarWarn'), 'warn')
     return
   }
   const ok = await confirmDialog(
-    '批量缓存女优头像',
-    '将把数据库中仍以远程 URL 存储的女优头像下载到本地头像目录。此操作需联网，建议先配置代理。是否继续？',
-    { danger: true, okText: '开始下载' },
+    t('settings.avatarConfirmTitle'),
+    t('settings.avatarConfirmDesc'),
+    { danger: true, okText: t('settings.fill') },
   )
   if (!ok) return
   cachingAvatars.value = true
   try {
     const r = await cacheAvatars()
-    toast(`已缓存 ${r.downloaded || 0} 张头像，失败 ${r.failed || 0} 张`, 'ok')
+    toast(t('settings.avatarCached', { n: r.downloaded || 0, bad: r.failed || 0 }), 'ok')
   } catch (e) { toast(e.message, 'err') } finally { cachingAvatars.value = false }
 }
 
@@ -171,15 +173,15 @@ async function doCacheAvatars() {
 const fillingAvatars = ref(false)
 async function doFillActressAvatars() {
   const ok = await confirmDialog(
-    '补全女优头像',
-    '将重新抓取已刮削影片的元数据，补全女优头像并落盘到本地目录。此操作会联网请求数据源，建议先配置代理。是否继续？',
-    { danger: true, okText: '开始补全' },
+    t('settings.avatarFillConfirmTitle'),
+    t('settings.avatarFillConfirmDesc'),
+    { danger: true, okText: t('settings.fill') },
   )
   if (!ok) return
   fillingAvatars.value = true
   try {
     const r = await fillActressAvatars()
-    toast(`扫描 ${r.movies_scanned || 0} 部影片，补全 ${r.filled || 0} 个女优头像（剩余空 ${r.actresses_after_empty || 0}）`, 'ok')
+    toast(t('settings.avatarFilled', { n: r.filled || 0, bad: r.failed || 0 }), 'ok')
   } catch (e) { toast(e.message, 'err') } finally { fillingAvatars.value = false }
 }
 
@@ -189,18 +191,18 @@ async function doRescanLocalCovers() {
   rescanningCovers.value = true
   try {
     const r = await rescanLocalCovers()
-    toast(`扫描 ${r.movies_scanned || 0} 部影片，补上 ${r.filled || 0} 张本地封面（剩余无封面 ${r.covers_after_empty || 0}）`, 'ok')
+    toast(t('settings.coverFillDesc', { n: r.movies_scanned || 0, m: r.filled || 0, k: r.covers_after_empty || 0 }), 'ok')
   } catch (e) { toast(e.message, 'err') } finally { rescanningCovers.value = false }
 }
 
 /* ---------------- 刮削 ---------------- */
 async function saveScraper() {
   let hj, hh
-  try { hj = JSON.parse(jsonText.value || '{}') } catch (e) { toast('JSON 模板格式有误：' + e.message, 'err'); return }
-  try { hh = JSON.parse(htmlText.value || '{}') } catch (e) { toast('HTML 模板格式有误：' + e.message, 'err'); return }
+  try { hj = JSON.parse(jsonText.value || '{}') } catch (e) { toast(t('settings.jsonInvalid') + e.message, 'err'); return }
+  try { hh = JSON.parse(htmlText.value || '{}') } catch (e) { toast(t('settings.htmlInvalid') + e.message, 'err'); return }
 
   const order = providers.available.filter((p) => provOn[p.id]).map((p) => p.id)
-  if (!order.length) { toast('请至少启用一个数据源', 'err'); return }
+  if (!order.length) { toast(t('settings.atLeastOneSource'), 'err'); return }
 
   saving.value = true
   try {
@@ -220,7 +222,7 @@ async function saveScraper() {
         javdb: cfg.scraper.javdb,
       },
     })
-    toast('数据源配置已保存', 'ok')
+    toast(t('settings.sourceSaved'), 'ok')
     await load()
   } catch (e) { toast(e.message, 'err') } finally { saving.value = false }
 }
@@ -239,40 +241,40 @@ const testOut = reactive({ lines: [], cls: '' })
 
 async function runTest() {
   testing.value = true
-  testOut.lines = ['测试中…']
+  testOut.lines = [t('settings.testing')]
   testOut.cls = ''
   try {
-    const order = providers.available.filter((p) => provOn[p.id]).map((p) => p.id)
-    const override = { scraper: { order, proxy: cfg.scraper.proxy || '', chrome_debug_port: Number(cfg.scraper.chrome_debug_port) || 9222 } }
-    const aw = cfg.scraper.avwiki || {}
-    if (aw.base_url || aw.cookie) override.scraper.avwiki = { ...aw }
-    if (cfg.scraper.javbus.base_url || cfg.scraper.javbus.cookie) override.scraper.javbus = { ...cfg.scraper.javbus }
-    if (cfg.scraper.javdb.base_url || cfg.scraper.javdb.cookie) override.scraper.javdb = { ...cfg.scraper.javdb }
+  const order = providers.available.filter((p) => provOn[p.id]).map((p) => p.id)
+  const override = { scraper: { order, proxy: cfg.scraper.proxy || '', chrome_debug_port: Number(cfg.scraper.chrome_debug_port) || 9222 } }
+  const aw = cfg.scraper.avwiki || {}
+  if (aw.base_url || aw.cookie) override.scraper.avwiki = { ...aw }
+  if (cfg.scraper.javbus.base_url || cfg.scraper.javbus.cookie) override.scraper.javbus = { ...cfg.scraper.javbus }
+  if (cfg.scraper.javdb.base_url || cfg.scraper.javdb.cookie) override.scraper.javdb = { ...cfg.scraper.javdb }
 
-    const r = await apiTest({ code: testCode.value.trim() || undefined, override })
-    const lines = [`测试番号：${r.code || '(库内第一个)'}`]
-    let hit = false
-    ;(r.results || []).forEach((res) => {
-      if (res.ok) {
-        hit = true
-        const f = res.fields || {}
-        const bits = []
-        if (f.title) bits.push('标题：' + f.title)
-        if (f.actresses && f.actresses.length) bits.push('女优：' + f.actresses.join('、'))
-        if (f.genres && f.genres.length) bits.push('类型：' + f.genres.join('、'))
-        if (f.studio) bits.push('厂商：' + f.studio)
-        lines.push(`✓ [${res.provider}] ${bits.join('；') || '已连接'}`)
-      } else {
-        lines.push(`✗ [${res.provider}] ${res.reason || '失败'}`)
-      }
-    })
-    if (r.cover_ok) lines.push('✓ 封面下载成功')
-    else if (r.cover_url) lines.push('✗ 封面下载失败')
-    testOut.lines = lines
-    testOut.cls = hit ? 'ok' : 'err'
+  const r = await apiTest({ code: testCode.value.trim() || undefined, override })
+  const lines = [t('settings.testCode') + (r.code || t('settings.firstInLib'))]
+  let hit = false
+  ;(r.results || []).forEach((res) => {
+    if (res.ok) {
+      hit = true
+      const f = res.fields || {}
+      const bits = []
+      if (f.title) bits.push(t('settings.tTitle') + f.title)
+      if (f.actresses && f.actresses.length) bits.push(t('settings.tActress') + f.actresses.join('、'))
+      if (f.genres && f.genres.length) bits.push(t('settings.tGenre') + f.genres.join('、'))
+      if (f.studio) bits.push(t('settings.tStudio') + f.studio)
+      lines.push(`✓ [${res.provider}] ${bits.join('；') || t('settings.connectedOK', { p: res.provider })}`)
+    } else {
+      lines.push(`✗ [${res.provider}] ${res.reason || t('settings.connectedFail', { p: res.provider })}`)
+    }
+  })
+  if (r.cover_ok) lines.push(t('settings.coverOK'))
+  else if (r.cover_url) lines.push(t('settings.coverFail'))
+  testOut.lines = lines
+  testOut.cls = hit ? 'ok' : 'err'
   } catch (e) {
-    testOut.lines = ['请求失败：' + (e.message || e)]
-    testOut.cls = 'err'
+  testOut.lines = [t('settings.reqFail') + (e.message || e)]
+  testOut.cls = 'err'
   } finally { testing.value = false }
 }
 
@@ -281,7 +283,7 @@ const parseInput = ref('')
 const parseRows = ref([])
 async function runParse() {
   const names = parseInput.value.split('\n').map((s) => s.trim()).filter(Boolean)
-  if (!names.length) { toast('请先输入文件名', 'err'); return }
+  if (!names.length) { toast(t('settings.filenameRequired'), 'err'); return }
   try {
     const r = await apiParse(names)
     parseRows.value = r.items || []
@@ -300,11 +302,11 @@ onMounted(load)
 <template>
   <section class="view">
     <div class="toolbar">
-      <h1 class="tb-title">设置</h1>
+      <h1 class="tb-title">{{ $t('view.settings') }}</h1>
       <span v-if="loading || saving" class="spinner"></span>
       <div class="spacer"></div>
       <div class="tabs st-tabs">
-        <button v-for="[k, l] in TABS" :key="k" class="tab" :class="{ on: tab === k }" @click="tab = k">{{ l }}</button>
+        <button v-for="t in TABS" :key="t[0]" class="tab" :class="{ on: tab === t[0] }" @click="tab = t[0]">{{ $t(t[1]) }}</button>
       </div>
     </div>
 
@@ -312,118 +314,118 @@ onMounted(load)
       <!-- ============ 媒体库 ============ -->
       <template v-if="tab === 'library'">
         <div class="panel">
-          <div class="panel-head">扫描目录 <span class="sub">影片文件所在的文件夹</span></div>
+          <div class="panel-head">{{ $t('settings.scanDir') }} <span class="sub">{{ $t('settings.scanDirSub') }}</span></div>
           <div class="panel-body">
             <ul v-if="(cfg.library.paths || []).length" class="path-list">
               <li v-for="(p, i) in cfg.library.paths" :key="i">
                 <span class="pi">📁</span>
                 <span class="pp ellipsis" :title="p">{{ p }}</span>
-                <button class="btn tiny ghost" @click="delPath(i)">移除</button>
+                <button class="btn tiny ghost" @click="delPath(i)">{{ $t('settings.remove') }}</button>
               </li>
             </ul>
-            <p v-else class="muted">还没有添加任何目录，添加后即可扫描导入影片。</p>
+            <p v-else class="muted">{{ $t('settings.noDirYet') }}</p>
 
             <div class="hstack">
-              <input v-model="newPath" placeholder="输入目录路径，如 D:\Movies" @keydown.enter="addPath" />
-              <button class="btn" @click="browse('')">浏览…</button>
-              <button class="btn primary" @click="addPath">添加</button>
+              <input v-model="newPath" :placeholder="$t('settings.scanDirPh')" @keydown.enter="addPath" />
+              <button class="btn" @click="browse('')">{{ $t('settings.browseDir') }}</button>
+              <button class="btn primary" @click="addPath">{{ $t('common.add') }}</button>
             </div>
           </div>
           <div class="panel-foot">
-            <button class="btn primary" @click="runScan({})">立即扫描</button>
-            <button class="btn" @click="runScrape({ missing_only: true })">刮削缺失元数据</button>
+            <button class="btn primary" @click="runScan({})">{{ $t('settings.scanNow') }}</button>
+            <button class="btn" @click="runScrape({ missing_only: true })">{{ $t('settings.scrapeMissing') }}</button>
           </div>
         </div>
 
         <div class="panel">
-          <div class="panel-head">扫描规则</div>
+          <div class="panel-head">{{ $t('settings.scanRule') }}</div>
           <div class="panel-body">
             <div class="field-row">
-              <label>最小文件体积</label>
+              <label>{{ $t('settings.minSize') }}</label>
               <div class="hstack">
                 <input type="number" v-model="cfg.library.min_size_mb" min="0" style="width:120px" />
-                <span class="muted">MB，小于此体积的文件会被忽略</span>
+                <span class="muted">{{ $t('settings.minSizeSub') }}</span>
               </div>
             </div>
             <div class="field">
-              <label>忽略关键词</label>
-              <input v-model="ignoreText" placeholder="sample, trailer, 预告" />
-              <span class="hint">文件名包含这些词时跳过，用逗号分隔</span>
+              <label>{{ $t('settings.ignoreKw') }}</label>
+              <input v-model="ignoreText" :placeholder="$t('settings.ignoreKwPh')" />
+              <span class="hint">{{ $t('settings.ignoreKwHint') }}</span>
             </div>
             <div class="field">
-              <label>视频扩展名</label>
-              <input v-model="extText" placeholder=".mp4, .mkv, .avi" />
-              <span class="hint">只扫描这些格式，用逗号分隔</span>
+              <label>{{ $t('settings.videoExt') }}</label>
+              <input v-model="extText" :placeholder="$t('settings.videoExtPh')" />
+              <span class="hint">{{ $t('settings.videoExtHint') }}</span>
             </div>
             <div class="field">
-              <label>ffmpeg 路径</label>
-              <input v-model="cfg.ffmpeg_path" placeholder="留空则使用系统 PATH 中的 ffmpeg" />
-              <span class="hint">用于生成预览图和读取视频信息</span>
+              <label>{{ $t('settings.ffmpegPath') }}</label>
+              <input v-model="cfg.ffmpeg_path" :placeholder="$t('settings.ffmpegPh')" />
+              <span class="hint">{{ $t('settings.ffmpegHint') }}</span>
             </div>
           </div>
           <div class="panel-foot">
-            <button class="btn primary" :disabled="saving" @click="saveLibrary">保存</button>
+            <button class="btn primary" :disabled="saving" @click="saveLibrary">{{ $t('common.save') }}</button>
           </div>
         </div>
 
         <div class="panel">
-          <div class="panel-head">封面</div>
+          <div class="panel-head">{{ $t('settings.cover') }}</div>
           <div class="panel-body">
             <div class="field-row checkbox">
-              <label>自动嗅探本地封面</label>
+              <label>{{ $t('settings.autoLocalCover') }}</label>
               <label class="toggle">
                 <input type="checkbox" v-model="cfg.cover.auto_local" /><span class="track"></span>
               </label>
             </div>
             <div class="field-row checkbox">
-              <label>联网下载封面</label>
+              <label>{{ $t('settings.downloadCover') }}</label>
               <label class="toggle">
                 <input type="checkbox" v-model="cfg.cover.download" /><span class="track"></span>
               </label>
             </div>
           </div>
           <div class="panel-foot">
-            <button class="btn primary" :disabled="saving" @click="saveLibrary">保存</button>
-            <button class="btn" @click="doSniff">立即嗅探本地封面</button>
+            <button class="btn primary" :disabled="saving" @click="saveLibrary">{{ $t('common.save') }}</button>
+            <button class="btn" @click="doSniff">{{ $t('settings.sniffNow') }}</button>
           </div>
         </div>
 
         <div class="panel">
-          <div class="panel-head">媒体资源路径 <span class="sub">封面已落盘；头像 / 背景图可自定义目录，便于独立磁盘与迁移</span></div>
+          <div class="panel-head">{{ $t('settings.mediaResPath') }} <span class="sub">{{ $t('settings.mediaResSub') }}</span></div>
           <div class="panel-body">
             <div class="field">
-              <label>女优头像目录</label>
-              <input v-model="cfg.media.avatar_dir" placeholder="avatars（相对 data/，或填绝对路径）" />
-              <span class="hint">相对路径基于 data/ 目录；填绝对路径可放到独立磁盘。可整体迁移，只需改此处指向</span>
+              <label>{{ $t('settings.avatarDir') }}</label>
+              <input v-model="cfg.media.avatar_dir" :placeholder="$t('settings.avatarDirPh')" />
+              <span class="hint">{{ $t('settings.avatarDirHint') }}</span>
             </div>
             <div class="field-row checkbox">
-              <label>下载女优头像（落盘到本地）</label>
+              <label>{{ $t('settings.dlAvatar') }}</label>
               <label class="toggle">
                 <input type="checkbox" v-model="cfg.media.avatar_download" /><span class="track"></span>
               </label>
             </div>
             <div class="field">
-              <label>背景大图（fanart）目录</label>
-              <input v-model="cfg.media.fanart_dir" placeholder="fanarts（相对 data/，或填绝对路径）" />
-              <span class="hint">影片背景大图的落盘目录，支持自定义与迁移</span>
+              <label>{{ $t('settings.fanartDir') }}</label>
+              <input v-model="cfg.media.fanart_dir" :placeholder="$t('settings.fanartDirPh')" />
+              <span class="hint">{{ $t('settings.fanartHint') }}</span>
             </div>
             <div class="field-row checkbox">
-              <label>下载背景大图（fanart）</label>
+              <label>{{ $t('settings.dlFanart') }}</label>
               <label class="toggle">
                 <input type="checkbox" v-model="cfg.media.fanart_download" /><span class="track"></span>
               </label>
             </div>
           </div>
           <div class="panel-foot">
-            <button class="btn primary" :disabled="saving" @click="saveLibrary">保存</button>
+            <button class="btn primary" :disabled="saving" @click="saveLibrary">{{ $t('common.save') }}</button>
             <button class="btn" :disabled="cachingAvatars" @click="doCacheAvatars">
-              {{ cachingAvatars ? '缓存中…' : '批量缓存现有女优头像' }}
+              {{ cachingAvatars ? $t('settings.caching') : $t('settings.cacheNowBtn') }}
             </button>
             <button class="btn" :disabled="fillingAvatars" @click="doFillActressAvatars">
-              {{ fillingAvatars ? '补全中…' : '补全女优头像（联网）' }}
+              {{ fillingAvatars ? $t('settings.filling') : $t('settings.fillAvatarsBtn') }}
             </button>
             <button class="btn" :disabled="rescanningCovers" @click="doRescanLocalCovers">
-              {{ rescanningCovers ? '嗅探中…' : '重嗅探本地封面' }}
+              {{ rescanningCovers ? $t('settings.sniffing') : $t('settings.rescanCoverBtn') }}
             </button>
           </div>
         </div>
@@ -432,7 +434,7 @@ onMounted(load)
       <!-- ============ 刮削 ============ -->
       <template v-else-if="tab === 'scraper'">
         <div class="panel">
-          <div class="panel-head">数据源 <span class="sub">按顺序尝试，先命中先采用</span></div>
+          <div class="panel-head">{{ $t('settings.dataSource') }} <span class="sub">{{ $t('settings.dataSourceSub') }}</span></div>
           <div class="panel-body">
             <div v-for="(p, i) in providers.available" :key="p.id" class="prov">
               <label class="toggle">
@@ -442,85 +444,85 @@ onMounted(load)
                 <div class="prov-name">
                   {{ p.label }}
                   <code>{{ p.id }}</code>
-                  <span v-if="providers.active.includes(p.id)" class="badge ok">生效中</span>
+                  <span v-if="providers.active.includes(p.id)" class="badge ok">{{ $t('settings.active') }}</span>
                 </div>
                 <div class="prov-desc">{{ p.desc }}</div>
               </div>
               <div class="prov-ord">
-                <button class="btn tiny ghost" :disabled="i === 0" @click="moveProvider(p.id, -1)" data-tip="上移">↑</button>
-                <button class="btn tiny ghost" :disabled="i === providers.available.length - 1" @click="moveProvider(p.id, 1)" data-tip="下移">↓</button>
+                <button class="btn tiny ghost" :disabled="i === 0" @click="moveProvider(p.id, -1)" :data-tip="$t('settings.moveUp')">↑</button>
+                <button class="btn tiny ghost" :disabled="i === providers.available.length - 1" @click="moveProvider(p.id, 1)" :data-tip="$t('settings.moveDown')">↓</button>
               </div>
             </div>
-            <p v-if="!providers.available.length" class="muted">未检测到可用数据源</p>
+            <p v-if="!providers.available.length" class="muted">{{ $t('settings.noSource') }}</p>
           </div>
         </div>
 
         <div class="panel">
-          <div class="panel-head">请求设置</div>
+          <div class="panel-head">{{ $t('settings.reqSettings') }}</div>
           <div class="panel-body">
             <div class="field-row">
-              <label>超时时间</label>
-              <div class="hstack"><input type="number" v-model="cfg.scraper.timeout" style="width:100px" /><span class="muted">秒</span></div>
+              <label>{{ $t('settings.timeout') }}</label>
+              <div class="hstack"><input type="number" v-model="cfg.scraper.timeout" style="width:100px" /><span class="muted">{{ $t('settings.timeoutSub') }}</span></div>
             </div>
             <div class="field-row">
-              <label>请求间隔</label>
-              <div class="hstack"><input type="number" v-model="cfg.scraper.delay_ms" style="width:100px" /><span class="muted">毫秒，避免请求过快被封</span></div>
+              <label>{{ $t('settings.delay') }}</label>
+              <div class="hstack"><input type="number" v-model="cfg.scraper.delay_ms" style="width:100px" /><span class="muted">{{ $t('settings.delaySub') }}</span></div>
             </div>
             <div class="field-row">
-              <label>并发线程数</label>
-              <div class="hstack"><input type="number" min="1" max="16" v-model="cfg.scraper.workers" style="width:100px" /><span class="muted">同时刮削影片数，2-8 较稳妥，越高越快但易被限流</span></div>
+              <label>{{ $t('settings.workers') }}</label>
+              <div class="hstack"><input type="number" min="1" max="16" v-model="cfg.scraper.workers" style="width:100px" /><span class="muted">{{ $t('settings.workersSub') }}</span></div>
             </div>
             <div class="field-row">
-              <label>代理</label>
+              <label>{{ $t('settings.proxy') }}</label>
               <input v-model="cfg.scraper.proxy" placeholder="http://127.0.0.1:7890" />
             </div>
             <div class="field-row checkbox">
-              <label>覆盖已有数据</label>
+              <label>{{ $t('settings.overwrite') }}</label>
               <label class="toggle"><input type="checkbox" v-model="cfg.scraper.overwrite" /><span class="track"></span></label>
             </div>
           </div>
         </div>
 
         <div class="panel">
-          <div class="panel-head">站点参数</div>
+          <div class="panel-head">{{ $t('settings.siteParams') }}</div>
           <div class="panel-body">
             <div class="site">
               <b>AV-Wiki</b>
               <div class="field"><label>Base URL</label><input v-model="cfg.scraper.avwiki.base_url" placeholder="https://av-wiki.net" /></div>
-              <div class="field"><label>Cookie</label><input v-model="cfg.scraper.avwiki.cookie" placeholder="可选，如 cf_clearance=xxx; 用于绕过 Loader 验证" /></div>
-              <div class="field"><label>Chrome 调试端口</label><input v-model="cfg.scraper.chrome_debug_port" type="number" style="width:120px" /><span class="muted">默认 9222。后端会自动拉起一个独立的无窗口 Chrome（profile 存于 data/chrome_profile）抓取 av-wiki，绕过「请稍候」验证；完全后台运行，无需手动开浏览器（需本机安装 Chrome）。</span></div>
+              <div class="field"><label>Cookie</label><input v-model="cfg.scraper.avwiki.cookie" :placeholder="$t('settings.cookieLoader')" /></div>
+              <div class="field"><label>Chrome {{ $t('settings.debugPort') }}</label><input v-model="cfg.scraper.chrome_debug_port" type="number" style="width:120px" /><span class="muted">{{ $t('settings.chromePortHint') }}</span></div>
             </div>
             <div class="site">
               <b>JavBus</b>
               <div class="field"><label>Base URL</label><input v-model="cfg.scraper.javbus.base_url" placeholder="https://www.javbus.com" /></div>
-              <div class="field"><label>Cookie</label><input v-model="cfg.scraper.javbus.cookie" placeholder="可选，用于绕过验证" /></div>
+              <div class="field"><label>Cookie</label><input v-model="cfg.scraper.javbus.cookie" :placeholder="$t('settings.cookieOpt')" /></div>
             </div>
             <div class="site">
               <b>JavDB</b>
               <div class="field"><label>Base URL</label><input v-model="cfg.scraper.javdb.base_url" placeholder="https://javdb.com" /></div>
-              <div class="field"><label>Cookie</label><input v-model="cfg.scraper.javdb.cookie" placeholder="可选" /></div>
+              <div class="field"><label>Cookie</label><input v-model="cfg.scraper.javdb.cookie" :placeholder="$t('settings.cookieOpt2')" /></div>
             </div>
 
             <details class="adv">
-              <summary>高级：自定义 JSON 数据源模板</summary>
+              <summary>{{ $t('settings.advJson') }}</summary>
               <textarea v-model="jsonText" rows="7" spellcheck="false"></textarea>
             </details>
             <details class="adv">
-              <summary>高级：自定义 HTML 数据源模板</summary>
+              <summary>{{ $t('settings.advHtml') }}</summary>
               <textarea v-model="htmlText" rows="7" spellcheck="false"></textarea>
             </details>
           </div>
           <div class="panel-foot">
-            <button class="btn primary" :disabled="saving" @click="saveScraper">保存数据源配置</button>
+            <button class="btn primary" :disabled="saving" @click="saveScraper">{{ $t('settings.srcSave') }}</button>
           </div>
         </div>
 
         <div class="panel">
-          <div class="panel-head">连通性测试</div>
+          <div class="panel-head">{{ $t('settings.connTest') }}</div>
           <div class="panel-body">
             <div class="hstack">
-              <input v-model="testCode" placeholder="测试番号，留空使用库内第一个" style="max-width:280px" />
-              <button class="btn" :disabled="testing" @click="runTest">{{ testing ? '测试中…' : '开始测试' }}</button>
+              <input v-model="testCode" :placeholder="$t('settings.testPh')" style="max-width:280px" />
+              <button class="btn" :disabled="testing" @click="runTest">{{ testing ? $t('settings.testing') : $t('settings.startTest') }}</button>
             </div>
             <pre v-if="testOut.lines.length" class="test-out" :class="testOut.cls">{{ testOut.lines.join('\n') }}</pre>
           </div>
@@ -531,39 +533,39 @@ onMounted(load)
       <template v-else-if="tab === 'ai'">
         <div class="panel">
           <div class="panel-head">
-            AI 增强（可选）
-            <span class="sub">兼容 OpenAI 协议的任意端点：云端 / 国产中转 / 本地 Ollama</span>
+            {{ $t('settings.aiTitle') }}
+            <span class="sub">{{ $t('settings.aiSub') }}</span>
           </div>
           <div class="panel-body">
             <div class="field">
               <label class="toggle">
                 <input type="checkbox" v-model="cfg.ai.enabled" /><span class="track"></span>
               </label>
-              <span>启用 AI（生成简介 / 建议标签 / 语义搜索）</span>
+              <span>{{ $t('settings.aiEnable') }}</span>
             </div>
             <div class="field">
               <label>Base URL</label>
-              <input v-model="cfg.ai.base_url" placeholder="https://api.openai.com/v1 或 http://127.0.0.1:11434/v1" />
-              <span class="hint">本地 Ollama 填 http://127.0.0.1:11434/v1（需先 ollama pull qwen2.5，免 key）</span>
+              <input v-model="cfg.ai.base_url" :placeholder="$t('settings.aiBasePh')" />
+              <span class="hint">{{ $t('settings.aiBaseHint') }}</span>
             </div>
             <div class="field">
               <label>API Key</label>
-              <input v-model="cfg.ai.api_key" type="password" placeholder="云端/中转必填；本地 Ollama 留空" />
+              <input v-model="cfg.ai.api_key" type="password" :placeholder="$t('settings.aiKeyPh')" />
             </div>
             <div class="field">
-              <label>模型</label>
-              <input v-model="cfg.ai.model" placeholder="gpt-4o-mini / deepseek-chat / qwen2.5" />
+              <label>{{ $t('settings.aiModel') }}</label>
+              <input v-model="cfg.ai.model" :placeholder="$t('settings.aiModelPh')" />
             </div>
             <div class="field">
-              <label>温度</label>
+              <label>{{ $t('settings.aiTemp') }}</label>
               <input type="number" step="0.1" min="0" max="1" v-model.number="cfg.ai.temperature" style="width:100px" />
-              <span class="muted">越低越稳定，越高越发散</span>
+              <span class="muted">{{ $t('settings.aiTempSub') }}</span>
             </div>
           </div>
           <div class="panel-foot">
-            <button class="btn primary" :disabled="saving" @click="save">保存 AI 配置</button>
-            <span v-if="aiOk===true" class="ok">配置已保存</span>
-            <span v-else-if="aiOk===false" class="err">保存失败</span>
+            <button class="btn primary" :disabled="saving" @click="save">{{ $t('settings.aiSave') }}</button>
+            <span v-if="aiOk===true" class="ok">{{ $t('settings.aiSaved') }}</span>
+            <span v-else-if="aiOk===false" class="err">{{ $t('settings.aiSaveFail') }}</span>
           </div>
         </div>
       </template>
@@ -572,28 +574,28 @@ onMounted(load)
       <template v-else-if="tab === 'parser'">
         <div class="panel">
           <div class="panel-head">
-            文件名解析预览
-            <span class="sub">检验番号识别规则是否覆盖你的命名习惯</span>
+            {{ $t('settings.parseTitle') }}
+            <span class="sub">{{ $t('settings.parseSub') }}</span>
           </div>
           <div class="panel-body">
-            <textarea v-model="parseInput" rows="7" placeholder="每行一个文件名，例如：&#10;ABP-123 中文字幕.mp4&#10;[JAVBUS]SSIS-456-CD1.mkv" spellcheck="false"></textarea>
+            <textarea v-model="parseInput" rows="7" :placeholder="$t('settings.parsePh') + '\nABP-123 中文字幕.mp4\n[JAVBUS]SSIS-456-CD1.mkv'" spellcheck="false"></textarea>
             <div class="hstack">
-              <button class="btn primary" @click="runParse">解析</button>
+              <button class="btn primary" @click="runParse">{{ $t('settings.parseBtn') }}</button>
               <span v-if="parseRows.length" class="muted">
-                识别 {{ parseStats.ok }} / {{ parseStats.n }} · 成功率 {{ parseStats.rate }}%
+                {{ $t('settings.parseStat', { ok: parseStats.ok, n: parseStats.n, rate: parseStats.rate }) }}
               </span>
             </div>
 
             <table v-if="parseRows.length" class="ptable">
-              <thead><tr><th>番号</th><th>规则</th><th>原始文件名</th></tr></thead>
+              <thead><tr><th>{{ $t('settings.code') }}</th><th>{{ $t('settings.rule') }}</th><th>{{ $t('settings.origName') }}</th></tr></thead>
               <tbody>
                 <tr v-for="(r, i) in parseRows" :key="i">
-                  <td><span class="badge" :class="r.matched ? 'ok' : 'err'">{{ r.matched ? r.code : '未识别' }}</span></td>
+                  <td><span class="badge" :class="r.matched ? 'ok' : 'err'">{{ r.matched ? r.code : $t('settings.unmatched') }}</span></td>
                   <td class="muted">
                     {{ r.rule || '—' }}
                     <span v-if="r.part > 1"> · CD{{ r.part }}</span>
-                    <span v-if="r.subtitle"> · 字幕</span>
-                    <span v-if="r.uncensored"> · 无码</span>
+                    <span v-if="r.subtitle"> · {{ $t('detail.subtitle') }}</span>
+                    <span v-if="r.uncensored"> · {{ $t('detail.uncensored') }}</span>
                   </td>
                   <td class="pin ellipsis" :title="r.input">{{ r.input }}</td>
                 </tr>
@@ -606,32 +608,38 @@ onMounted(load)
       <!-- ============ 外观 ============ -->
       <template v-else-if="tab === 'appearance'">
         <div class="panel">
-          <div class="panel-head">主题与显示</div>
+          <div class="panel-head">{{ $t('settings.themeDisplay') }}</div>
           <div class="panel-body">
             <div class="field-row">
-              <label>主题</label>
+              <label>{{ $t('settings.language') }}</label>
+              <select :value="i18nState.lang" @change="setLang($event.target.value)" style="width:160px">
+                <option v-for="l in LANGUAGES" :key="l.code" :value="l.code">{{ l.label }}</option>
+              </select>
+            </div>
+            <div class="field-row">
+              <label>{{ $t('settings.theme') }}</label>
               <div class="btn-group">
-                <button class="btn tiny" :class="{ active: state.theme === 'dark' }" @click="state.theme = 'dark'">深色</button>
-                <button class="btn tiny" :class="{ active: state.theme === 'light' }" @click="state.theme = 'light'">浅色</button>
+                <button class="btn tiny" :class="{ active: state.theme === 'dark' }" @click="state.theme = 'dark'">{{ $t('settings.themeDark') }}</button>
+                <button class="btn tiny" :class="{ active: state.theme === 'light' }" @click="state.theme = 'light'">{{ $t('settings.themeLight') }}</button>
               </div>
             </div>
             <div class="field-row">
-              <label>界面密度</label>
+              <label>{{ $t('settings.density') }}</label>
               <div class="btn-group">
-                <button class="btn tiny" :class="{ active: state.density === 'cozy' }" @click="state.density = 'cozy'">舒适</button>
-                <button class="btn tiny" :class="{ active: state.density === 'compact' }" @click="state.density = 'compact'">紧凑</button>
+                <button class="btn tiny" :class="{ active: state.density === 'cozy' }" @click="state.density = 'cozy'">{{ $t('settings.densityCozy') }}</button>
+                <button class="btn tiny" :class="{ active: state.density === 'compact' }" @click="state.density = 'compact'">{{ $t('settings.densityCompact') }}</button>
               </div>
             </div>
             <div class="field-row">
-              <label>封面尺寸</label>
+              <label>{{ $t('settings.cardSize') }}</label>
               <div class="btn-group">
-                <button class="btn tiny" :class="{ active: state.cardSize === 'dense' }" @click="state.cardSize = 'dense'">小</button>
-                <button class="btn tiny" :class="{ active: state.cardSize === 'normal' }" @click="state.cardSize = 'normal'">中</button>
-                <button class="btn tiny" :class="{ active: state.cardSize === 'large' }" @click="state.cardSize = 'large'">大</button>
+                <button class="btn tiny" :class="{ active: state.cardSize === 'dense' }" @click="state.cardSize = 'dense'">{{ $t('settings.cardSizeSmall') }}</button>
+                <button class="btn tiny" :class="{ active: state.cardSize === 'normal' }" @click="state.cardSize = 'normal'">{{ $t('settings.cardSizeNormal') }}</button>
+                <button class="btn tiny" :class="{ active: state.cardSize === 'large' }" @click="state.cardSize = 'large'">{{ $t('settings.cardSizeLarge') }}</button>
               </div>
             </div>
             <div class="field-row">
-              <label>每页数量</label>
+              <label>{{ $t('settings.pageSize') }}</label>
               <select v-model.number="state.page_size" style="width:120px">
                 <option :value="30">30</option>
                 <option :value="60">60</option>
@@ -646,36 +654,36 @@ onMounted(load)
       <!-- ============ 关于 ============ -->
       <template v-else>
         <div class="panel">
-          <div class="panel-head">数据导出</div>
+          <div class="panel-head">{{ $t('settings.exportData') }}</div>
           <div class="panel-body">
-            <p class="muted">导出全部影片元数据为 CSV，可用 Excel 打开备份。</p>
-            <div><a class="btn" :href="csvUrl()" target="_blank">导出 CSV</a></div>
+            <p class="muted">{{ $t('settings.exportCsvDesc') }}</p>
+            <div><a class="btn" :href="csvUrl()" target="_blank">{{ $t('settings.exportCsv') }}</a></div>
           </div>
         </div>
         <div class="panel">
-          <div class="panel-head">备份与迁移（升级不丢数据）</div>
+          <div class="panel-head">{{ $t('settings.backupMig') }}</div>
           <div class="panel-body">
-            <p class="muted">所有收藏数据都保存在程序目录下的 <code>data/</code> 文件夹（含 <code>library.db</code> 数据库、配置、封面、头像）。</p>
+            <p class="muted">{{ $t('settings.backupMigDesc') }}</p>
             <ul class="tips">
-              <li><b>升级</b>：用新版本 <code>片匣.exe</code> <b>覆盖旧 exe 即可</b>，不要删除 <code>data/</code> 文件夹，收藏、设置、观看进度全部保留。</li>
-              <li><b>换电脑 / 备份</b>：直接把整个程序文件夹（含 <code>data/</code>）整体拷贝即可。程序每次启动会自动为 <code>library.db</code> 留一份每日备份（最近 7 天），多一层保险。</li>
-              <li><b>自定义目录</b>：若把头像/背景图设到了独立磁盘（设置 → 媒体资源路径），迁移时需在目标机同样挂载该路径，或改回相对 <code>data/</code> 的路径。</li>
-              <li><b>导出兜底</b>：下方「数据导出」可把元数据导出为 CSV，作为纯文本备份。</li>
+              <li><b>{{ $t('settings.tipUpgrade').split('：')[0] }}</b>：{{ $t('settings.tipUpgrade').split('：').slice(1).join('：') }}</li>
+              <li><b>{{ $t('settings.tipMove').split('：')[0] }}</b>：{{ $t('settings.tipMove').split('：').slice(1).join('：') }}</li>
+              <li><b>{{ $t('settings.tipCustom').split('：')[0] }}</b>：{{ $t('settings.tipCustom').split('：').slice(1).join('：') }}</li>
+              <li><b>{{ $t('settings.tipCsv').split('：')[0] }}</b>：{{ $t('settings.tipCsv').split('：').slice(1).join('：') }}</li>
             </ul>
           </div>
         </div>
         <div class="panel">
-          <div class="panel-head">关于</div>
+          <div class="panel-head">{{ $t('settings.aboutTitle') }}</div>
           <div class="panel-body">
-            <p><b>片匣 (AVM)</b> — 本地 AV 收藏管理工具</p>
-            <p class="muted">所有数据均保存在本地，不会上传到任何服务器。</p>
+            <p><b>{{ $t('settings.brand') }}</b> — {{ $t('settings.aboutSub') }}</p>
+            <p class="muted">{{ $t('settings.aboutLocal') }}</p>
             <div class="kbd-list">
-              <div class="section-title">快捷键</div>
-              <div class="kb"><kbd>Ctrl</kbd>+<kbd>K</kbd> 或 <kbd>/</kbd><span>聚焦搜索框</span></div>
-              <div class="kb"><kbd>Esc</kbd><span>关闭详情 / 弹窗</span></div>
-              <div class="kb"><kbd>←</kbd> <kbd>→</kbd><span>滑动评分：跳过 / 想看</span></div>
-              <div class="kb"><kbd>1</kbd>–<kbd>5</kbd><span>滑动评分：打分</span></div>
-              <div class="kb"><kbd>F</kbd> / <kbd>Z</kbd><span>滑动评分：收藏 / 撤销</span></div>
+              <div class="section-title">{{ $t('settings.shortcuts') }}</div>
+              <div class="kb"><kbd>Ctrl</kbd>+<kbd>K</kbd> 或 <kbd>/</kbd><span>{{ $t('settings.focusSearch') }}</span></div>
+              <div class="kb"><kbd>Esc</kbd><span>{{ $t('settings.closeModal') }}</span></div>
+              <div class="kb"><kbd>←</kbd> <kbd>→</kbd><span>{{ $t('settings.swipeSkip') }}</span></div>
+              <div class="kb"><kbd>1</kbd>–<kbd>5</kbd><span>{{ $t('settings.swipeRate') }}</span></div>
+              <div class="kb"><kbd>F</kbd> / <kbd>Z</kbd><span>{{ $t('settings.swipeFav') }}</span></div>
             </div>
           </div>
         </div>
@@ -686,22 +694,22 @@ onMounted(load)
     <Teleport to="body">
       <div v-if="browser.open" class="modal-mask" @click.self="browser.open = false">
         <div class="modal">
-          <div class="modal-head">选择目录</div>
+          <div class="modal-head">{{ $t('settings.selectDir') }}</div>
           <div class="modal-body">
             <div class="bc">
-              <button class="btn tiny ghost" @click="browse('')">根目录</button>
+              <button class="btn tiny ghost" @click="browse('')">{{ $t('settings.rootDir') }}</button>
               <code class="bc-path">{{ browser.path || '/' }}</code>
             </div>
             <ul class="dir-list">
               <li v-for="d in browser.dirs" :key="d.path" @click="browse(d.path)">
                 <span>📁</span><span class="ellipsis">{{ d.name }}</span>
               </li>
-              <li v-if="!browser.dirs.length" class="muted nohover">该目录下没有子文件夹</li>
+              <li v-if="!browser.dirs.length" class="muted nohover">{{ $t('settings.noSubDir') }}</li>
             </ul>
           </div>
           <div class="modal-foot">
-            <button class="btn" @click="browser.open = false">取消</button>
-            <button class="btn primary" :disabled="!browser.path" @click="pickDir">选择当前目录</button>
+            <button class="btn" @click="browser.open = false">{{ $t('common.cancel') }}</button>
+            <button class="btn primary" :disabled="!browser.path" @click="pickDir">{{ $t('settings.chooseCurrentDir') }}</button>
           </div>
         </div>
       </div>

@@ -57,19 +57,19 @@ onMounted(() => {
   <section class="view">
     <div class="view-body home tight">
       <PageHead
-        title="首页"
-        subtitle="欢迎回来，接着看，或者逛逛你的收藏"
+        :title="$t('view.home')"
+        :subtitle="$t('home.subtitle')"
       >
         <template #actions>
-          <button class="btn ghost" @click="goGallery">浏览全部影片 →</button>
+          <button class="btn ghost" @click="goGallery">{{ $t('home.browseAll') }}</button>
         </template>
       </PageHead>
 
       <!-- 续看 rail -->
       <section class="block">
         <div class="block-head">
-          <h2 class="block-title"><span class="dot"></span>继续观看</h2>
-          <button v-if="cw.length" class="link" @click="goGallery">查看全部</button>
+          <h2 class="block-title"><span class="dot"></span>{{ $t('home.continueWatching') }}</h2>
+          <button v-if="cw.length" class="link" @click="goGallery">{{ $t('home.viewAll') }}</button>
         </div>
 
         <div v-if="cwLoading" class="rail-skeleton">
@@ -85,8 +85,8 @@ onMounted(() => {
         <EmptyState
           v-else-if="!cw.length"
           icon="▶"
-          title="还没有在看的影片"
-          desc="开始观看后，进度会显示在这里，方便随时续播。"
+          :title="$t('home.noContinue')"
+          :desc="$t('home.continueDesc')"
         />
         <div v-else class="rail">
           <MovieCard v-for="m in cw" :key="m.id" :movie="m" :selectable="false" @open="(id) => { state.view = 'detail'; state.currentId = id }" />
@@ -96,8 +96,8 @@ onMounted(() => {
       <!-- 最近添加 -->
       <section class="block">
         <div class="block-head">
-          <h2 class="block-title"><span class="dot"></span>最近添加</h2>
-          <button class="link" @click="goGallery">查看全部</button>
+          <h2 class="block-title"><span class="dot"></span>{{ $t('home.recentlyAdded') }}</h2>
+          <button class="link" @click="goGallery">{{ $t('home.viewAll') }}</button>
         </div>
 
         <div v-if="recentLoading" class="grid-skeleton">
@@ -113,8 +113,8 @@ onMounted(() => {
         <EmptyState
           v-else-if="!recent.length"
           icon="▦"
-          title="收藏还是空的"
-          desc="去「维护中心」扫描新片，或把影片放进文件夹后拖入。"
+          :title="$t('home.noFav')"
+          :desc="$t('home.emptyDesc')"
         />
         <div v-else class="grid">
           <MovieCard v-for="m in recent" :key="m.id" :movie="m" :selectable="false" @open="(id) => { state.view = 'detail'; state.currentId = id }" />

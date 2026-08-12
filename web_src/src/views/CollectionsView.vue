@@ -7,6 +7,7 @@ import {
 } from '../api.js'
 import { coverThumbUrl as thumbUrl } from '../api.js'
 import { toast, confirmDialog, coverFallback } from '../utils.js'
+import { t } from '../i18n/index.js'
 import MovieGrid from '../components/MovieGrid.vue'
 import Pager from '../components/Pager.vue'
 
@@ -63,7 +64,7 @@ function openNew(kind) {
 
 async function submitNew() {
   const name = nname.value.trim()
-  if (!name) { toast('请填写片单名称', 'err'); return }
+  if (!name) { toast(t('collections.nameEmpty'), 'err'); return }
   const body = { name }
   if (nkind.value === 'smart') {
     const params = {}
@@ -77,7 +78,7 @@ async function submitNew() {
   }
   try {
     const r = await createCollection(body)
-    toast('已创建', 'ok')
+    toast(t('collections.created'), 'ok')
     showNew.value = false
     await loadList()
     const created = list.value.find((c) => c.id === (r && r.id))
@@ -95,15 +96,15 @@ async function submitRename() {
     await updateCollection(current.value.id, { name })
     current.value.name = name
     renaming.value = false
-    toast('已重命名', 'ok')
+    toast(t('collections.renamed'), 'ok')
   } catch (e) { toast(e.message, 'err') }
 }
 
 async function remove(c) {
-  if (!(await confirmDialog('删除片单', `将删除「${c.name}」，影片本身不受影响。`, { danger: true }))) return
+  if (!(await confirmDialog(t('collections.deleteTitle'), t('collections.deleteDesc', { name: c.name }), { danger: true }))) return
   try {
     await deleteCollection(c.id)
-    toast('已删除', 'ok')
+    toast(t('collections.deleted'), 'ok')
     if (current.value && current.value.id === c.id) current.value = null
     await loadList()
   } catch (e) { toast(e.message, 'err') }
@@ -114,7 +115,7 @@ async function removeMovie(id) {
     await removeFromCollection(current.value.id, id)
     movies.value = movies.value.filter((m) => m.id !== id)
     total.value = Math.max(0, total.value - 1)
-    toast('已移出片单', 'ok')
+    toast(t('collections.movedOut'), 'ok')
   } catch (e) { toast(e.message, 'err') }
 }
 
@@ -125,11 +126,11 @@ function ruleText(c) {
   const p = c.rule && c.rule.params
   if (!p) return ''
   const out = []
-  if (p.favorite) out.push('收藏')
-  if (p.watchlist) out.push('想看')
-  if (p.watched) out.push('看过')
-  if (p.unwatched) out.push('未看')
-  if (p.min_rating) out.push(`≥${p.min_rating}星`)
+  if (p.favorite) out.push(t('collections.condFav'))
+  if (p.watchlist) out.push(t('collections.condWatch'))
+  if (p.watched) out.push(t('collections.condWatched'))
+  if (p.unwatched) out.push(t('collections.condUnwatched'))
+  if (p.min_rating) out.push(`≥${p.min_rating}★`)
   if (p.genre) out.push(p.genre)
   if (p.actress) out.push(p.actress)
   return out.join(' · ')
@@ -143,22 +144,22 @@ onMounted(loadList)
     <!-- 列表模式 -->
     <template v-if="!current">
       <div class="toolbar">
-        <h1 class="tb-title">片单</h1>
-        <span class="tb-sub tabular" v-if="!loading">{{ list.length }} 个</span>
+        <h1 class="tb-title">{{ $t('view.collections') }}</h1>
+        <span class="tb-sub tabular" v-if="!loading">{{ $t('collections.count', { n: list.length }) }}</span>
         <span v-else class="spinner"></span>
         <div class="spacer"></div>
-        <button class="btn tiny" @click="openNew('smart')">＋ 智能片单</button>
-        <button class="btn tiny primary" @click="openNew('manual')">＋ 新建片单</button>
+        <button class="btn tiny" @click="openNew('smart')">{{ $t('collections.newSmart') }}</button>
+        <button class="btn tiny primary" @click="openNew('manual')">{{ $t('collections.newManual') }}</button>
       </div>
 
       <div class="view-body">
         <div v-if="!list.length && !loading" class="empty">
           <div class="icon">≡</div>
-          <div class="title">还没有片单</div>
-          <div class="desc">片单可以手动收藏影片，也可以按规则自动聚合（如「4星以上未看」）。</div>
+          <div class="title">{{ $t('collections.emptyTitle') }}</div>
+          <div class="desc">{{ $t('collections.emptyDesc') }}</div>
           <div class="hstack">
-            <button class="btn primary" @click="openNew('manual')">新建片单</button>
-            <button class="btn" @click="openNew('smart')">新建智能片单</button>
+            <button class="btn primary" @click="openNew('manual')">{{ $t('collections.createManual') }}</button>
+            <button class="btn" @click="openNew('smart')">{{ $t('collections.createSmart') }}</button>
           </div>
         </div>
 
@@ -174,12 +175,12 @@ onMounted(loadList)
             <div class="cc-body">
               <div class="cc-name ellipsis">{{ c.name }}</div>
               <div class="cc-meta">
-                <span class="badge" :class="c.kind === 'smart' ? 'accent' : ''">{{ c.kind === 'smart' ? '智能' : '手动' }}</span>
-                <span class="tabular muted">{{ c.count || 0 }} 部</span>
+                <span class="badge" :class="c.kind === 'smart' ? 'accent' : ''">{{ c.kind === 'smart' ? $t('collections.smart') : $t('collections.manual') }}</span>
+                <span class="tabular muted">{{ $t('collections.parts', { n: c.count || 0 }) }}</span>
               </div>
               <div v-if="c.kind === 'smart'" class="cc-rule ellipsis">{{ ruleText(c) }}</div>
             </div>
-            <button class="cc-del" @click.stop="remove(c)" data-tip="删除">✕</button>
+            <button class="cc-del" @click.stop="remove(c)" :data-tip="$t('common.delete')">✕</button>
           </article>
         </div>
       </div>
@@ -188,34 +189,34 @@ onMounted(loadList)
     <!-- 详情模式 -->
     <template v-else>
       <div class="toolbar">
-        <button class="btn tiny ghost" @click="back">‹ 返回</button>
+        <button class="btn tiny ghost" @click="back">‹ {{ $t('collections.back') }}</button>
         <h1 v-if="!renaming" class="tb-title">{{ current.name }}</h1>
         <input v-else class="rn" v-model="renameText" @keydown.enter="submitRename" @blur="submitRename" autofocus />
-        <span class="badge" :class="current.kind === 'smart' ? 'accent' : ''">{{ current.kind === 'smart' ? '智能' : '手动' }}</span>
-        <span class="tb-sub tabular">{{ total }} 部</span>
+        <span class="badge" :class="current.kind === 'smart' ? 'accent' : ''">{{ current.kind === 'smart' ? $t('collections.smart') : $t('collections.manual') }}</span>
+        <span class="tb-sub tabular">{{ $t('collections.parts', { n: total }) }}</span>
         <div class="spacer"></div>
-        <button class="btn tiny ghost" @click="startRename">重命名</button>
-        <button class="btn tiny ghost" @click="exportCsv">导出 CSV</button>
-        <button class="btn tiny danger" @click="remove(current)">删除</button>
+        <button class="btn tiny ghost" @click="startRename">{{ $t('collections.rename') }}</button>
+        <button class="btn tiny ghost" @click="exportCsv">{{ $t('collections.exportCsv') }}</button>
+        <button class="btn tiny danger" @click="remove(current)">{{ $t('common.delete') }}</button>
       </div>
 
       <div v-if="current.kind === 'smart' && ruleText(current)" class="filter-bar">
-        <span class="fb-label">规则</span>
+        <span class="fb-label">{{ $t('collections.ruleLabel') }}</span>
         <span class="chip on">{{ ruleText(current) }}</span>
-        <span class="muted sm">符合条件的影片会自动出现在此片单</span>
+        <span class="muted sm">{{ $t('collections.autoHint') }}</span>
       </div>
 
       <div class="view-body">
         <MovieGrid
           :items="movies"
           :loading="detailLoading"
-          empty-title="片单还是空的"
-          empty-desc="在影片详情页点击「＋」，或用多选批量加入。"
+          :empty-title="$t('collections.emptyTitle')"
+          empty-desc="{{ $t('collections.detailEmptyDesc') }}"
           @open="openDetail"
         />
 
         <div v-if="current.kind !== 'smart' && movies.length" class="rm-hint">
-          <span class="muted sm">移出片单：</span>
+          <span class="muted sm">{{ $t('collections.moveOutHint') }}</span>
           <div class="chip-list">
             <button v-for="m in movies.slice(0, 40)" :key="m.id" class="chip" @click="removeMovie(m.id)">
               {{ m.code || m.title }} <span class="x">✕</span>
@@ -231,49 +232,49 @@ onMounted(loadList)
     <Teleport to="body">
       <div v-if="showNew" class="modal-mask" @click.self="showNew = false">
         <div class="modal">
-          <div class="modal-head">{{ nkind === 'smart' ? '新建智能片单' : '新建片单' }}</div>
+          <div class="modal-head">{{ nkind === 'smart' ? $t('collections.createSmart') : $t('collections.createManual') }}</div>
           <div class="modal-body">
             <div class="field">
-              <label>片单名称</label>
-              <input v-model="nname" placeholder="例如：本月必看" @keydown.enter="submitNew" />
+              <label>{{ $t('collections.nameLabel') }}</label>
+              <input v-model="nname" :placeholder="$t('collections.namePlaceholder')" @keydown.enter="submitNew" />
             </div>
 
             <template v-if="nkind === 'smart'">
-              <p class="muted sm">设置规则后，符合条件的影片会自动归入该片单。</p>
+              <p class="muted sm">{{ $t('collections.ruleHint') }}</p>
               <div class="field">
-                <label>状态条件</label>
+                <label>{{ $t('collections.condLabel') }}</label>
                 <select v-model="rule.cond">
-                  <option value="">不限</option>
-                  <option value="unwatched">未看</option>
-                  <option value="watched">看过</option>
-                  <option value="favorite">已收藏</option>
-                  <option value="watchlist">想看</option>
+                  <option value="">{{ $t('filter.all') }}</option>
+                  <option value="unwatched">{{ $t('collections.condUnwatched') }}</option>
+                  <option value="watched">{{ $t('collections.condWatched') }}</option>
+                  <option value="favorite">{{ $t('collections.condFav') }}</option>
+                  <option value="watchlist">{{ $t('collections.condWatch') }}</option>
                 </select>
               </div>
               <div class="two">
                 <div class="field">
-                  <label>评分下限</label>
-                  <input v-model="rule.min_rating" type="number" min="0" max="5" step="0.5" placeholder="如 4" />
+                  <label>{{ $t('collections.minRating') }}</label>
+                  <input v-model="rule.min_rating" type="number" min="0" max="5" step="0.5" :placeholder="$t('collections.minRatingPh')" />
                 </div>
                 <div class="field">
-                  <label>排序</label>
+                  <label>{{ $t('collections.sortLabel') }}</label>
                   <select v-model="rule.sort">
-                    <option value="rating_desc">评分高</option>
-                    <option value="added_desc">最近添加</option>
-                    <option value="play_desc">播放最多</option>
-                    <option value="year_desc">年份最新</option>
+                    <option value="rating_desc">{{ $t('sort.rating_desc') }}</option>
+                    <option value="added_desc">{{ $t('sort.added_desc') }}</option>
+                    <option value="play_desc">{{ $t('sort.play_desc') }}</option>
+                    <option value="year_desc">{{ $t('sort.year_desc') }}</option>
                   </select>
                 </div>
               </div>
               <div class="two">
-                <div class="field"><label>包含类型</label><input v-model="rule.genre" placeholder="如 单体作品" /></div>
-                <div class="field"><label>包含女优</label><input v-model="rule.actress" /></div>
+                <div class="field"><label>{{ $t('collections.inGenre') }}</label><input v-model="rule.genre" :placeholder="$t('collections.inGenrePh')" /></div>
+                <div class="field"><label>{{ $t('collections.inActress') }}</label><input v-model="rule.actress" /></div>
               </div>
             </template>
           </div>
           <div class="modal-foot">
-            <button class="btn" @click="showNew = false">取消</button>
-            <button class="btn primary" @click="submitNew">创建</button>
+            <button class="btn" @click="showNew = false">{{ $t('common.cancel') }}</button>
+            <button class="btn primary" @click="submitNew">{{ $t('collections.create') }}</button>
           </div>
         </div>
       </div>

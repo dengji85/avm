@@ -11,6 +11,7 @@ import {
   toast, confirmDialog, copyText, coverFallback, fmtSize, fmtDuration,
   fmtDate, fmtAgo, qualityTag,
 } from '../utils.js'
+import { t } from '../i18n/index.js'
 import { useTasks } from '../composables/useTasks.js'
 
 const { runScrape } = useTasks()
@@ -36,8 +37,8 @@ async function checkAi() {
 }
 async function doAiSynopsis() {
   aiBusy.value = true
-  try { const r = await aiGenerateSynopsis(id.value); mv.value.plot = r.plot; toast('AI 简介已生成', 'ok') }
-  catch (e) { toast(e.message || 'AI 生成失败', 'err') }
+  try {     const r = await aiGenerateSynopsis(id.value); mv.value.plot = r.plot; toast(t('detail.aiSynopsisDone'), 'ok') }
+  catch (e) { toast(e.message || t('detail.aiSynopsisFail'), 'err') }
   finally { aiBusy.value = false }
 }
 async function doAiTags() {
@@ -48,8 +49,8 @@ async function doAiTags() {
     const merged = [...new Set([...cur, ...(r.tags || [])])]
     mv.value.tags = merged
     await updateMovie(id.value, { tags: merged })
-    toast('AI 标签已补充', 'ok')
-  } catch (e) { toast(e.message || 'AI 标签失败', 'err') }
+    toast(t('detail.aiTagsDone'), 'ok')
+  } catch (e) { toast(e.message || t('detail.aiTagsFail'), 'err') }
   finally { aiBusy.value = false }
 }
 
@@ -116,13 +117,13 @@ async function setRating(v) {
   try {
     await updateMovie(id.value, { rating: next })
     mv.value.rating = next
-    toast(next ? `已评 ${next} 星` : '已清除评分', 'ok')
+    toast(next ? t('detail.ratedStars', { n: next }) : t('detail.clearedRating'), 'ok')
     window.dispatchEvent(new CustomEvent('avm-reload-view'))
   } catch (e) { toast(e.message, 'err') }
 }
 
 async function play() {
-  try { await playMovie(id.value); toast('已调用系统播放器', 'ok') }
+  try { await playMovie(id.value); toast(t('player.launchedExternal'), 'ok') }
   catch (e) { toast(e.message, 'err') }
 }
 
@@ -130,7 +131,7 @@ async function play() {
 async function doScrape() {
   try {
     await runScrape({ ids: [id.value], overwrite: true })
-    toast('已加入刮削队列', 'ok')
+    toast(t('common.scrapeQueued'), 'ok')
   } catch (e) { toast(e.message, 'err') }
 }
 
@@ -143,22 +144,22 @@ watch(
 )
 
 async function doNfo() {
-  try { const r = await exportNfo(id.value); toast('已导出 ' + (r.path || 'NFO'), 'ok') }
+  try { const r = await exportNfo(id.value); toast(t('detail.nfoExported', { path: r.path || 'NFO' }), 'ok') }
   catch (e) { toast(e.message, 'err') }
 }
 
 async function doDelete(withFile) {
   const ok = await confirmDialog(
-    withFile ? '删除影片和文件' : '从库中移除',
+    withFile ? t('detail.delWithFile') : t('detail.delFromDb'),
     withFile
-      ? `将永久删除磁盘文件，无法恢复：\n${mainFile.value?.path || ''}`
-      : '仅从数据库移除记录，磁盘文件保留。',
-    { danger: true, okText: withFile ? '永久删除' : '移除' },
+      ? t('detail.delWithFileDesc', { path: mainFile.value?.path || '' })
+      : t('detail.delFromDbDesc'),
+    { danger: true, okText: withFile ? t('detail.permanent') : t('detail.remove') },
   )
   if (!ok) return
   try {
     await deleteMovie(id.value, withFile)
-    toast('已删除', 'ok')
+    toast(t('detail.deleted'), 'ok')
     close()
     window.dispatchEvent(new CustomEvent('avm-refresh'))
   } catch (e) { toast(e.message, 'err') }
@@ -170,7 +171,7 @@ async function loadPreviews(generate = false) {
   try {
     const r = await getPreviews(id.value, generate)
     previews.value = (r && r.urls) ? r.urls.map((u) => '/api' + u) : []
-    if (generate && !previews.value.length) toast(r.error || '生成失败', 'err')
+    if (generate && !previews.value.length) toast(r.error || t('detail.genFailed'), 'err')
   } catch (e) { toast(e.message, 'err') } finally { pvLoading.value = false }
 }
 
@@ -201,7 +202,7 @@ async function saveEdit() {
     const patch = { ...draft.value }
     if (patch.runtime !== '') patch.runtime = Number(patch.runtime) || 0
     await updateMovie(id.value, patch)
-    toast('已保存', 'ok')
+    toast(t('detail.saved'), 'ok')
     editing.value = false
     await load()
     window.dispatchEvent(new CustomEvent('avm-refresh'))
@@ -285,7 +286,7 @@ async function doRenameTag() {
   tagMgrBusy.value = true
   try {
     const r = await renameTag(oldN, newN)
-    toast(r.merged ? `已合并到「${newN}」` : '已改名', 'ok')
+    toast(r.merged ? t('detail.mergedTo', { name: newN }) : t('detail.renamed'), 'ok')
     editingTag.value = ''
     editingTagNew.value = ''
     await refreshTagMgr()
@@ -299,11 +300,11 @@ async function doRenameTag() {
 }
 async function doDeleteTag(name) {
   if (tagMgrBusy.value) return
-  if (!confirm(`确定删除标签「${name}」？此操作会移除该标签与所有影片的关联。`)) return
+  if (!(await confirmDialog(t('detail.deleteTagTitle'), t('detail.deleteTagDesc', { name }), { danger: true }))) return
   tagMgrBusy.value = true
   try {
     await deleteTag(name)
-    toast('已删除标签：' + name, 'ok')
+    toast(t('detail.deletedTag', { name }), 'ok')
     await refreshTagMgr()
     if (curTags().includes(name)) {
       const next = curTags().filter((t) => t !== name)
@@ -332,7 +333,7 @@ async function onUpload(e) {
   if (!f) return
   try {
     await uploadCover(id.value, f)
-    toast('封面已更新', 'ok')
+    toast(t('detail.coverUpdated'), 'ok')
     bust.value = Date.now()
   } catch (err) { toast(err.message, 'err') }
   e.target.value = ''
@@ -341,8 +342,8 @@ const bust = ref(Date.now())
 const coverSrc = computed(() => `${coverUrl(id.value)}?t=${bust.value}`)
 
 async function removeCover() {
-  if (!(await confirmDialog('清除封面', '将删除该影片的封面图。', { danger: true }))) return
-  try { await clearCover(id.value); bust.value = Date.now(); toast('已清除', 'ok') }
+  if (!(await confirmDialog(t('detail.clearCoverTitle'), t('detail.clearCoverDesc'), { danger: true }))) return
+  try { await clearCover(id.value); bust.value = Date.now(); toast(t('detail.cleared'), 'ok') }
   catch (e) { toast(e.message, 'err') }
 }
 
@@ -364,7 +365,7 @@ function onCollBtn(e) {
   openColl()
 }
 async function addColl(cid) {
-  try { await addToCollection(cid, id.value); toast('已加入片单', 'ok'); showColl.value = false }
+  try { await addToCollection(cid, id.value); toast(t('detail.joinedCollection'), 'ok'); showColl.value = false }
   catch (e) { toast(e.message, 'err') }
 }
 async function createColl() {
@@ -376,7 +377,7 @@ async function createColl() {
     const item = c && c.collection ? c.collection : { id: c && c.id, name }
     collList.value = [...collList.value, item]
     newCollName.value = ''
-    toast('片单已创建，可加入', 'ok')
+    toast(t('detail.collCreated'), 'ok')
   } catch (e) { toast(e.message, 'err') }
   finally { creatingColl.value = false }
 }
@@ -441,10 +442,10 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', onKey); document.r
         <!-- 头部 -->
         <header class="drawer-head">
           <span v-if="mv.display_code || mv.code" class="badge code primary">{{ mv.display_code || mv.code }}</span>
-          <b class="dh-title ellipsis">{{ mv.title || '未命名' }}</b>
+          <b class="dh-title ellipsis">{{ mv.title || $t('detail.untitled') }}</b>
           <div class="spacer"></div>
-          <button class="btn ghost icon" @click="copyText(mainFile?.path || '')" data-tip="复制路径">⧉</button>
-          <button class="btn ghost icon" @click="close" data-tip="关闭 (Esc)">✕</button>
+          <button class="btn ghost icon" @click="copyText(mainFile?.path || '')" :data-tip="$t('detail.copyPath')">⧉</button>
+          <button class="btn ghost icon" @click="close" :data-tip="$t('detail.closeEsc')">✕</button>
         </header>
 
         <div class="drawer-body">
@@ -464,8 +465,8 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', onKey); document.r
                 <img :src="coverSrc" alt="" @error="coverFallback" @click="lightbox = coverSrc" />
                 <div v-if="progressPct > 0" class="cw-bar"><i :style="{ width: progressPct + '%' }"></i></div>
                 <div class="cov-acts">
-                  <button class="btn tiny" @click="fileInput.click()">换封面</button>
-                  <button class="btn tiny ghost" @click="removeCover">清除</button>
+                  <button class="btn tiny" @click="fileInput.click()">{{ $t('detail.changeCover') }}</button>
+                  <button class="btn tiny ghost" @click="removeCover">{{ $t('detail.clearCover') }}</button>
                   <input ref="fileInput" type="file" accept="image/*" hidden @change="onUpload" />
                 </div>
               </div>
@@ -474,26 +475,26 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', onKey); document.r
                 <!-- 主操作 -->
                 <div class="dd-actions">
                   <button class="btn primary" @click="playing = !playing">
-                    {{ playing ? '收起播放器' : (progressPct > 0 ? `继续观看 ${progressPct}%` : '在线播放') }}
+                    {{ playing ? $t('detail.collapsePlayer') : (progressPct > 0 ? $t('detail.continue', { p: progressPct }) : $t('detail.onlinePlay')) }}
                   </button>
-                  <button class="btn" @click="play">系统播放器</button>
-                  <button class="btn icon" :class="{ active: mv.favorite }" @click="flip('favorite')" data-tip="收藏">{{ mv.favorite ? '♥' : '♡' }}</button>
-                  <button class="btn icon" :class="{ active: mv.watchlist }" @click="flip('watchlist')" data-tip="想看">⌚</button>
-                  <button class="btn icon" :class="{ active: mv.watched }" @click="flip('watched')" data-tip="已看">{{ mv.watched ? '●' : '○' }}</button>
+                  <button class="btn" @click="play">{{ $t('player.external') }}</button>
+                  <button class="btn icon" :class="{ active: mv.favorite }" @click="flip('favorite')" :data-tip="$t('flag.favorite')">{{ mv.favorite ? '♥' : '♡' }}</button>
+                  <button class="btn icon" :class="{ active: mv.watchlist }" @click="flip('watchlist')" :data-tip="$t('flag.watchlist')">⌚</button>
+                  <button class="btn icon" :class="{ active: mv.watched }" @click="flip('watched')" :data-tip="$t('flag.watched')">{{ mv.watched ? '●' : '○' }}</button>
 
                   <div class="coll-wrap" ref="collWrap">
-                    <button class="btn icon" @click="onCollBtn" data-tip="加入片单">＋</button>
+                    <button class="btn icon" @click="onCollBtn" :data-tip="$t('detail.addToCollection')">＋</button>
                     <div v-if="showColl" class="coll-pop" @click.stop>
-                      <div v-if="!collList.length" class="cp-empty muted">还没有片单</div>
+                      <div v-if="!collList.length" class="cp-empty muted">{{ $t('detail.noCollYet') }}</div>
                       <button v-for="c in collList" :key="c.id" class="cp-item" @click="addColl(c.id)">{{ c.name }}</button>
                       <div class="cp-new">
                         <input
                           v-model="newCollName"
                           class="tag-input"
-                          placeholder="新建片单名称"
+                          :placeholder="$t('detail.newCollName')"
                           @keydown.enter.prevent="createColl"
                         />
-                        <button class="btn tiny" :disabled="creatingColl || !newCollName.trim()" @click="createColl">新建</button>
+                        <button class="btn tiny" :disabled="creatingColl || !newCollName.trim()" @click="createColl">{{ $t('detail.newColl') }}</button>
                       </div>
                     </div>
                   </div>
@@ -504,64 +505,64 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', onKey); document.r
                   <div class="stars">
                     <span v-for="i in 5" :key="i" class="s" :class="{ on: i <= (mv.rating || 0) }" @click="setRating(i)">★</span>
                   </div>
-                  <span class="muted">{{ mv.rating ? mv.rating + ' 星' : '未评分' }}</span>
+                  <span class="muted">{{ mv.rating ? mv.rating + ' ' + $t('detail.star') : $t('fmt.noRating') }}</span>
                   <div class="spacer"></div>
-                  <span v-if="mv.play_count" class="badge">播放 {{ mv.play_count }} 次</span>
+                  <span v-if="mv.play_count" class="badge">{{ $t('detail.playCount', { n: mv.play_count }) }}</span>
                 </div>
 
                 <!-- 标记 -->
                 <div class="chip-list">
-                  <span v-if="mv.subtitle" class="badge ok">中文字幕</span>
-                  <span v-if="mv.uncensored" class="badge warn">无码</span>
+                  <span v-if="mv.subtitle" class="badge ok">{{ $t('detail.subtitle') }}</span>
+                  <span v-if="mv.uncensored" class="badge warn">{{ $t('detail.uncensored') }}</span>
                   <span v-if="quality" class="badge accent">{{ quality }}</span>
                   <span v-if="mv.vr" class="badge">VR</span>
-                  <span v-if="mv.leak" class="badge err">流出</span>
+                  <span v-if="mv.leak" class="badge err">{{ $t('detail.leak') }}</span>
                 </div>
 
                 <!-- 关键信息 -->
                 <dl class="dd-facts">
                   <template v-if="mv.actresses && mv.actresses.length">
-                    <dt>女优</dt>
+                    <dt>{{ $t('detail.fActress') }}</dt>
                     <dd class="chip-list">
                       <button v-for="a in mv.actresses" :key="a" class="chip" @click="openActress(a)">{{ a }}</button>
                     </dd>
                   </template>
                   <template v-if="mv.genres && mv.genres.length">
-                    <dt>类型</dt>
+                    <dt>{{ $t('detail.fGenre') }}</dt>
                     <dd class="chip-list">
                       <button v-for="g in mv.genres" :key="g" class="chip" @click="filterBy('genre', g)">{{ g }}</button>
                     </dd>
                   </template>
-                  <template v-if="mv.studio"><dt>厂商</dt><dd><a @click="filterBy('studio', mv.studio)">{{ mv.studio }}</a></dd></template>
-                  <template v-if="mv.series"><dt>系列</dt><dd><a @click="filterBy('series', mv.series)">{{ mv.series }}</a></dd></template>
-                  <template v-if="mv.director"><dt>导演</dt><dd>{{ mv.director }}</dd></template>
-                  <template v-if="mv.release_date"><dt>发行</dt><dd>{{ fmtDate(mv.release_date) }}</dd></template>
-                  <template v-if="mv.runtime"><dt>时长</dt><dd>{{ mv.runtime }} 分钟</dd></template>
-                  <template v-if="mv.resolution"><dt>分辨率</dt><dd>{{ mv.resolution }}</dd></template>
-                  <dt>体积</dt><dd>{{ fmtSize(totalSize) }}<span v-if="mv.files && mv.files.length > 1" class="dim"> · {{ mv.files.length }} 个文件</span></dd>
-                  <template v-if="mv.added_at"><dt>入库</dt><dd>{{ fmtAgo(mv.added_at) }}</dd></template>
+                  <template v-if="mv.studio"><dt>{{ $t('detail.fStudio') }}</dt><dd><a @click="filterBy('studio', mv.studio)">{{ mv.studio }}</a></dd></template>
+                  <template v-if="mv.series"><dt>{{ $t('detail.fSeries') }}</dt><dd><a @click="filterBy('series', mv.series)">{{ mv.series }}</a></dd></template>
+                  <template v-if="mv.director"><dt>{{ $t('detail.fDirector') }}</dt><dd>{{ mv.director }}</dd></template>
+                  <template v-if="mv.release_date"><dt>{{ $t('detail.fRelease') }}</dt><dd>{{ fmtDate(mv.release_date) }}</dd></template>
+                  <template v-if="mv.runtime"><dt>{{ $t('detail.fRuntime') }}</dt><dd>{{ mv.runtime }} {{ $t('detail.minute') }}</dd></template>
+                  <template v-if="mv.resolution"><dt>{{ $t('detail.fResolution') }}</dt><dd>{{ mv.resolution }}</dd></template>
+                  <dt>{{ $t('detail.fSize') }}</dt><dd>{{ fmtSize(totalSize) }}<span v-if="mv.files && mv.files.length > 1" class="dim"> · {{ $t('detail.filesCount', { n: mv.files.length }) }}</span></dd>
+                  <template v-if="mv.added_at"><dt>{{ $t('detail.fAdded') }}</dt><dd>{{ fmtAgo(mv.added_at) }}</dd></template>
                 </dl>
 
                 <!-- 自定义标签：常驻主区可见，随时增删 -->
                 <div class="dd-tags">
                   <div class="dd-tags-head">
-                    <span class="lbl">自定义标签</span>
-                    <button class="link-btn" @click="openTagMgr">管理全部标签</button>
-                    <span v-if="aiReady" class="dim">可点「AI 补充标签」自动生成</span>
+                    <span class="lbl">{{ $t('detail.customTags') }}</span>
+                    <button class="link-btn" @click="openTagMgr">{{ $t('detail.manageTags') }}</button>
+                    <span v-if="aiReady" class="dim">{{ $t('detail.aiTagHint') }}</span>
                   </div>
                   <div v-if="mv.tags && mv.tags.length" class="chip-list wrap">
                     <span v-for="t in mv.tags" :key="t" class="badge tag-removable clickable" @click="filterByTag(t)">
                       {{ t }}
-                      <button class="tag-x" :title="'移除 ' + t" @click.stop="removeTag(t)">×</button>
+                      <button class="tag-x" :title="$t('detail.removeTagTitle') + t" @click.stop="removeTag(t)">×</button>
                     </span>
                   </div>
-                  <div v-else class="dim small">暂无标签，添加后可在「影片库」按标签筛选。</div>
+                  <div v-else class="dim small">{{ $t('detail.noTags') }}</div>
                   <div class="tag-edit">
                     <div class="tag-input-wrap">
                       <input
                         v-model="newTag"
                         class="tag-input"
-                        placeholder="选择或输入新标签，回车创建"
+                        :placeholder="$t('detail.tagPlaceholder')"
                         @focus="ensureTags(); showTagSuggest = true"
                         @blur="onTagBlur"
                         @keydown.enter.prevent="addTag"
@@ -579,35 +580,35 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', onKey); document.r
                           @mouseenter="suggestIdx = i"
                         >
                           <span>{{ s.name }}</span>
-                          <span class="dim small">已用 {{ s.count }}</span>
+                          <span class="dim small">{{ $t('detail.usedCount', { n: s.count }) }}</span>
                         </button>
                       </div>
                     </div>
-                    <button class="btn tiny" :disabled="tagBusy || !newTag.trim()" @click="addTag">添加</button>
+                    <button class="btn tiny" :disabled="tagBusy || !newTag.trim()" @click="addTag">{{ $t('common.add') }}</button>
                   </div>
 
                   <!-- 全局标签管理弹窗 -->
                   <div v-if="showTagMgr" class="tag-mgr" @click.self="showTagMgr = false">
                     <div class="tag-mgr-box">
                       <div class="tm-head">
-                        <b>管理全部标签</b>
-                        <button class="icon-btn" title="关闭" @click="showTagMgr = false">×</button>
+                        <b>{{ $t('detail.manageTags') }}</b>
+                        <button class="icon-btn" :title="$t('common.close')" @click="showTagMgr = false">×</button>
                       </div>
-                      <p class="muted small">改名会同步到所有影片；删除会移除该标签与所有影片的关联（无关联标签可直接删除）。</p>
-                      <div v-if="!allTagList.length" class="dim">暂无标签</div>
+                      <p class="muted small">{{ $t('detail.tagMgrHint') }}</p>
+                      <div v-if="!allTagList.length" class="dim">{{ $t('detail.noTags') }}</div>
                       <ul class="tm-list">
                         <li v-for="t in allTagList" :key="t.id" class="tm-item">
                           <template v-if="editingTag === t.name">
-                            <input v-model="editingTagNew" class="tm-input" @keydown.enter.prevent="doRenameTag" placeholder="新名称" />
-                            <button class="btn tiny" :disabled="tagMgrBusy || !editingTagNew.trim()" @click="doRenameTag">保存</button>
-                            <button class="btn tiny ghost" @click="editingTag = ''">取消</button>
+                            <input v-model="editingTagNew" class="tm-input" @keydown.enter.prevent="doRenameTag" :placeholder="$t('detail.newName')" />
+                            <button class="btn tiny" :disabled="tagMgrBusy || !editingTagNew.trim()" @click="doRenameTag">{{ $t('common.save') }}</button>
+                            <button class="btn tiny ghost" @click="editingTag = ''">{{ $t('common.cancel') }}</button>
                           </template>
                           <template v-else>
                             <span class="tm-name">{{ t.name }}</span>
-                            <span class="dim small">已用 {{ t.count }}</span>
+                            <span class="dim small">{{ $t('detail.usedCount', { n: t.count }) }}</span>
                             <span class="tm-actions">
-                              <button class="link-btn" @click="editingTag = t.name; editingTagNew = t.name">改名</button>
-                              <button class="link-btn danger" @click="doDeleteTag(t.name)">删除</button>
+                              <button class="link-btn" @click="editingTag = t.name; editingTagNew = t.name">{{ $t('detail.rename') }}</button>
+                              <button class="link-btn danger" @click="doDeleteTag(t.name)">{{ $t('common.delete') }}</button>
                             </span>
                           </template>
                         </li>
@@ -620,12 +621,12 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', onKey); document.r
 
             <!-- 标签页 -->
             <div class="tabs dd-tabs">
-              <button class="tab" :class="{ on: tab === 'info' }" @click="tab = 'info'">简介</button>
-              <button class="tab" :class="{ on: tab === 'preview' }" @click="tab = 'preview'">预览图</button>
-              <button class="tab" :class="{ on: tab === 'files' }" @click="tab = 'files'">文件</button>
+              <button class="tab" :class="{ on: tab === 'info' }" @click="tab = 'info'">{{ $t('detail.tabInfo') }}</button>
+              <button class="tab" :class="{ on: tab === 'preview' }" @click="tab = 'preview'">{{ $t('detail.tabPreview') }}</button>
+              <button class="tab" :class="{ on: tab === 'files' }" @click="tab = 'files'">{{ $t('detail.tabFiles') }}</button>
               <div class="spacer"></div>
-              <button class="btn tiny ghost" @click="doScrape" :disabled="loading">重新刮削</button>
-              <button class="btn tiny ghost" @click="doNfo">导出 NFO</button>
+              <button class="btn tiny ghost" @click="doScrape" :disabled="loading">{{ $t('detail.rescrape') }}</button>
+              <button class="btn tiny ghost" @click="doNfo">{{ $t('detail.exportNfo') }}</button>
             </div>
 
             <div class="dd-pane">
@@ -633,30 +634,30 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', onKey); document.r
               <template v-if="tab === 'info'">
                 <div v-if="!editing">
                   <p v-if="mv.plot" class="plot">{{ mv.plot }}</p>
-                  <p v-else class="muted">暂无简介。</p>
-                  <div v-if="mv.note" class="note-box"><b>备注</b><p>{{ mv.note }}</p></div>
+                  <p v-else class="muted">{{ $t('detail.noSynopsis') }}</p>
+                  <div v-if="mv.note" class="note-box"><b>{{ $t('detail.note') }}</b><p>{{ mv.note }}</p></div>
                   <div v-if="aiReady" class="hstack mt wrap">
-                    <button class="btn tiny ghost" :disabled="aiBusy" @click="doAiSynopsis">{{ aiBusy ? '生成中…' : 'AI 生成简介' }}</button>
-                    <button class="btn tiny ghost" :disabled="aiBusy" @click="doAiTags">AI 补充标签</button>
+                    <button class="btn tiny ghost" :disabled="aiBusy" @click="doAiSynopsis">{{ aiBusy ? $t('detail.generating') : $t('detail.aiSynopsis') }}</button>
+                    <button class="btn tiny ghost" :disabled="aiBusy" @click="doAiTags">{{ $t('detail.aiTags') }}</button>
                   </div>
-                  <button class="btn tiny mt" @click="startEdit">编辑元数据</button>
+                  <button class="btn tiny mt" @click="startEdit">{{ $t('detail.editMeta') }}</button>
                 </div>
 
                 <div v-else class="edit-form">
-                  <div class="field"><label>标题</label><input v-model="draft.title" /></div>
+                  <div class="field"><label>{{ $t('detail.fTitle') }}</label><input v-model="draft.title" /></div>
                   <div class="two">
-                    <div class="field"><label>番号</label><input v-model="draft.code" /></div>
-                    <div class="field"><label>发行日期</label><input v-model="draft.release_date" placeholder="YYYY-MM-DD" /></div>
+                    <div class="field"><label>{{ $t('detail.fCode') }}</label><input v-model="draft.code" /></div>
+                    <div class="field"><label>{{ $t('detail.fRelease') }}</label><input v-model="draft.release_date" :placeholder="$t('detail.datePh')" /></div>
                   </div>
                   <div class="two">
-                    <div class="field"><label>时长（分钟）</label><input v-model="draft.runtime" type="number" min="0" /></div>
-                    <div class="field"><label>导演</label><input v-model="draft.director" /></div>
+                    <div class="field"><label>{{ $t('detail.fRuntime') }}</label><input v-model="draft.runtime" type="number" min="0" /></div>
+                    <div class="field"><label>{{ $t('detail.fDirector') }}</label><input v-model="draft.director" /></div>
                   </div>
-                  <div class="field"><label>简介</label><textarea v-model="draft.plot" rows="4"></textarea></div>
-                  <div class="field"><label>备注</label><textarea v-model="draft.note" rows="2"></textarea></div>
+                  <div class="field"><label>{{ $t('detail.synopsis') }}</label><textarea v-model="draft.plot" rows="4"></textarea></div>
+                  <div class="field"><label>{{ $t('detail.note') }}</label><textarea v-model="draft.note" rows="2"></textarea></div>
                   <div class="hstack">
-                    <button class="btn primary" @click="saveEdit">保存</button>
-                    <button class="btn ghost" @click="editing = false">取消</button>
+                    <button class="btn primary" @click="saveEdit">{{ $t('common.save') }}</button>
+                    <button class="btn ghost" @click="editing = false">{{ $t('common.cancel') }}</button>
                   </div>
                 </div>
               </template>
@@ -665,33 +666,33 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', onKey); document.r
               <template v-else-if="tab === 'preview'">
                 <div class="hstack mb">
                   <button class="btn tiny" :disabled="pvLoading" @click="loadPreviews(true)">
-                    {{ pvLoading ? '生成中…' : '生成预览图' }}
+                    {{ pvLoading ? $t('detail.generating') : $t('detail.genPreview') }}
                   </button>
-                  <span class="muted">需要配置 ffmpeg 路径</span>
+                  <span class="muted">{{ $t('detail.needFfmpeg') }}</span>
                 </div>
                 <div v-if="previews.length" class="pv-grid">
                   <img v-for="(u, i) in previews" :key="i" :src="u" alt="" @click="lightbox = u" />
                 </div>
-                <div v-else-if="!pvLoading" class="empty"><div class="icon">▤</div><div class="desc">还没有预览图</div></div>
+                <div v-else-if="!pvLoading" class="empty"><div class="icon">▤</div><div class="desc">{{ $t('detail.noPreview') }}</div></div>
               </template>
 
               <!-- 文件 -->
               <template v-else>
                 <table class="ftable">
-                  <thead><tr><th>文件名</th><th>大小</th><th>状态</th></tr></thead>
+                  <thead><tr><th>{{ $t('detail.fileName') }}</th><th>{{ $t('detail.fileSize') }}</th><th>{{ $t('detail.fileStatus') }}</th></tr></thead>
                   <tbody>
                     <tr v-for="f in mv.files" :key="f.id">
                       <td class="fname" :title="f.path">{{ f.filename }}</td>
                       <td class="tabular">{{ fmtSize(f.size) }}</td>
-                      <td><span class="badge" :class="f.missing ? 'err' : 'ok'">{{ f.missing ? '丢失' : '正常' }}</span></td>
+                      <td><span class="badge" :class="f.missing ? 'err' : 'ok'">{{ f.missing ? $t('detail.fileMissing') : $t('detail.fileOk') }}</span></td>
                     </tr>
                   </tbody>
                 </table>
                 <div class="danger-zone">
-                  <b>危险操作</b>
+                  <b>{{ $t('detail.dangerZone') }}</b>
                   <div class="hstack">
-                    <button class="btn tiny" @click="doDelete(false)">从库中移除</button>
-                    <button class="btn tiny danger" @click="doDelete(true)">删除影片和文件</button>
+                    <button class="btn tiny" @click="doDelete(false)">{{ $t('detail.delFromDbBtn') }}</button>
+                    <button class="btn tiny danger" @click="doDelete(true)">{{ $t('detail.delWithFileBtn') }}</button>
                   </div>
                 </div>
               </template>
@@ -701,15 +702,15 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', onKey); document.r
           <!-- 右侧：相似推荐常驻，打开即展示，无需手动点击 -->
           <aside class="dd-similar-rail">
             <div class="rail-head">
-              <span class="rail-title">相似推荐</span>
-              <span class="rail-sub">同类型 · 猜你喜欢</span>
+              <span class="rail-title">{{ $t('detail.similar') }}</span>
+              <span class="rail-sub">{{ $t('detail.similarSub') }}</span>
             </div>
             <div class="rail-list">
               <div v-for="s in similar" :key="s.id" class="sim" @click="state.currentId = s.id">
                 <img :src="coverThumbUrl(s.id, 220)" alt="" @error="coverFallback" />
                 <div class="sim-t ellipsis">{{ s.title || s.code }}</div>
               </div>
-              <div v-if="!similar.length" class="empty small"><div class="icon">≈</div><div class="desc">暂无相似影片</div></div>
+              <div v-if="!similar.length" class="empty small"><div class="icon">≈</div><div class="desc">{{ $t('detail.noSimilar') }}</div></div>
             </div>
           </aside>
         </div>

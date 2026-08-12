@@ -15,10 +15,10 @@ const pageSize = 60
 
 /* 后端 /actresses 仅接受 q / sort / limit */
 const SORTS = [
-  ['count', '作品最多'],
-  ['name', '名称 A-Z'],
-  ['recent', '最近添加'],
-  ['followed', '关注优先'],
+  ['count', 'actress.sortCount'],
+  ['name', 'actress.sortName'],
+  ['recent', 'actress.sortRecent'],
+  ['followed', 'actress.sortFollowed'],
 ]
 
 async function load() {
@@ -94,13 +94,13 @@ onMounted(load)
 <template>
   <section class="view">
     <div class="toolbar">
-      <h1 class="tb-title">女优墙</h1>
+      <h1 class="tb-title">{{ $t('view.actress') }}</h1>
       <span class="tb-sub tabular" v-if="!loading">{{ total }} 位</span>
       <span v-else class="spinner"></span>
 
       <div class="spacer"></div>
 
-      <input class="kw" v-model="kw" type="search" placeholder="搜索女优…" />
+      <input class="kw" v-model="kw" type="search" :placeholder="$t('actress.searchPlaceholder')" />
       <select class="sel" v-model="sort">
         <option v-for="[v, t] in SORTS" :key="v" :value="v">{{ t }}</option>
       </select>
@@ -118,8 +118,8 @@ onMounted(load)
 
       <div v-else-if="!items.length" class="empty">
         <div class="icon">♀</div>
-        <div class="title">没有找到女优</div>
-        <div class="desc">刮削影片元数据后，女优信息会自动汇总到这里。</div>
+        <div class="title">{{ $t('actress.emptyTitle') }}</div>
+        <div class="desc">{{ $t('actress.emptyDesc') }}</div>
       </div>
 
       <div v-else class="wall">

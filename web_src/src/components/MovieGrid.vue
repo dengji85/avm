@@ -1,13 +1,14 @@
 <script setup>
 import { computed } from 'vue'
 import { state } from '../state.js'
+import { t } from '../i18n/index.js'
 import MovieCard from './MovieCard.vue'
 
 const props = defineProps({
   items: { type: Array, default: () => [] },
   loading: { type: Boolean, default: false },
-  emptyTitle: { type: String, default: '没有找到影片' },
-  emptyDesc: { type: String, default: '试试调整筛选条件，或先扫描媒体库导入影片。' },
+  emptyTitle: { type: String, default: () => t('grid.emptyTitle') },
+  emptyDesc: { type: String, default: () => t('grid.emptyDesc') },
   skeletonCount: { type: Number, default: 18 },
   selectable: { type: Boolean, default: true },
 })

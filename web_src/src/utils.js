@@ -1,5 +1,6 @@
 // 通用工具：格式化、封面占位、Toast 队列、确认框、防抖。
 import { reactive } from 'vue'
+import { t } from './i18n/index.js'
 
 export function esc(s) {
   return String(s == null ? '' : s)
@@ -21,9 +22,9 @@ export function fmtDuration(sec) {
   const h = Math.floor(sec / 3600)
   const m = Math.floor((sec % 3600) / 60)
   const s = Math.floor(sec % 60)
-  if (h > 0) return `${h}小时${m}分`
-  if (m > 0) return `${m}分${s ? s + '秒' : ''}`
-  return `${s}秒`
+  if (h > 0) return t('fmt.durationH', { h, m })
+  if (m > 0) return t('fmt.durationM', { m, s })
+  return t('fmt.durationS', { s })
 }
 
 /** 播放器用 时:分:秒 */
@@ -55,17 +56,17 @@ export function fmtAgo(d) {
   const t = new Date(String(d).replace(' ', 'T')).getTime()
   if (!t) return fmtDate(d)
   const diff = (Date.now() - t) / 1000
-  if (diff < 60) return '刚刚'
-  if (diff < 3600) return `${Math.floor(diff / 60)} 分钟前`
-  if (diff < 86400) return `${Math.floor(diff / 3600)} 小时前`
-  if (diff < 2592000) return `${Math.floor(diff / 86400)} 天前`
-  if (diff < 31536000) return `${Math.floor(diff / 2592000)} 个月前`
-  return `${Math.floor(diff / 31536000)} 年前`
+  if (diff < 60) return t('fmt.justNow')
+  if (diff < 3600) return t('fmt.minutesAgo', { n: Math.floor(diff / 60) })
+  if (diff < 86400) return t('fmt.hoursAgo', { n: Math.floor(diff / 3600) })
+  if (diff < 2592000) return t('fmt.daysAgo', { n: Math.floor(diff / 86400) })
+  if (diff < 31536000) return t('fmt.monthsAgo', { n: Math.floor(diff / 2592000) })
+  return t('fmt.yearsAgo', { n: Math.floor(diff / 31536000) })
 }
 
 export function fmtRating(r) {
   r = Number(r) || 0
-  return r ? '★'.repeat(Math.round(r)) + '☆'.repeat(5 - Math.round(r)) : '未评分'
+  return r ? '★'.repeat(Math.round(r)) + '☆'.repeat(5 - Math.round(r)) : t('fmt.noRating')
 }
 
 export function fmtNum(n) {
@@ -110,13 +111,13 @@ export function toast(msg, type = '', ms = 3000) {
 
 /* ---------------- 确认框 ---------------- */
 export const confirmState = reactive({
-  open: false, title: '', desc: '', okText: '确定', danger: false, _resolve: null,
+  open: false, title: '', desc: '', okText: t('common.confirm'), danger: false, _resolve: null,
 })
 
 export function confirmDialog(title, desc = '', opts = {}) {
   confirmState.title = title
   confirmState.desc = desc
-  confirmState.okText = opts.okText || '确定'
+  confirmState.okText = opts.okText || t('common.confirm')
   confirmState.danger = !!opts.danger
   confirmState.open = true
   return new Promise((resolve) => { confirmState._resolve = resolve })
@@ -141,9 +142,9 @@ export function debounce(fn, ms = 260) {
 export function copyText(text) {
   try {
     navigator.clipboard.writeText(String(text))
-    toast('已复制', 'ok')
+    toast(t('common.copied'), 'ok')
   } catch (e) {
-    toast('复制失败', 'err')
+    toast(t('common.copyFailed'), 'err')
   }
 }
 

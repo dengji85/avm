@@ -729,6 +729,16 @@ def movie_progress(conn: sqlite3.Connection, movie_id: int) -> Optional[Dict[str
     return {"position": row["position"], "duration": row["duration"], "finished": row["finished"]}
 
 
+def mark_played(conn: sqlite3.Connection, movie_id: int) -> None:
+    """网页播放器开始播放时调用：播放次数 +1，并标记已看、更新最后播放时间。
+    不会打开系统播放器，也不会启动外部监控。"""
+    conn.execute(
+        "UPDATE movies SET play_count = play_count + 1, watched = 1, "
+        "last_played = datetime('now','localtime') WHERE id = ?",
+        (movie_id,),
+    )
+
+
 def set_watch_progress(conn: sqlite3.Connection, movie_id: int,
                        position: float = 0, duration: float = 0) -> None:
     """记录/更新播放进度（秒）。position=0 视为清除进度；看过即标记 watched。"""

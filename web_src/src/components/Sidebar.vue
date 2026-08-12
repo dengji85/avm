@@ -24,19 +24,19 @@ function go(id) {
   <aside class="sidebar" :class="{ collapsed: state.sidebarCollapsed, 'mobile-open': state.mobileNavOpen }">
     <div class="sb-body">
       <div v-for="g in NAV_GROUPS" :key="g.title" class="nav-group">
-        <div class="nav-group-title">{{ g.title }}</div>
+        <div class="nav-group-title">{{ $t(g.title) }}</div>
         <div
           v-for="it in g.items"
           :key="it.id"
           class="nav-item"
           :class="{ on: state.view === it.id }"
           @click="go(it.id)"
-          :data-tip="state.sidebarCollapsed ? it.label : ''"
+          :data-tip="state.sidebarCollapsed ? $t(it.label) : ''"
         >
           <svg class="ico" viewBox="0 0 24 24" fill="currentColor">
             <path :d="NAV_ICONS[it.id]" />
           </svg>
-          <span class="lbl">{{ it.label }}</span>
+          <span class="lbl">{{ $t(it.label) }}</span>
           <span v-if="it.id === 'maintenance' && badge > 0" class="nav-badge tabular">{{ badge }}</span>
         </div>
       </div>

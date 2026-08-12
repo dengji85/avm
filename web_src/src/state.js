@@ -1,4 +1,5 @@
 ﻿import { reactive, watch } from 'vue'
+import { t } from './i18n'
 
 const PREF_KEY = 'avm.prefs.v2'
 
@@ -168,30 +169,30 @@ export function hasActiveFilter() {
 /* ---------------- 常量 ---------------- */
 
 export const FLAGS = [
-  ['favorite', '收藏', '♥'], ['watchlist', '想看', '⌚'],
-  ['subtitle', '中文字幕', '字'], ['uncensored', '无码', '無'],
-  ['hd4k', '4K', '4K'], ['vr', 'VR', 'VR'],
-  ['unwatched', '未看', '○'], ['watched', '看过', '●'],
-  ['nocover', '缺封面', '▢'], ['noscrape', '未刮削', '⚑'], ['nocode', '无番号', '?'],
+  ['favorite', 'flag.favorite', '♥'], ['watchlist', 'flag.watchlist', '⌚'],
+  ['subtitle', 'flag.subtitle', 'flag.subtitleShort'], ['uncensored', 'flag.uncensored', 'flag.uncensoredShort'],
+  ['hd4k', 'flag.hd4k', '4K'], ['vr', 'flag.vr', 'VR'],
+  ['unwatched', 'flag.unwatched', '○'], ['watched', 'flag.watched', '●'],
+  ['nocover', 'flag.nocover', '▢'], ['noscrape', 'flag.noscrape', '⚑'], ['nocode', 'flag.nocode', '?'],
 ]
 
 export const FACET_KINDS = [
-  ['actresses', 'actress', true, '女优'],
-  ['genres', 'genre', true, '类型'],
-  ['tags', 'tag', true, '标签'],
-  ['studios', 'studio', false, '厂商'],
-  ['series', 'series', false, '系列'],
-  ['prefixes', 'prefix', false, '番号前缀'],
-  ['years', 'year', false, '年份'],
+  ['actresses', 'actress', true, 'facet.actresses'],
+  ['genres', 'genre', true, 'facet.genres'],
+  ['tags', 'tag', true, 'facet.tags'],
+  ['studios', 'studio', false, 'facet.studios'],
+  ['series', 'series', false, 'facet.series'],
+  ['prefixes', 'prefix', false, 'facet.prefixes'],
+  ['years', 'year', false, 'facet.years'],
 ]
 
 export const SORTS = [
-  ['added_desc', '最近添加'], ['added_asc', '最早添加'],
-  ['release_desc', '发行最新'], ['release_asc', '发行最早'],
-  ['rating_desc', '评分最高'], ['title_asc', '标题 A-Z'],
-  ['code_asc', '番号顺序'], ['size_desc', '体积最大'],
-  ['duration_desc', '时长最长'], ['played_desc', '播放最多'],
-  ['random', '随机'],
+  ['added_desc', 'sort.added_desc'], ['added_asc', 'sort.added_asc'],
+  ['release_desc', 'sort.release_desc'], ['release_asc', 'sort.release_asc'],
+  ['rating_desc', 'sort.rating_desc'], ['title_asc', 'sort.title_asc'],
+  ['code_asc', 'sort.code_asc'], ['size_desc', 'sort.size_desc'],
+  ['duration_desc', 'sort.duration_desc'], ['played_desc', 'sort.played_desc'],
+  ['random', 'sort.random'],
 ]
 
 /* 内联 SVG 图标（24x24 viewBox，fill=currentColor）实心面性图标，小尺寸更醒目 */
@@ -210,34 +211,34 @@ export const NAV_ICONS = {
 
 /* 顶部主导航（Tab）：首页 / 影片库 / 统计 / 维护中心 */
 export const NAV_TABS = [
-  { id: 'home', label: '首页', icon: 'home' },
-  { id: 'gallery', label: '影片库', icon: 'gallery' },
-  { id: 'stats', label: '统计', icon: 'stats' },
-  { id: 'maintenance', label: '维护中心', icon: 'maintenance' },
+  { id: 'home', label: 'nav.home', icon: 'home' },
+  { id: 'gallery', label: 'nav.gallery', icon: 'gallery' },
+  { id: 'stats', label: 'nav.stats', icon: 'stats' },
+  { id: 'maintenance', label: 'nav.maintenance', icon: 'maintenance' },
 ]
 
 /* 次级入口（仍可通过顶栏菜单/路由直达，不在主 Tab 强暴露） */
 export const NAV_SECONDARY = [
-  { id: 'actress', label: '女优墙' },
-  { id: 'collections', label: '片单' },
-  { id: 'rankings', label: '排行榜' },
-  { id: 'swipe', label: '滑动评分' },
-  { id: 'settings', label: '设置' },
+  { id: 'actress', label: 'nav.actress' },
+  { id: 'collections', label: 'nav.collections' },
+  { id: 'rankings', label: 'nav.rankings' },
+  { id: 'swipe', label: 'nav.swipe' },
+  { id: 'settings', label: 'nav.settings' },
 ]
 
 /* 侧边栏分组导航（Sidebar.vue 使用，注意字段为 id/label/icon） */
 export const NAV_GROUPS = [
-  { title: '浏览', items: [
-    { id: 'home', label: '推荐', icon: 'gallery' },
-    { id: 'gallery', label: '影片库', icon: 'gallery' },
-    { id: 'actress', label: '女优墙', icon: 'actress' },
-    { id: 'collections', label: '片单', icon: 'collections' },
-    { id: 'rankings', label: '排行榜', icon: 'rankings' },
-    { id: 'swipe', label: '滑动评分', icon: 'swipe' },
+  { title: 'navGroup.browse', items: [
+    { id: 'home', label: 'nav.home', icon: 'gallery' },
+    { id: 'gallery', label: 'nav.gallery', icon: 'gallery' },
+    { id: 'actress', label: 'nav.actress', icon: 'actress' },
+    { id: 'collections', label: 'nav.collections', icon: 'collections' },
+    { id: 'rankings', label: 'nav.rankings', icon: 'rankings' },
+    { id: 'swipe', label: 'nav.swipe', icon: 'swipe' },
   ] },
-  { title: '维护', items: [
-    { id: 'maintenance', label: '维护中心', icon: 'maintenance' },
-    { id: 'settings', label: '设置', icon: 'settings' },
+  { title: 'navGroup.maintenance', items: [
+    { id: 'maintenance', label: 'nav.maintenance', icon: 'maintenance' },
+    { id: 'settings', label: 'nav.settings', icon: 'settings' },
   ] },
 ]
 

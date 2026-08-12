@@ -12,8 +12,8 @@ const SEARCH_THRESHOLD = 20 // 值超过该数量才显示组内搜索框
 // 渲染顺序：高频/低基数维度置顶，长尾维度（女优/厂商/系列）靠下并折叠。
 // 评分、标记为固定分组（不在 FACET_KINDS 中），手动插入到类型/标签之后。
 const byKey = Object.fromEntries(FACET_KINDS.map((g) => [g[0], g]))
-const RATING = ['ratings', 'rating', false, '评分 ≥']
-const FLAGG = ['flags', 'flags', false, '标记']
+const RATING = ['ratings', 'rating', false, 'filter.ratingGE']
+const FLAGG = ['flags', 'flags', false, 'filter.flags']
 const order = ['genres', 'tags', 'ratings', 'flags', 'actresses', 'studios', 'series', 'prefixes', 'years']
 const groupMap = { ratings: RATING, flags: FLAGG, ...byKey }
 const groups = order.map((k) => groupMap[k]).filter(Boolean)
@@ -95,7 +95,7 @@ defineExpose({ focus: () => {} })
       <input
         v-model="state.q"
         type="search"
-        placeholder="搜索标题 / 番号"
+        :placeholder="$t('filter.search')"
         @input="state.page = 1"
       />
     </div>
@@ -103,10 +103,10 @@ defineExpose({ focus: () => {} })
     <!-- 普通分面（类型 / 标签 / 评分 / 标记，低基数，始终展开） -->
     <template v-for="[key, field, multi, label] in groups" :key="key">
       <div v-if="!COLLAPSIBLE.has(key) && key !== 'flags'" class="f-group">
-        <div class="f-label">{{ label }}</div>
+        <div class="f-label">{{ $t(label) }}</div>
         <div v-if="key === 'ratings'" class="f-rating">
           <input type="range" min="0" max="5" step="1" v-model="minRating" />
-          <span class="rv">{{ minRating || '不限' }}</span>
+          <span class="rv">{{ minRating || $t('filter.all') }}</span>
         </div>
         <div v-else class="f-chips">
           <button
@@ -124,7 +124,7 @@ defineExpose({ focus: () => {} })
 
     <!-- 标记分组：用固定 FLAGS 常量（后端不返回该分面） -->
     <div class="f-group">
-      <div class="f-label">标记</div>
+      <div class="f-label">{{ $t('filter.flags') }}</div>
       <div class="f-chips">
         <button
           v-for="[f, label] in FLAGS"
@@ -132,7 +132,7 @@ defineExpose({ focus: () => {} })
           class="f-chip"
           :class="{ on: state.flags.includes(f) }"
           @click="toggleFlag(f)"
-        >{{ label }}</button>
+        >{{ $t(label) }}</button>
       </div>
     </div>
 
@@ -149,7 +149,7 @@ defineExpose({ focus: () => {} })
           v-if="fullList(key).length > SEARCH_THRESHOLD"
           class="f-filter"
           type="search"
-          :placeholder="`筛选${label}…`"
+          :placeholder="$t('filter.browse') + $t(label) + '…'"
           v-model="ui[key].q"
         />
 
@@ -167,7 +167,7 @@ defineExpose({ focus: () => {} })
 
         <div v-if="!ui[key].q && ui[key].collapsed && fullList(key).length > INITIAL" class="f-more">
           <button class="btn tiny ghost" @click="toggleCollapse(key)">
-            显示全部 {{ fullList(key).length }} 个{{ label }}
+            {{ $t('filter.showAll') }} {{ fullList(key).length }} {{ $t('filter.values') }}{{ $t(label) }}
           </button>
         </div>
       </div>

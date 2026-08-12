@@ -13,9 +13,9 @@ export default defineConfig({
   },
   server: {
     proxy: {
-      // 开发时把 /api 代理到后端，避免跨域
-      '/api': 'http://127.0.0.1:8771',
-      '/covers': 'http://127.0.0.1:8771',
+      // 开发时把 /api 代理到后端，避免跨域（后端默认端口 8770）
+      '/api': 'http://127.0.0.1:8770',
+      '/covers': 'http://127.0.0.1:8770',
     },
   },
 })

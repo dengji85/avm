@@ -3,6 +3,7 @@ import { ref, computed } from 'vue'
 import { state } from '../state.js'
 import { batchMovies, startScrape, addToCollection, listCollections } from '../api.js'
 import { toast, confirmDialog } from '../utils.js'
+import { t } from '../i18n/index.js'
 
 const emit = defineEmits(['done'])
 const busy = ref(false)
@@ -25,12 +26,12 @@ async function apply(patch, label) {
   busy.value = true
   try {
     await batchMovies({ ids: ids.value, ...patch })
-    toast(`${label}：已应用到 ${n.value} 部`, 'ok')
+    toast(t('bulk.applied', { label: t(label), n: n.value }), 'ok')
     emit('done')
   } catch (e) { toast(e.message, 'err') } finally { busy.value = false }
 }
 
-async function rate(v) { await apply({ rating: v }, `评分 ${v} 星`) }
+async function rate(v) { await apply({ rating: v }, 'bulk.rateStars') }
 
 async function scrapeSelected() {
   if (!n.value) return
@@ -38,7 +39,7 @@ async function scrapeSelected() {
   try {
     await startScrape({ ids: ids.value })
     state.taskPanelOpen = true
-    toast('已加入刮削队列', 'ok')
+    toast(t('common.scrapeQueued'), 'ok')
   } catch (e) { toast(e.message, 'err') } finally { busy.value = false }
 }
 
@@ -50,8 +51,8 @@ async function openTag() {
 
 async function submitTags() {
   const tags = tagText.value.split(/[,，\s]+/).map((s) => s.trim()).filter(Boolean)
-  if (!tags.length) { toast('请输入标签', 'err'); return }
-  await apply({ tags }, '设置标签')
+  if (!tags.length) { toast(t('bulk.tagEmpty'), 'err'); return }
+  await apply({ tags }, 'bulk.setTags')
   showTag.value = false
 }
 
@@ -65,11 +66,11 @@ async function openColl() {
 }
 
 async function submitColl() {
-  if (!collId.value) { toast('请选择片单', 'err'); return }
+  if (!collId.value) { toast(t('bulk.collEmpty'), 'err'); return }
   busy.value = true
   try {
     for (const id of ids.value) await addToCollection(collId.value, id)
-    toast(`已加入片单（${n.value} 部）`, 'ok')
+    toast(t('bulk.joined', { n: n.value }), 'ok')
     showColl.value = false
     emit('done')
   } catch (e) { toast(e.message, 'err') } finally { busy.value = false }
@@ -79,29 +80,29 @@ async function submitColl() {
 <template>
   <div v-if="n" class="bulk-bar">
     <span class="n">{{ n }}</span>
-    <span class="muted">已选</span>
+    <span class="muted">{{ $t('bulk.selected') }}</span>
     <div class="divider vert"></div>
 
-    <button class="btn tiny ghost" :disabled="busy" @click="apply({ favorite: 1 }, '加入收藏')" data-tip="收藏">♥</button>
-    <button class="btn tiny ghost" :disabled="busy" @click="apply({ watched: 1 }, '标记已看')" data-tip="标记已看">●</button>
-    <button class="btn tiny ghost" :disabled="busy" @click="apply({ watchlist: 1 }, '加入想看')" data-tip="想看">⌚</button>
+    <button class="btn tiny ghost" :disabled="busy" @click="apply({ favorite: 1 }, 'bulk.addFav')" :data-tip="$t('bulk.addFav')">♥</button>
+    <button class="btn tiny ghost" :disabled="busy" @click="apply({ watched: 1 }, 'bulk.markWatched')" :data-tip="$t('bulk.markWatched')">●</button>
+    <button class="btn tiny ghost" :disabled="busy" @click="apply({ watchlist: 1 }, 'bulk.addWatch')" :data-tip="$t('bulk.addWatch')">⌚</button>
 
     <div class="divider vert"></div>
     <div class="rate-group">
-      <button v-for="v in 5" :key="v" class="rb" :disabled="busy" @click="rate(v)" :data-tip="`${v} 星`">★</button>
+      <button v-for="v in 5" :key="v" class="rb" :disabled="busy" @click="rate(v)" :data-tip="$t('bulk.star', { v })">★</button>
     </div>
 
     <div class="divider vert"></div>
-    <button class="btn tiny ghost" :disabled="busy" @click="openTag">标签</button>
-    <button class="btn tiny ghost" :disabled="busy" @click="openColl">加入片单</button>
-    <button class="btn tiny ghost" :disabled="busy" @click="scrapeSelected">刮削</button>
+    <button class="btn tiny ghost" :disabled="busy" @click="openTag">{{ $t('bulk.tag') }}</button>
+    <button class="btn tiny ghost" :disabled="busy" @click="openColl">{{ $t('bulk.addToColl') }}</button>
+    <button class="btn tiny ghost" :disabled="busy" @click="scrapeSelected">{{ $t('bulk.scrape') }}</button>
 
     <div class="divider vert"></div>
-    <button class="btn tiny ghost" @click="clear">取消</button>
+    <button class="btn tiny ghost" @click="clear">{{ $t('common.cancel') }}</button>
 
     <!-- 标签输入 -->
     <div v-if="showTag" class="bb-pop">
-      <input v-model="tagText" placeholder="标签，逗号分隔" @keydown.enter="submitTags" autofocus />
+      <input v-model="tagText" :placeholder="$t('bulk.tagPlaceholder')" @keydown.enter="submitTags" autofocus />
       <button class="btn tiny primary" @click="submitTags">应用</button>
       <button class="btn tiny ghost" @click="showTag = false">✕</button>
     </div>

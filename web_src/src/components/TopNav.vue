@@ -4,6 +4,7 @@ import { state, NAV_TABS } from '../state.js'
 import { useTasks, pct, etaSec, phaseLabel, fmtDur, fetchScrapeLogs } from '../composables/useTasks.js'
 import { aiStatus, aiSearchIntent } from '../api.js'
 import { toast, fmtAgo } from '../utils.js'
+import { t } from '../i18n/index.js'
 
 const emit = defineEmits(['search'])
 const { anyRunning, activeTasks, lastFinished, taskHistory, overallPct, abort, clearHistory } = useTasks()
@@ -48,9 +49,9 @@ async function submit() {
       // 关键词仍作为补充文本检索
       state.q = (c.keywords && c.keywords.join(' ')) || text
       semanticActive.value = true
-      toast('已按语义理解检索', 'ok')
+      toast(t('nav.semanticSearched'), 'ok')
     } catch (e) {
-      toast(e.message || '语义解析失败，已退回关键词', 'err')
+      toast(e.message || t('nav.semanticFallback'), 'err')
       state.q = text
     } finally { semanticBusy.value = false }
   } else {
@@ -109,21 +110,21 @@ function toggleHistory(id) {
 // 从 counters 中提取自动清理的孤儿元数据计数（cleaned_actresses 等）
 function cleanedOrphans(t) {
   const c = (t && t.counters) || {}
-  const labels = { actresses: '女优', genres: '类型', tags: '标签', studios: '厂商', series: '系列' }
+  const labels = { actresses: 'tasks.kActress', genres: 'tasks.kGenre', tags: 'tasks.kTag', studios: 'tasks.kStudio', series: 'tasks.kSeries' }
   const out = []
   for (const [k, label] of Object.entries(labels)) {
     const v = c['cleaned_' + k]
-    if (v) out.push({ k: label, v })
+    if (v) out.push({ k: t(label), v })
   }
   return out
 }
 
 // 历史展开：刮削任务的逐文件日志（来自 DB 持久化记录）
 const scrapeFilters = [
-  { v: '', label: '全部' },
-  { v: 'error', label: '失败' },
-  { v: 'miss', label: '未命中' },
-  { v: 'ok', label: '成功' },
+  { v: '', label: 'tasks.all' },
+  { v: 'error', label: 'tasks.error' },
+  { v: 'miss', label: 'tasks.miss' },
+  { v: 'ok', label: 'tasks.ok' },
 ]
 const scrapeFilter = ref('')
 const scrapeLogItems = ref([])
@@ -142,11 +143,11 @@ async function setScrapeFilter(taskId, f) {
 
 <template>
   <header class="topnav">
-    <button class="btn ghost icon only-mobile" @click="state.mobileNavOpen = !state.mobileNavOpen" data-tip="菜单">☰</button>
+    <button class="btn ghost icon only-mobile" @click="state.mobileNavOpen = !state.mobileNavOpen" :data-tip="$t('nav.menu')">☰</button>
 
     <div class="brand" @click="state.view = 'home'">
       <div class="logo">匣</div>
-      <span class="brand-text">片匣</span>
+      <span class="brand-text">{{ $t('nav.brand') }}</span>
     </div>
 
     <nav class="main-tabs" aria-label="主导航">
@@ -156,7 +157,7 @@ async function setScrapeFilter(taskId, f) {
         class="tab"
         :class="{ active: state.view === t.id }"
         @click="state.view = t.id"
-      >{{ t.label }}</button>
+      >{{ $t(t.label) }}</button>
     </nav>
 
     <div class="search">
@@ -165,7 +166,7 @@ async function setScrapeFilter(taskId, f) {
         ref="searchEl"
         v-model="kw"
         type="search"
-        :placeholder="semantic && aiEnabled ? '用自然语言描述想找的影片…' : '搜索番号、标题、女优…'"
+        :placeholder="semantic && aiEnabled ? $t('tasks.semanticOn') : $t('tasks.searchPlaceholder')"
         @keydown.enter="submit"
         @search="submit"
       />
@@ -174,10 +175,10 @@ async function setScrapeFilter(taskId, f) {
         class="sem-toggle"
         :class="{ on: semantic, active: semanticActive }"
         @click="semantic = !semantic"
-        :data-tip="semantic ? '语义搜索：开（自然语言理解）' : '语义搜索：关（关键词）'"
+        :data-tip="semantic ? $t('tasks.semanticOn') : $t('tasks.semanticOff')"
       >AI</button>
       <div class="kbd" v-if="!kw && !semantic"><kbd>Ctrl</kbd><kbd>K</kbd></div>
-      <button v-if="kw" class="clr" @click="clearKw" data-tip="清空">✕</button>
+      <button v-if="kw" class="clr" @click="clearKw" :data-tip="$t('common.clear')">✕</button>
       <span v-if="semanticBusy" class="si busy">…</span>
     </div>
 
@@ -188,7 +189,7 @@ async function setScrapeFilter(taskId, f) {
           class="btn ghost task-btn"
           :class="{ busy: anyRunning }"
           @click="state.taskPanelOpen = !state.taskPanelOpen"
-          data-tip="任务中心"
+          :data-tip="$t('tasks.center')"
         >
           <span v-if="anyRunning" class="spinner"></span>
           <span v-else class="ico">≣</span>
@@ -197,8 +198,8 @@ async function setScrapeFilter(taskId, f) {
 
         <div v-if="state.taskPanelOpen" class="task-pop" @click.stop>
           <div class="tp-head">
-            <b>任务中心</b>
-            <span class="tp-head-sub">{{ anyRunning ? '运行中' : '空闲' }}</span>
+            <b>{{ $t('tasks.center') }}</b>
+            <span class="tp-head-sub">{{ anyRunning ? $t('tasks.running') : $t('tasks.idle') }}</span>
             <button class="btn ghost icon tiny" @click="state.taskPanelOpen = false">✕</button>
           </div>
 
@@ -206,8 +207,8 @@ async function setScrapeFilter(taskId, f) {
           <div class="tp-section">
             <div v-if="!activeTasks.length && !lastFinished.length" class="tp-idle">
               <div class="tp-idle-ico">✓</div>
-              <p class="muted">当前没有运行中的任务</p>
-              <p class="muted sm">扫描或刮削时，进度会实时显示在这里；完成后可在下方历史中回看</p>
+              <p class="muted">{{ $t('tasks.noRunning') }}</p>
+              <p class="muted sm">{{ $t('tasks.idleHint') }}</p>
             </div>
 
             <div
@@ -240,12 +241,12 @@ async function setScrapeFilter(taskId, f) {
                 <div class="tp-stats">
                   <div class="tp-stat">
                     <span class="v tabular">{{ t.done }}<i v-if="t.total"> / {{ t.total }}</i></span>
-                    <span class="k">已处理</span>
+                    <span class="k">{{ $t('tasks.processed') }}</span>
                   </div>
-                  <div class="tp-stat ok"><span class="v tabular">{{ t.ok }}</span><span class="k">成功</span></div>
-                  <div class="tp-stat bad"><span class="v tabular">{{ t.fail || t.error_count || 0 }}</span><span class="k">失败</span></div>
-                  <div class="tp-stat"><span class="v tabular">{{ fmtDur(t.elapsed) }}</span><span class="k">已用时</span></div>
-                  <div class="tp-stat" v-if="etaSec(t) != null"><span class="v tabular">{{ fmtDur(etaSec(t)) }}</span><span class="k">预计剩余</span></div>
+                  <div class="tp-stat ok"><span class="v tabular">{{ t.ok }}</span><span class="k">{{ $t('tasks.ok') }}</span></div>
+                  <div class="tp-stat bad"><span class="v tabular">{{ t.fail || t.error_count || 0 }}</span><span class="k">{{ $t('tasks.error') }}</span></div>
+                  <div class="tp-stat"><span class="v tabular">{{ fmtDur(t.elapsed) }}</span><span class="k">{{ $t('tasks.elapsed') }}</span></div>
+                  <div class="tp-stat" v-if="etaSec(t) != null"><span class="v tabular">{{ fmtDur(etaSec(t)) }}</span><span class="k">{{ $t('tasks.eta') }}</span></div>
                 </div>
               </div>
 
@@ -256,35 +257,35 @@ async function setScrapeFilter(taskId, f) {
 
               <!-- 当前项：正在刮削/扫描哪个 -->
               <div v-if="t.running" class="tp-current ellipsis" :title="t.current || t.message">
-                <span class="tk">{{ t.key === 'scan' ? '扫描' : '刮削' }}</span>
-                {{ t.current || t.message || '处理中…' }}
+                <span class="tk">{{ t.key === 'scan' ? $t('tasks.scan') : $t('tasks.scrape') }}</span>
+                {{ t.current || t.message || $t('tasks.processing') }}
               </div>
 
               <!-- 操作 + 明细 + 失败统计 -->
               <div class="tp-actions">
-                <span v-if="t.logs && t.logCounts.error" class="tp-badge err" title="刮削出错的影片">⚠ 错误 {{ t.logCounts.error }}</span>
-                <span v-if="t.logCounts.miss" class="tp-badge warn" title="未刮到元数据的影片">未命中 {{ t.logCounts.miss }}</span>
+                <span v-if="t.logs && t.logCounts.error" class="tp-badge err" :title="$t('tasks.errMovies')">⚠ {{ $t('tasks.error') }} {{ t.logCounts.error }}</span>
+                <span v-if="t.logCounts.miss" class="tp-badge warn" :title="$t('tasks.missMovies')">{{ $t('tasks.miss') }} {{ t.logCounts.miss }}</span>
                 <button
                   v-if="t.logs && t.logs.length"
                   class="btn tiny ghost"
                   :class="{ on: showScrapeLogs === t.key }"
                   @click="showScrapeLogs = showScrapeLogs === t.key ? null : t.key"
-                >明细 {{ t.logs.length }}</button>
-                <button v-if="t.running" class="btn tiny ghost danger" @click="abort(t.key)">取消</button>
+                >{{ $t('tasks.detail') }} {{ t.logs.length }}</button>
+                <button v-if="t.running" class="btn tiny ghost danger" @click="abort(t.key)">{{ $t('common.cancel') }}</button>
               </div>
 
               <!-- 失败原因汇总 -->
               <div v-if="t.reasons && t.reasons.length" class="tp-reasons">
-                <span class="tr-h">失败原因 TOP：</span>
+                <span class="tr-h">{{ $t('tasks.reasonTop') }}</span>
                 <span v-for="r in t.reasons" :key="r.name" class="tr-chip" :class="r.cls">{{ r.name }} ×{{ r.n }}</span>
               </div>
 
               <!-- 自动清理结果 -->
               <div v-if="t.counters && t.counters.cleaned_files != null" class="tp-clean">
                 <span class="tc-ico">🧹</span>
-                自动清理：删除失效文件 {{ t.counters.cleaned_files || 0 }}
+                {{ $t('tasks.cleanAuto', { n: t.counters.cleaned_files || 0 }) }}
                 <template v-if="cleanedOrphans(t).length">
-                  ，孤儿元数据
+                  {{ $t('tasks.cleanOrphans') }}
                   <span v-for="o in cleanedOrphans(t)" :key="o.k">{{ o.k }} {{ o.v }} </span>
                 </template>
               </div>
@@ -305,8 +306,8 @@ async function setScrapeFilter(taskId, f) {
           <!-- 历史记录：任务结束后仍可回看失败明细 -->
           <div v-if="taskHistory.length" class="tp-section history">
             <div class="tp-sec-head">
-              <span>历史记录</span>
-              <button class="btn ghost tiny" @click="clearHistory">清空</button>
+              <span>{{ $t('tasks.historyTitle') }}</span>
+              <button class="btn ghost tiny" @click="clearHistory">{{ $t('common.clear') }}</button>
             </div>
             <div v-for="h in taskHistory" :key="h.id" class="tp-hist" :class="{ fail: h.fail }">
               <button class="tp-hist-row" @click="toggleHistory(h.id)">
@@ -315,14 +316,14 @@ async function setScrapeFilter(taskId, f) {
                 </span>
                 <span class="th-label">{{ h.label }}</span>
                 <span class="th-meta tabular">{{ fmtAgo(h.finishedAt) }}</span>
-                <span class="th-stat tabular">成功 {{ h.ok }} · 失败 {{ h.fail }}</span>
+                <span class="th-stat tabular">{{ $t('tasks.okBad', { ok: h.ok, bad: h.fail }) }}</span>
                 <span class="th-caret" :class="{ open: openHistory.has(h.id) }">▾</span>
               </button>
               <transition name="tp-slide">
                 <div v-if="openHistory.has(h.id)" class="tp-hist-body">
                   <!-- 失败原因 -->
                   <div v-if="h.reasons && h.reasons.length" class="tp-reasons">
-                    <span class="tr-h">失败原因 TOP：</span>
+                    <span class="tr-h">{{ $t('tasks.failReasonTop') }}</span>
                     <span v-for="r in h.reasons" :key="r.name" class="tr-chip" :class="r.cls">{{ r.name }} ×{{ r.n }}</span>
                   </div>
                   <!-- 扫描类：运行期日志明细 -->
@@ -342,18 +343,18 @@ async function setScrapeFilter(taskId, f) {
                         class="ts-f"
                         :class="{ on: scrapeFilter === f.v }"
                         @click="setScrapeFilter(h.task_id, f.v)"
-                      >{{ f.label }}</button>
-                      <span class="ts-meta tabular">共 {{ scrapeLogTotal }} 条</span>
+                      >{{ $t(f.label) }}</button>
+                      <span class="ts-meta tabular">{{ $t('tasks.logTotal', { n: scrapeLogTotal }) }}</span>
                     </div>
-                    <div v-if="scrapeLogBusy" class="muted sm" style="padding:6px 8px">加载中…</div>
-                    <div v-else-if="!scrapeLogItems.length" class="muted sm" style="padding:6px 8px">暂无记录</div>
+                    <div v-if="scrapeLogBusy" class="muted sm" style="padding:6px 8px">{{ $t('tasks.loading') }}</div>
+                    <div v-else-if="!scrapeLogItems.length" class="muted sm" style="padding:6px 8px">{{ $t('tasks.noRecord') }}</div>
                     <div v-else class="tp-logs slim">
                       <div
                         v-for="(l, i) in scrapeLogItems"
                         :key="l.id"
                         class="tp-log" :class="l.status"
                         @click="state.view = 'detail'; state.currentId = l.movie_id"
-                        :data-tip="l.movie_id ? '点击查看影片' : ''"
+                        :data-tip="l.movie_id ? $t('tasks.clickView') : ''"
                       >
                         <span class="ls-dot" :class="l.status"></span>
                         <span class="lc">{{ l.code || '—' }}</span>
@@ -362,21 +363,21 @@ async function setScrapeFilter(taskId, f) {
                       </div>
                     </div>
                   </div>
-                  <p v-if="h.key !== 'scrape' && !(h.key === 'scan' && h.logs?.length) && !(h.reasons?.length)" class="muted sm" style="padding:6px 8px">本次没有未命中或错误记录</p>
+                  <p v-if="h.key !== 'scrape' && !(h.key === 'scan' && h.logs?.length) && !(h.reasons?.length)" class="muted sm" style="padding:6px 8px">{{ $t('tasks.noMissOrErr') }}</p>
                 </div>
               </transition>
             </div>
           </div>
 
           <div class="tp-foot">
-            <span class="muted sm" style="margin-right:auto">维护操作请在「维护中心」发起</span>
-            <button class="btn tiny ghost" @click="goMaintenance">前往维护中心 →</button>
+            <span class="muted sm" style="margin-right:auto">{{ $t('tasks.maintHint') }}</span>
+            <button class="btn tiny ghost" @click="goMaintenance">{{ $t('tasks.goMaint') }}</button>
           </div>
         </div>
       </div>
 
-      <button class="btn ghost icon" @click="toggleTheme" :data-tip="state.theme === 'dark' ? '浅色主题' : '深色主题'">{{ themeIcon }}</button>
-      <button class="btn ghost icon" :class="{ active: state.view === 'settings' }" @click="state.view = 'settings'" data-tip="设置">⚙</button>
+      <button class="btn ghost icon" @click="toggleTheme" :data-tip="state.theme === 'dark' ? $t('nav.themeLight') : $t('nav.themeDark')">{{ themeIcon }}</button>
+      <button class="btn ghost icon" :class="{ active: state.view === 'settings' }" @click="state.view = 'settings'" :data-tip="$t('nav.settings')">⚙</button>
     </div>
   </header>
 

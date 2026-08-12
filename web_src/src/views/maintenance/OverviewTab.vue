@@ -4,6 +4,7 @@ import { state } from '../../state.js'
 import { useTasks, pct } from '../../composables/useTasks.js'
 import { maintenanceSummary, scrapeTasks, rescanLocalCovers, reparseCodes } from '../../api.js'
 import { toast } from '../../utils.js'
+import { t } from '../../i18n/index.js'
 import PageHead from '../../components/PageHead.vue'
 import StatGrid from '../../components/StatGrid.vue'
 
@@ -23,13 +24,13 @@ async function loadTasks() {
 const todos = computed(() => {
   const s = summary.value || {}
   return [
-    { key: 'noscrape', label: '未刮削', n: s.noscrape || 0, flag: 'noscrape', icon: '⚑' },
-    { key: 'missing_cover', label: '缺封面', n: s.missing_cover || 0, flag: 'nocover', icon: '▢' },
-    { key: 'unrecognized', label: '无番号', n: s.unrecognized || 0, flag: 'nocode', icon: '?' },
-    { key: 'split_incomplete', label: '分片不全', n: s.split_incomplete || 0, flag: null, icon: '⧉' },
-    { key: 'duplicates', label: '疑似重复', n: s.duplicates || 0, flag: null, icon: '⧉' },
-    { key: 'missing_files', label: '失效文件', n: s.missing_files || 0, flag: null, icon: '⛔' },
-    { key: 'watchlist', label: '待观看', n: s.watchlist || 0, flag: 'watchlist', icon: '⌚' },
+    { key: 'noscrape', label: 'maint.ovNoScrape', n: s.noscrape || 0, flag: 'noscrape', icon: '⚑' },
+    { key: 'missing_cover', label: 'maint.ovNoCover', n: s.missing_cover || 0, flag: 'nocover', icon: '▢' },
+    { key: 'unrecognized', label: 'maint.ovNoCode', n: s.unrecognized || 0, flag: 'nocode', icon: '?' },
+    { key: 'split_incomplete', label: 'maint.ovSplit', n: s.split_incomplete || 0, flag: null, icon: '⧉' },
+    { key: 'duplicates', label: 'maint.ovDup', n: s.duplicates || 0, flag: null, icon: '⧉' },
+    { key: 'missing_files', label: 'maint.ovMissingFile', n: s.missing_files || 0, flag: null, icon: '⛔' },
+    { key: 'watchlist', label: 'maint.ovWatchlist', n: s.watchlist || 0, flag: 'watchlist', icon: '⌚' },
   ]
 })
 
@@ -45,27 +46,27 @@ function goTodo(t) {
 }
 
 const ring = computed(() => {
-  const t = activeTasks.value[0]
-  if (!t) return { p: 0, label: '空闲', ok: 0, miss: 0, error: 0 }
+  const at = activeTasks.value[0]
+  if (!at) return { p: 0, label: t('maint.idle'), ok: 0, miss: 0, error: 0 }
   return {
-    p: pct(t),
-    label: t.label === '刮削元数据' ? '刮削中' : '扫描中',
-    ok: t.ok || 0, miss: t.miss || 0, error: (t.fail || 0) + (t.error_count || 0),
+    p: pct(at),
+    label: at.label === '刮削元数据' ? t('maint.scraping') : t('maint.scanning'),
+    ok: at.ok || 0, miss: at.miss || 0, error: (at.fail || 0) + (at.error_count || 0),
   }
 })
 
 const statCards = computed(() => {
   const s = summary.value || {}
   return [
-    { label: '影片总数', value: s.total || 0 },
-    { label: '待处理', value: (s.noscrape || 0) + (s.missing_cover || 0) + (s.unrecognized || 0), tone: 'warn' },
+    { label: t('maint.ovTotal'), value: s.total || 0 },
+    { label: t('maint.ovPending'), value: (s.noscrape || 0) + (s.missing_cover || 0) + (s.unrecognized || 0), tone: 'warn' },
   ]
 })
 
-async function doScan() { busy.value = true; try { runScan({}); toast('已开始扫描媒体库', 'ok') } finally { busy.value = false } }
-async function doScrape() { busy.value = true; try { runScrape({ missing_only: true }); toast('已开始刮削缺失项', 'ok') } finally { busy.value = false } }
-async function doLocalCovers() { busy.value = true; try { await rescanLocalCovers(); toast('已触发本地封面扫描', 'ok') } finally { busy.value = false } }
-async function doReparse() { busy.value = true; try { await reparseCodes({}); toast('已触发番号重解析', 'ok') } finally { busy.value = false } }
+async function doScan() { busy.value = true; try { runScan({}); toast(t('maint.ovScanStarted'), 'ok') } finally { busy.value = false } }
+async function doScrape() { busy.value = true; try { runScrape({ missing_only: true }); toast(t('maint.ovScrapeStarted'), 'ok') } finally { busy.value = false } }
+async function doLocalCovers() { busy.value = true; try { await rescanLocalCovers(); toast(t('maint.ovCoversStarted'), 'ok') } finally { busy.value = false } }
+async function doReparse() { busy.value = true; try { await reparseCodes({}); toast(t('maint.ovReparseStarted'), 'ok') } finally { busy.value = false } }
 
 function onDrop(e) {
   e.preventDefault()
@@ -73,7 +74,7 @@ function onDrop(e) {
   const items = [...(e.dataTransfer?.files || [])]
   // 取首个文件/目录路径（浏览器仅暴露名称，真实路径需后端 watch 目录；此处触发全库扫描）
   runScan({})
-  toast('已触发扫描媒体库', 'ok')
+  toast(t('maint.ovScanStarted'), 'ok')
 }
 const dropActive = ref(false)
 
@@ -93,34 +94,34 @@ onMounted(() => { loadSummary(); loadTasks() })
       @drop="onDrop"
     >
       <span class="dz-ico">⤓</span>
-      <span class="dz-t">把影片文件夹拖到这里，松手即扫描入库</span>
-      <span class="dz-s">也可直接点上方「扫描入库」按钮</span>
+      <span class="dz-t">{{ $t('maint.ovDrag') }}</span>
+      <span class="dz-s">{{ $t('maint.ovDragHint') }}</span>
     </div>
 
     <!-- 操作台 -->
     <div class="ops">
       <button class="op" :disabled="anyRunning" @click="doScan">
-        <span class="op-ico">🔍</span><span class="op-t">扫描入库</span>
-        <span class="op-d">发现新文件 / 清理失效记录</span>
+        <span class="op-ico">🔍</span><span class="op-t">{{ $t('maint.ovScanLib') }}</span>
+        <span class="op-d">{{ $t('maint.ovScanDesc') }}</span>
       </button>
       <button class="op" :disabled="anyRunning" @click="doScrape">
-        <span class="op-ico">✨</span><span class="op-t">刮削缺失</span>
-        <span class="op-d">为未刮削影片补充元数据</span>
+        <span class="op-ico">✨</span><span class="op-t">{{ $t('maint.ovScrapeMissing') }}</span>
+        <span class="op-d">{{ $t('maint.ovScrapeDesc') }}</span>
       </button>
       <button class="op" :disabled="anyRunning" @click="doLocalCovers">
-        <span class="op-ico">🖼️</span><span class="op-t">本地封面</span>
-        <span class="op-d">从文件目录匹配封面图</span>
+        <span class="op-ico">🖼️</span><span class="op-t">{{ $t('maint.ovLocalCover') }}</span>
+        <span class="op-d">{{ $t('maint.ovLocalCoverDesc') }}</span>
       </button>
       <button class="op" :disabled="anyRunning" @click="doReparse">
-        <span class="op-ico">🔤</span><span class="op-t">重解析番号</span>
-        <span class="op-d">按文件名校正番号识别</span>
+        <span class="op-ico">🔤</span><span class="op-t">{{ $t('maint.ovReparse') }}</span>
+        <span class="op-d">{{ $t('maint.ovReparseDesc') }}</span>
       </button>
     </div>
 
     <div class="grid2">
       <!-- 进度 -->
       <section class="panel">
-        <div class="panel-head">当前进度</div>
+        <div class="panel-head">{{ $t('maint.ovScanTitle') }}</div>
         <div class="panel-body prog-body">
           <div class="ring" :class="{ run: anyRunning }" :style="{ background: `conic-gradient(var(--c-primary) ${ring.p * 3.6}deg, var(--c-line) 0)` }">
             <div class="ring-in">
@@ -129,30 +130,30 @@ onMounted(() => { loadSummary(); loadTasks() })
             </div>
           </div>
           <div class="prog-stats">
-            <div class="ps"><b class="tabular">{{ ring.ok }}</b><span>成功</span></div>
-            <div class="ps"><b class="tabular">{{ ring.miss }}</b><span>未命中</span></div>
-            <div class="ps"><b class="tabular">{{ ring.error }}</b><span>失败</span></div>
-            <p v-if="!anyRunning" class="muted sm">当前没有进行中的任务</p>
-            <p v-else class="muted sm">点击顶部铃铛查看实时详情</p>
+            <div class="ps"><b class="tabular">{{ ring.ok }}</b><span>{{ $t('maint.ovOk') }}</span></div>
+            <div class="ps"><b class="tabular">{{ ring.miss }}</b><span>{{ $t('maint.ovMiss') }}</span></div>
+            <div class="ps"><b class="tabular">{{ ring.error }}</b><span>{{ $t('maint.ovFail') }}</span></div>
+            <p v-if="!anyRunning" class="muted sm">{{ $t('maint.ovNoTask') }}</p>
+            <p v-else class="muted sm">{{ $t('maint.ovBellHint') }}</p>
           </div>
         </div>
         <div v-if="summary?.last_scan" class="last-scan">
-          上次扫描：<b class="tabular">{{ summary.last_scan.started_at }}</b>
-          · 新增 <b class="tabular ok">{{ summary.last_scan.added }}</b>
-          · 更新 <b class="tabular">{{ summary.last_scan.updated }}</b>
-          · 清理 <b class="tabular warn">{{ summary.last_scan.removed }}</b>
+          {{ $t('maint.ovLastScan') }}：<b class="tabular">{{ summary.last_scan.started_at }}</b>
+          · {{ $t('maint.ovAdded') }} <b class="tabular ok">{{ summary.last_scan.added }}</b>
+          · {{ $t('maint.ovUpdated') }} <b class="tabular">{{ summary.last_scan.updated }}</b>
+          · {{ $t('maint.ovRemoved') }} <b class="tabular warn">{{ summary.last_scan.removed }}</b>
         </div>
       </section>
 
       <!-- 待办 -->
       <section class="panel">
-        <div class="panel-head">待办概览</div>
+        <div class="panel-head">{{ $t('maint.ovTodoTitle') }}</div>
         <div class="panel-body">
           <div class="todo-grid">
             <button v-for="t in todos" :key="t.key" class="todo" :class="{ zero: !t.n }" @click="goTodo(t)">
               <span class="ti">{{ t.icon }}</span>
               <span class="tn tabular">{{ t.n }}</span>
-              <span class="tl">{{ t.label }}</span>
+              <span class="tl">{{ $t(t.label) }}</span>
             </button>
           </div>
         </div>
@@ -162,14 +163,14 @@ onMounted(() => { loadSummary(); loadTasks() })
     <!-- 最近刮削任务 -->
     <section class="panel">
       <div class="panel-head">
-        最近刮削任务
+        {{ $t('maint.ovLastScrape') }}
         <div class="spacer"></div>
-        <button class="btn ghost tiny" @click="loadTasks">刷新</button>
+        <button class="btn ghost tiny" @click="loadTasks">{{ $t('maint.refresh') }}</button>
       </div>
       <div class="panel-body">
-        <div v-if="!tasks.length" class="muted pad">暂无刮削任务记录</div>
+        <div v-if="!tasks.length" class="muted pad">{{ $t('maint.ovNoScrapeLog') }}</div>
         <table v-else class="t-tasks">
-          <thead><tr><th>开始时间</th><th>总数</th><th>成功</th><th>未命中</th><th>失败</th><th>平均耗时</th><th></th></tr></thead>
+          <thead><tr><th>{{ $t('maint.ovStart') }}</th><th>{{ $t('maint.ovTotal') }}</th><th>{{ $t('maint.ovOk') }}</th><th>{{ $t('maint.ovMiss') }}</th><th>{{ $t('maint.ovFail') }}</th><th>{{ $t('maint.ovAvgMs') }}</th><th></th></tr></thead>
           <tbody>
             <tr v-for="t in tasks" :key="t.task_id">
               <td class="mono">{{ t.started_at }}</td>
@@ -178,7 +179,7 @@ onMounted(() => { loadSummary(); loadTasks() })
               <td class="tabular warn">{{ t.miss }}</td>
               <td class="tabular err">{{ t.error }}</td>
               <td class="tabular">{{ t.avg_ms }}ms</td>
-              <td><button class="btn ghost tiny" @click="state.maintTab='logs'">查看日志</button></td>
+              <td><button class="btn ghost tiny" @click="state.maintTab='logs'">{{ $t('maint.viewLogs') }}</button></td>
             </tr>
           </tbody>
         </table>
