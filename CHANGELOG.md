@@ -1,5 +1,36 @@
 # 更新日志
 
+## [1.10.0] - 2026-08-15
+
+### 新增（字幕匹配：直接选文件）
+
+* **字幕匹配改为浏览器文件选择上传**：维护页「字幕匹配」不再需要填写目录路径，直接点 **选择文件** 选一个或多个字幕文件（支持 `.srt/.ass/.ssa/.vtt/.sub/.smi/.txt`），点「匹配选中文件」即上传到服务端按番号匹配库内影片；匹配结果可勾选后「对齐选中字幕」（重命名到视频同名，可选「复制」保留原文件）。
+* 后端新增 `POST /subtitles/upload-and-match`（接收 `multipart` 上传，落临时目录后匹配）与 `app/subtitles.py` 的 `match_subtitle_files`（针对指定文件匹配，与目录扫描复用同一逻辑）。
+
+### 改进（重复检测：明显分段不再误判为重复）
+
+* `app/dedupe.py` 重写分卷识别 `_split_part` / `_mark_multi_part`：除原有的 `_1` / `-cd1` / `.part3` 外，新增识别 **括号序号** `(1)`、`[2]`、**单字母分卷** `-a`/`-b`、**带分辨率后缀** `SONY-456 1080p-1` 等明显分段；同一基础名 + 多个不同序号即判为「合集（分卷）」，前端标记「合集」徽标并禁用删除，不计入重复版本、不参与劣质/损坏清理。
+* 防误判：纯数字后缀锚定行尾，且拆分后基础名若已不含数字（命中的是番号末位如 `ABC-123` 的 `123`）则回退为无序号，避免把番号末位或不同番号误并成分卷。
+
+### 新增（关于页：版本检查）
+
+* 关于页新增 **版本检查**：对接 GitHub Releases（`api.github.com/repos/dengji85/avm/releases/latest`），显示当前版本 / 最新版本 / 更新说明，并保留「前往下载」入口与可自定义「更新源」地址（通用 JSON 清单亦可）。
+
+### 新增（远程访问配置独立 Tab）
+
+* 设置页新增 **远程** Tab，从「关于」拆分独立：支持多访问地址 **点击切换** 生成二维码、远程访问 **Token 自定义输入**（≥8 位、无空格，可重置）、并提示 **Windows 防火墙** 放行（`netsh` 命令含 `edge=yes` 边缘穿越参数）；本机 `127.0.0.1` 不列入远程地址。
+
+### 新增（定时自动扫描）
+
+* 新增「定时自动扫描」配置：按分钟周期后台轮询执行 **增量扫描**（复用 SCAN 锁，空闲时才跑），下载新影片后无需手动点扫描即可入库。默认关闭（`auto_scan_interval = 0`）。
+
+### 工程
+
+* `app/api.py`：`server_info` 返回 `app_version` / `update_feed`；新增 `GET /server/check-update`、`POST /subtitles/upload-and-match`、`POST /subtitles/match-files`（保留）、`POST /subtitles/align`。
+* `app/config.py`：`server` 块新增 `update_feed`（默认 GitHub Releases API）；`library` 块新增 `auto_scan_interval`。
+* `app/main.py`：启动后台 daemon 线程按 `auto_scan_interval` 轮询做增量自动扫描。
+* `web_src/src/components/TokenGate.vue`：远程访问 Token 鉴权组件。
+
 ## [1.9.0] - 2026-08-09
 
 ### 新增（后台采集与抓取健壮性）
