@@ -120,9 +120,10 @@ CREATE TABLE IF NOT EXISTS scrape_logs (
     code       TEXT DEFAULT '',                     -- 解析出的番号
     provider   TEXT DEFAULT '',                     -- 使用的刮削源
     status     TEXT DEFAULT 'ok',                   -- ok | miss | error
-    reason     TEXT DEFAULT '',                     -- 失败/未命中原因
+    reason     TEXT DEFAULT '',                     -- 失败/未命中原因（人类可读总结）
     elapsed_ms INTEGER DEFAULT 0,                   -- 单文件耗时（毫秒）
-    movie_id   INTEGER                              -- 命中后写入的影片 id（可选）
+    movie_id   INTEGER,                             -- 命中后写入的影片 id（可选）
+    detail     TEXT DEFAULT ''                      -- 逐源明细 JSON：[{provider,status,reason,elapsed_ms}]
 );
 
 CREATE INDEX IF NOT EXISTS idx_sl_task    ON scrape_logs(task_id);
@@ -281,6 +282,10 @@ def _migrate(conn: sqlite3.Connection) -> None:
         "lang TEXT DEFAULT '', source TEXT DEFAULT 'matched', "
         "created_at TEXT DEFAULT (datetime('now','localtime')))")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_sub_movie ON movie_subtitles(movie_id)")
+    # 刮削日志逐源明细：老库补 detail 列
+    log_cols = {r[1] for r in conn.execute("PRAGMA table_info(scrape_logs)").fetchall()}
+    if "detail" not in log_cols:
+        conn.execute("ALTER TABLE scrape_logs ADD COLUMN detail TEXT DEFAULT ''")
     conn.commit()
 
 

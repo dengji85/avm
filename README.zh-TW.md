@@ -6,7 +6,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-1.10.0-1f6feb.svg"/>
+  <img src="https://img.shields.io/badge/version-1.11.0-1f6feb.svg"/>
   <img src="https://img.shields.io/badge/backend-FastAPI-009688.svg"/>
   <img src="https://img.shields.io/badge/frontend-Vue%203%20%2F%20Vite-42b883.svg"/>
   <img src="https://img.shields.io/badge/database-SQLite-003b57.svg"/>
@@ -94,10 +94,12 @@
 
 ---
 
-## 🌟 本次更新亮點（1.10.0）
+## 🌟 本次更新亮點（1.11.0）
 
 > 發布日期：2026-08-15
 
+- **🔎 刮削失敗原因面板**：維護中心新增「刮削失敗原因」Tab，把過去「刮削失敗＝黑盒」變成視覺化診斷。每部失敗影片展示**逐源明細**（各資料源狀態 + 原因）並給出整體歸類與操作建議；失敗按「反爬攔截 / 網路錯誤 / 源無此片 / 解析失敗 / 番號異常」五類分組計數，一眼區分「源掛了」還是「片真沒有」。
+- **一鍵重試 + 換源重抓**：僅重跑臨時性網路/攔截項（不動穩定缺失），或勾選影片指定資料源（如切到 av-wiki）重新抓取，繞過被攔站點。
 - **💬 字幕匹配改為直接選檔案**：維護頁點「選擇檔案」即可上傳字幕，按番號匹配庫內影片並一鍵對齊重新命名（支援複製保留原件）。
 - **🧹 重複偵測強化分段識別**：除 `_1`/`-cd1`/`.part3` 外，新增括號 `(1)`、`[2]`、單字母 `-a`、帶解析度 `1080p-1` 等明顯分段識別；番號末位不再被誤當序號。
 - **🔔 關於頁版本檢查**：對接 GitHub Releases，顯示目前/最新版本與更新說明，支援自訂更新源。

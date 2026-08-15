@@ -23,7 +23,7 @@ from fastapi import APIRouter, Body, File, HTTPException, Query, Request, Upload
 from fastapi.responses import FileResponse, PlainTextResponse, Response, StreamingResponse
 
 from . import ai as ai_mod
-from . import dedupe, images, nfo as nfo_mod, providers, scanner, scraper, store, subtitles
+from . import dedupe, images, nfo as nfo_mod, providers, scanner, scraper, scrape_diag, store, subtitles
 from .config import COVER_DIR, DATA_DIR, avatar_dir, _deep_merge, load_config, update_config
 from .db import connect, db, query_all, query_one
 from .jobs import SCAN, SCRAPE
@@ -31,7 +31,7 @@ from .jobs import SCAN, SCRAPE
 router = APIRouter(prefix="/api")
 
 # 当前程序版本（与发布版本保持一致）。
-APP_VERSION = "1.10.0"
+APP_VERSION = "1.11.0"
 
 
 # ------------------------------------------------------------------ 影片列表
@@ -757,6 +757,105 @@ def scrape_skips() -> Dict[str, Any]:
     return {"items": rows, "total": len(rows)}
 
 
+@router.get("/scrape/failures")
+def scrape_failures(
+    limit: int = 200,
+    group: str = "",      # blocked | neterr | miss | parse_err | code_issue | mixed | 空=全部
+    only_unskipped: bool = True,  # 默认不显示已被稳定跳过（自动屏蔽）的项
+) -> Dict[str, Any]:
+    """刮削失败原因面板数据源。
+
+    返回每个失败影片的逐源诊断（kind/原因/推荐操作），并按归类分组计数。
+    与 scrape_skip 自愈名单区分：被稳定跳过的项默认排除（它们已不再反复尝试）。
+    """
+    with db() as conn:
+        logs = query_all(conn,
+                         "SELECT * FROM scrape_logs WHERE status<>'ok' "
+                         "ORDER BY ts DESC LIMIT ?", (int(limit),))
+        skips = set()
+        if only_unskipped:
+            for r in query_all(conn, "SELECT code FROM scrape_skip"):
+                skips.add((r["code"] or "").upper())
+    items = []
+    for row in logs:
+        code = (row.get("code") or "").upper()
+        if only_unskipped and code in skips:
+            continue
+        diag = scrape_diag.diagnose(row.get("detail"))
+        if group and diag["summary_kind"] != group:
+            if not any(s["kind"] == group for s in diag["sources"]):
+                continue
+        items.append({
+            "code": row.get("code"),
+            "file_path": row.get("file_path"),
+            "movie_id": row.get("movie_id"),
+            "provider": row.get("provider"),
+            "reason": row.get("reason"),
+            "ts": row.get("ts"),
+            "diagnosis": diag,
+        })
+    groups = scrape_diag.group_failures([it["diagnosis"] for it in items])
+    return {"ok": True, "items": items, "groups": groups, "total": len(items)}
+
+
+@router.post("/scrape/retry-neterr")
+def retry_neterr_failures(payload: Dict[str, Any] = Body(default={})) -> Dict[str, Any]:
+    """一键重试所有「临时网络错误/反爬拦截」的影片（不碰稳定 miss/解析失败）。"""
+    with db() as conn:
+        codes = set()
+        logs = query_all(conn,
+                         "SELECT code, detail FROM scrape_logs WHERE status<>'ok' "
+                         "ORDER BY ts DESC LIMIT 500")
+        for row in logs:
+            diag = scrape_diag.diagnose(row.get("detail"))
+            if diag["summary_kind"] in ("neterr", "blocked") or any(
+                    s["kind"] in ("neterr", "blocked") for s in diag["sources"]):
+                if row.get("code"):
+                    codes.add(row["code"])
+        if codes:
+            placeholders = ",".join("?" for _ in codes)
+            conn.execute(
+                f"DELETE FROM scrape_skip WHERE UPPER(code) IN ({placeholders}) "
+                f"AND kind IN ('net','neterr','blocked')", tuple(c.upper() for c in codes))
+        cfg = load_config(refresh=True)
+        plist = providers.build_providers(cfg)
+        if not plist:
+            raise HTTPException(400, "未启用任何数据源")
+        run_scrape(conn, plist, cfg, pages=1, pattern="|".join(sorted(codes)) or None, force=True)
+        result = query_one(conn, "SELECT COUNT(*) c FROM movies WHERE code IN "
+                                 "(SELECT code FROM scrape_logs WHERE status<>'ok')")
+    return {"ok": True, "retried_codes": sorted(codes), "matched": result["c"] if result else 0}
+
+
+@router.post("/scrape/retry-with-provider")
+def retry_with_provider(payload: Dict[str, Any] = Body(default={})) -> Dict[str, Any]:
+    """带指定数据源重试：仅对已失败影片用指定 provider 重抓（换源）。
+
+    body: { "provider": "av-wiki", "codes": ["ABC-123", ...] 可选 }
+    """
+    provider_name = str(payload.get("provider", "")).strip()
+    codes = payload.get("codes") or []
+    if not provider_name:
+        raise HTTPException(400, "provider 不能为空")
+    with db() as conn:
+        cfg = load_config(refresh=True)
+        all_plist = providers.build_providers(cfg)
+        plist = [p for p in all_plist if p.name == provider_name]
+        if not plist:
+            raise HTTPException(400, f"未启用数据源：{provider_name}")
+        if codes:
+            ph = ",".join("?" for _ in codes)
+            conn.execute(f"DELETE FROM scrape_skip WHERE UPPER(code) IN ({ph})",
+                         tuple(str(c).upper() for c in codes))
+            pattern = "|".join(str(c) for c in codes)
+        else:
+            pattern = None
+        run_scrape(conn, plist, cfg, pages=1, pattern=pattern, force=True)
+        matched = query_one(conn, "SELECT COUNT(*) c FROM movies WHERE code IN "
+                                  "(SELECT code FROM scrape_logs WHERE status<>'ok')")
+    return {"ok": True, "provider": provider_name, "matched": matched["c"] if matched else 0}
+
+
 @router.delete("/scrape/skips")
 def scrape_skips_delete(movie_id: int = 0) -> Dict[str, Any]:
     """解除跳过名单。
@@ -839,6 +938,10 @@ def ai_search_intent(payload: Dict[str, Any] = Body(default={})) -> Dict[str, An
 def scrape_single(movie_id: int, payload: Dict[str, Any] = Body(default={})) -> Dict[str, Any]:
     cfg = load_config(refresh=True)
     plist = providers.build_providers(cfg)
+    # 指定数据源重试：仅保留命中的 provider（换源）
+    only = payload.get("provider")
+    if only:
+        plist = [p for p in plist if p.name == only] or plist
     with db() as conn:
         result = scraper.scrape_one(conn, movie_id, plist, cfg, bool(payload.get("overwrite", True)))
         result["movie"] = store.movie_detail(conn, movie_id)

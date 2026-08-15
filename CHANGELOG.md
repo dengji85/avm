@@ -1,5 +1,21 @@
 # 更新日志
 
+## [1.11.0] - 2026-08-15
+
+### 新增（刮削失败原因面板）
+
+* **维护中心新增「刮削失败原因」Tab**：把过去「刮削失败=黑盒」变成可视化诊断。每部失败影片展示**逐源明细**（每个数据源的状态圆点 + 原因），并给出**整体归类**与**你该怎么做**的文案。
+* 失败按原因归为五类并分组计数：**反爬拦截**（Cloudflare/JavBus/AV-Wiki 验证页）、**网络错误**（超时/5xx/限流）、**源无此片**（真缺失）、**解析失败**（源改版）、**番号异常**（素人/无码误解析）。面板一眼区分「源挂了」还是「片真没有」。
+* **一键重试网络/拦截项**：仅重跑临时性 `neterr`/`blocked` 的影片，不动稳定缺失，并自动解除对应的跳过屏蔽。
+* **换源重抓选中项**：勾选影片后指定数据源（如切到 `av-wiki`）重新抓取，绕过被拦站点。
+* 数据层：`scrape_logs` 新增 `detail` 列（JSON 逐源明细），`app/scrape_diag.py` 专司「原始错误 → 人话 + 操作建议」映射；`app/scraper.py` 逐源捕获状态并写入明细，`_classify_error` 细分 `blocked`/`neterr`/`parse_err`。
+
+### 工程
+
+* `app/db.py`：`scrape_logs` 增加 `detail` 列并兼容老库迁移。
+* `app/api.py`：新增 `GET /scrape/failures`、`POST /scrape/retry-neterr`、`POST /scrape/retry-with-provider`；单部刮削 `POST /movies/{id}/scrape` 支持 `provider` 参数（换源重试）。
+* `web_src`：新增 `ScrapeFailuresTab.vue` 与 `api.js` 三个接口函数。
+
 ## [1.10.0] - 2026-08-15
 
 ### 新增（字幕匹配：直接选文件）

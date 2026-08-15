@@ -36,25 +36,27 @@ def _is_empty(value: Any) -> bool:
 
 
 def _classify_error(exc: BaseException) -> str:
-    """把一个数据源异常归类为三类之一，决定它是否写进跳过名单。
+    """把一个数据源异常归类为细类，决定它是否写进跳过名单，以及面板如何呈现。
 
-    - 'net'  : 临时网络/服务端错误（超时、连接失败、5xx）。下次很可能成功，不该跳过。
-    - 'miss' : 明确无此片（HTTP 4xx）。数据源稳定没有，跳过可省时间。
-    - 'err'  : 其它异常（解析崩溃、字段错误等）。通常稳定失败，计入跳过更省心。
+    - 'blocked' : 反爬/人机验证页拦截（NetBlocked）。临时性访问受阻，
+                  下次可能放行，不应跳过；面板提示填 Cookie / 开 CDP。
+    - 'neterr'  : 临时网络/服务端错误（超时、连接失败、5xx）。不应跳过，可重试。
+    - 'miss'    : 明确无此片（HTTP 4xx）。数据源稳定没有，跳过可省时间。
+    - 'parse_err': 其它异常（解析崩溃、字段错误等）。通常稳定失败，计入跳过更省心。
     """
     if not _HAS_REQ:
-        return "err"
+        return "parse_err"
     if isinstance(exc, NetBlocked):
         # 反爬/人机验证页拦截：临时性访问受阻，下次可能放行，不应跳过。
-        return "net"
+        return "blocked"
     if isinstance(exc, (Timeout, ReqConnectionError, ConnectTimeout, ChunkedEncodingError)):
-        return "net"
+        return "neterr"
     if isinstance(exc, HTTPError):
         code = getattr(getattr(exc, "response", None), "status_code", None)
         if isinstance(code, int) and 500 <= code < 600:
-            return "net"
+            return "neterr"
         return "miss"  # 4xx：源确实没有这部
-    return "err"
+    return "parse_err"
 
 
 def apply_metadata(conn, movie_id: int, meta: Dict[str, Any], cfg: Dict[str, Any],
@@ -309,15 +311,35 @@ def scrape_one_parallel(movie: Dict[str, Any], providers: List[Any], cfg: Dict[s
         return {"cancelled": True, "movie_id": movie.get("id"), "code": movie.get("code")}
     primary_meta = None
     primary_name = None
-    net_err = False  # 是否存在「临时网络/服务端错误」源
+    net_err = False  # 是否存在「临时网络/服务端错误」或「反爬拦截」源（不进跳过名单）
+    per_provider: List[Dict[str, Any]] = []  # 逐源明细，供失败面板诊断
     try:
         for provider in providers:
+            t0 = time.monotonic()
             try:
                 meta = provider.fetch(movie)
+                status = "ok" if meta else "miss"
+                raw = provider.last_error or ""
+                # fetch 静默返回 None 但 last_error 暗示被拦：归为 blocked
+                if status == "miss" and raw and _looks_blocked_reason(raw):
+                    status = "blocked"
+                per_provider.append({
+                    "provider": provider.name,
+                    "status": status,
+                    "reason": raw or ("命中" if meta else "无匹配结果"),
+                    "elapsed_ms": int((time.monotonic() - t0) * 1000),
+                })
             except Exception as exc:
                 # 单源异常：分类后继续后续源（异常隔离）
-                if _classify_error(exc) == "net":
+                cls = _classify_error(exc)
+                if cls in ("neterr", "blocked"):
                     net_err = True
+                per_provider.append({
+                    "provider": provider.name,
+                    "status": cls,
+                    "reason": (getattr(provider, "last_error", "") or f"{type(exc).__name__}: {exc}")[:400],
+                    "elapsed_ms": int((time.monotonic() - t0) * 1000),
+                })
                 continue
             if not meta:
                 continue
@@ -331,14 +353,22 @@ def scrape_one_parallel(movie: Dict[str, Any], providers: List[Any], cfg: Dict[s
                 primary_meta["source"] = f"{primary_name}+{provider.name}"
 
         if primary_meta is None:
-            # 没有命中：若是网络/服务端临时错误导致，标记 neterr（不进跳过名单）
-            return {"miss": True, "neterr": net_err,
+            # 没有命中：若是网络/服务端临时错误或被拦导致，标记 neterr（不进跳过名单）
+            return {"miss": True, "neterr": net_err, "detail": per_provider,
                     "movie_id": movie.get("id"), "code": movie.get("code")}
         m, tmp = _prefetch_images(primary_meta, cfg)
         return {"movie_id": movie.get("id"), "code": movie.get("code"),
-                "meta": m, "tmp": tmp, "provider": primary_name}
+                "meta": m, "tmp": tmp, "provider": primary_name, "detail": per_provider}
     except Exception as exc:  # 整体兜底，绝不抛出到 future 外
         return {"error": str(exc)[:300], "movie_id": movie.get("id"), "code": movie.get("code")}
+
+
+def _looks_blocked_reason(raw: str) -> bool:
+    """从 provider.last_error 文本反推是否被反爬拦截（兜底 used when fetch returns None）。"""
+    key = ("cloudflare", "人机验证", "driver-verify", "age verification",
+           "loader", "正在验证", "cf_clearance", "challenge-platform", "verify")
+    low = (raw or "").lower()
+    return any(k in low for k in key)
 
 
 def sniff_local_cover(conn, movie_id: int, cfg: Dict[str, Any]) -> Optional[str]:
@@ -416,18 +446,26 @@ def run_scrape(ids: Optional[List[int]] = None, scope: str = "missing",
         except Exception:
             pass
 
-    def _log_row(conn, mid, label, code, provider, status, reason, elapsed_ms, ok):
+    def _log_row(conn, mid, label, code, provider, status, reason, elapsed_ms, ok, detail=None):
         """把单部结果写入持久化刮削日志（主线程唯一写者负责）。"""
         try:
+            import json as _json
             fpath = ""
             frows = query_all(conn, "SELECT path FROM movie_files WHERE movie_id = ? LIMIT 1", (mid,))
             if frows:
                 fpath = frows[0]["path"]
+            detail_str = ""
+            if detail:
+                try:
+                    detail_str = _json.dumps(detail, ensure_ascii=False)
+                except Exception:
+                    detail_str = ""
             conn.execute(
                 """INSERT INTO scrape_logs
-                       (task_id, file_path, code, provider, status, reason, elapsed_ms, movie_id)
-                       VALUES (?,?,?,?,?,?,?,?)""",
-                (task_id, fpath, code or "", provider, status, reason[:500], int(elapsed_ms), mid if ok else None),
+                       (task_id, file_path, code, provider, status, reason, elapsed_ms, movie_id, detail)
+                       VALUES (?,?,?,?,?,?,?,?,?)""",
+                (task_id, fpath, code or "", provider, status, reason[:500], int(elapsed_ms),
+                 mid if ok else None, detail_str),
             )
         except Exception as log_exc:
             SCRAPE.error(f"写入刮削日志失败：{log_exc}")
@@ -530,7 +568,8 @@ def run_scrape(ids: Optional[List[int]] = None, scope: str = "missing",
                     else:
                         SCRAPE.bump("miss")
                         SCRAPE.log(f"{label}：{reason}", "warn", code=code)
-                _log_row(conn, mid, label, code, provider, status, reason, elapsed_ms, ok)
+                _log_row(conn, mid, label, code, provider, status, reason, elapsed_ms, ok,
+                         detail=res.get("detail"))
                 conn.commit()
             finally:
                 SCRAPE.tick(label)

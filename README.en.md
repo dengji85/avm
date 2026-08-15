@@ -6,7 +6,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-1.10.0-1f6feb.svg"/>
+  <img src="https://img.shields.io/badge/version-1.11.0-1f6feb.svg"/>
   <img src="https://img.shields.io/badge/backend-FastAPI-009688.svg"/>
   <img src="https://img.shields.io/badge/frontend-Vue%203%20%2F%20Vite-42b883.svg"/>
   <img src="https://img.shields.io/badge/database-SQLite-003b57.svg"/>
@@ -94,10 +94,12 @@ Market options fall into two rough camps: **general media scrapers** (TinyMediaM
 
 ---
 
-## 🌟 Highlights in 1.10.0
+## 🌟 Highlights in 1.11.0
 
 > Release date: 2026-08-15
 
+- **🔎 Scrape-failure reason panel**: the maintenance center gains a "Scrape Failure Reasons" Tab that turns the old "scrape failed = black box" into a visual diagnosis. Each failed title shows **per-source details** (status + reason per data source) with an overall classification and suggested action; failures are grouped-counted into five buckets — anti-bot block / network error / source has no such title / parse failure / bad ID — so you can tell at a glance whether "the source is down" or "the title truly isn't there".
+- **One-click retry + re-scrape with another source**: only re-run transient network/blocked items (stable misses untouched), or pick titles and a specific data source (e.g. switch to av-wiki) to re-fetch and bypass the blocked site.
 - **💬 Subtitle matching now picks files directly**: on the maintenance page click "Choose files" to upload subtitles, matched to library titles by ID and one-click aligned/renamed (with copy-to-keep-original support).
 - **🧹 Repeat detection strengthens split recognition**: beyond `_1`/`-cd1`/`.part3`, added bracket `(1)`, `[2]`, single-letter `-a`, and resolution-tagged `1080p-1` split detection; an ID's trailing digit is no longer mistaken for a sequence number.
 - **🔔 About-page version check**: hooks into GitHub Releases, shows current/latest version with release notes, supports custom update sources.
