@@ -15,8 +15,23 @@ const failed = ref(false)
 const ready = ref(false)
 const cur = ref(0)
 const dur = ref(0)
+const fsOn = ref(false)
 let saveTimer = null
 let lastSaved = 0
+
+// 仅当访问地址为 localhost/127.0.0.1 时才提供"系统播放器"（远程设备点了也无效）
+const isRemote = !['localhost', '127.0.0.1'].includes(location.hostname)
+
+function toggleFullscreen() {
+  const el = videoEl.value
+  if (!el) return
+  if (!document.fullscreenElement) {
+    el.requestFullscreen?.().catch(() => {})
+  } else {
+    document.exitFullscreen?.().catch(() => {})
+  }
+}
+document.addEventListener('fullscreenchange', () => { fsOn.value = !!document.fullscreenElement })
 
 function onLoaded() {
   ready.value = true
@@ -105,7 +120,7 @@ watch(() => props.movieId, () => {
       <div class="icon">▶</div>
       <div class="title">{{ $t('player.cannotDecode') }}</div>
       <p class="desc">{{ $t('player.cannotDecodeDesc') }}</p>
-      <button class="btn primary" @click="openExternal">{{ $t('player.openExternal') }}</button>
+      <button v-if="!isRemote" class="btn primary" @click="openExternal">{{ $t('player.openExternal') }}</button>
     </div>
 
     <div v-if="ready && !failed" class="p-bar">
@@ -113,7 +128,8 @@ watch(() => props.movieId, () => {
       <button class="btn tiny ghost" @click="seek(30)" :data-tip="$t('player.fwd30')">30s »</button>
       <span class="t tabular">{{ fmtClock(cur) }} / {{ fmtClock(dur) }}</span>
       <div class="spacer"></div>
-      <button class="btn tiny ghost" @click="openExternal">{{ $t('player.external') }}</button>
+      <button class="btn tiny ghost" @click="toggleFullscreen">{{ fsOn ? $t('player.exitFs') : $t('player.fullscreen') }}</button>
+      <button v-if="!isRemote" class="btn tiny ghost" @click="openExternal">{{ $t('player.external') }}</button>
     </div>
   </div>
 </template>
@@ -125,6 +141,16 @@ watch(() => props.movieId, () => {
   max-height: 60vh;
   background: #000;
   display: block;
+}
+/* 手机/平板：视频铺满可用高度，进度条按钮换行避免挤出 */
+@media (max-width: 768px) {
+  .vid { max-height: none; height: auto; aspect-ratio: 16 / 9; }
+  .p-bar { flex-wrap: wrap; }
+  .p-bar .t { width: 100%; order: -1; }
+}
+/* 极窄屏（竖屏手机）：隐藏时间戳提示文字，保留核心按钮 */
+@media (max-width: 420px) {
+  .p-bar .btn { flex: 1 1 auto; }
 }
 .p-fail {
   display: flex; flex-direction: column; align-items: center; justify-content: center;

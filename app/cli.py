@@ -169,7 +169,11 @@ def cmd_organize(args) -> int:
 
 def cmd_serve(args) -> int:
     from .main import app
+    from .config import update_config
     import uvicorn
+    app.state.bind_host = args.host
+    # 将本次实际监听地址写回配置，供设置页/接口准确展示
+    update_config({"server": {"host": args.host}})
     url = f"http://{args.host}:{args.port}/"
     print(f"片匣已启动： {url}")
     print("浏览器已自动打开；如需手动访问，复制上面的地址到浏览器。")

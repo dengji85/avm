@@ -272,6 +272,15 @@ def _migrate(conn: sqlite3.Connection) -> None:
         "CREATE TABLE IF NOT EXISTS movie_previews ("
         "movie_id INTEGER PRIMARY KEY REFERENCES movies(id) ON DELETE CASCADE, "
         "paths TEXT DEFAULT '', created_at TEXT DEFAULT (datetime('now','localtime')))")
+    # 字幕文件登记：扫描发现或字幕包匹配对齐后写入，供前端展示与播放器自动加载
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS movie_subtitles ("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "movie_id INTEGER NOT NULL REFERENCES movies(id) ON DELETE CASCADE, "
+        "file_path TEXT NOT NULL, filename TEXT NOT NULL, "
+        "lang TEXT DEFAULT '', source TEXT DEFAULT 'matched', "
+        "created_at TEXT DEFAULT (datetime('now','localtime')))")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_sub_movie ON movie_subtitles(movie_id)")
     conn.commit()
 
 

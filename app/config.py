@@ -70,6 +70,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "min_size_mb": 100,
         # 扫描完成后自动清理失效记录（磁盘已删的文件 / 空影片 / 孤儿元数据）
         "auto_cleanup": True,
+        # 自动扫描间隔（分钟）。0=关闭，后台会按间隔增量扫描媒体库。
+        "auto_scan_interval": 0,
         "ignore_keywords": ["sample", "trailer", "预告", "花絮", "特典"],
         "ignore_dirs": [
             "@eaDir", "#recycle", "$RECYCLE.BIN", "System Volume Information",
@@ -173,6 +175,14 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "host": "127.0.0.1",
         "port": 8770,
         "open_browser": True,
+        # 访问令牌：为空时自动生成（仅本机 127.0.0.1 豁免；远程访问必须携带）
+        "access_token": "",
+        # 是否启用远程访问控制（关闭则任何能连上的设备都可访问，仅供纯本机调试）
+        "require_token_remote": True,
+        # 版本更新清单地址。默认指向 GitHub Releases（发版即打 tag 推到 git 即可自动生效）：
+        # 后端会按 GitHub 结构解析 tag_name(版本)/html_url(下载页)/body(更新说明)/published_at(日期)。
+        # 也可改为自建的版本清单 JSON（含 version/download_url/released/notes）。
+        "update_feed": "https://api.github.com/repos/dengji85/avm/releases/latest",
     },
     "ui": {
         "page_size": 60,
@@ -262,6 +272,20 @@ def update_config(patch: Dict[str, Any]) -> Dict[str, Any]:
     with _LOCK:
         current = load_config()
         return save_config(_deep_merge(current, patch))
+
+
+def ensure_access_token() -> str:
+    """启动时确保存在一个访问令牌：若配置为空则生成一个随机令牌并落盘。
+
+    返回当前生效的令牌。本地 127.0.0.1 访问始终豁免，远程访问需携带此令牌。
+    """
+    cfg = load_config()
+    tok = (cfg.get("server", {}).get("access_token") or "").strip()
+    if not tok:
+        import secrets
+        tok = secrets.token_urlsafe(24)
+        update_config({"server": {"access_token": tok}})
+    return tok
 
 
 def roots_to_scan(cfg: Dict[str, Any] | None = None) -> list:

@@ -4,23 +4,25 @@ import { state, FACET_KINDS, FLAGS } from '../state.js'
 
 /* 分面配置：FACET_KINDS = [key, field, multi, label] */
 
-// 长尾维度（值可能极多）：默认折叠、支持组内搜索与「显示更多」
-const COLLAPSIBLE = new Set(['actresses', 'studios', 'series'])
+// 需要折叠的维度：值可能较多，默认只显示前 INITIAL 个 + 「显示更多」，并支持组内搜索
+const COLLAPSIBLE = new Set(['genres', 'tags', 'actresses', 'studios', 'series'])
 const INITIAL = 12          // 折叠态下默认展示的热门数量
 const SEARCH_THRESHOLD = 20 // 值超过该数量才显示组内搜索框
 
-// 渲染顺序：高频/低基数维度置顶，长尾维度（女优/厂商/系列）靠下并折叠。
-// 评分、标记为固定分组（不在 FACET_KINDS 中），手动插入到类型/标签之后。
+// 渲染顺序：最常用/高频检索维度置顶（类型、系列、女优），其余依次排列，标记最后。
+// 评分、标记为固定分组（不在 FACET_KINDS 中），手动插入。
 const byKey = Object.fromEntries(FACET_KINDS.map((g) => [g[0], g]))
 const RATING = ['ratings', 'rating', false, 'filter.ratingGE']
 const FLAGG = ['flags', 'flags', false, 'filter.flags']
-const order = ['genres', 'tags', 'ratings', 'flags', 'actresses', 'studios', 'series', 'prefixes', 'years']
+const order = ['genres', 'series', 'actresses', 'tags', 'studios', 'ratings', 'years', 'flags', 'prefixes']
 const groupMap = { ratings: RATING, flags: FLAGG, ...byKey }
 const groups = order.map((k) => groupMap[k]).filter(Boolean)
 
-// 每个长尾分面的折叠态 / 搜索词
+// 每个可折叠分面的折叠态 / 搜索词
 const ui = reactive({})
-for (const k of COLLAPSIBLE) ui[k] = { collapsed: true, q: '' }
+for (const k of groups.map((g) => g[0])) {
+  if (COLLAPSIBLE.has(k)) ui[k] = { collapsed: true, q: '' }
+}
 
 const fullList = (key) => state.facets?.[key] || []
 
@@ -100,47 +102,35 @@ defineExpose({ focus: () => {} })
       />
     </div>
 
-    <!-- 普通分面（类型 / 标签 / 评分 / 标记，低基数，始终展开） -->
+    <!-- 所有分组统一按 order 渲染：顺序由 order 数组决定 -->
     <template v-for="[key, field, multi, label] in groups" :key="key">
-      <div v-if="!COLLAPSIBLE.has(key) && key !== 'flags'" class="f-group">
+      <!-- 评分：滑块 -->
+      <div v-if="key === 'ratings'" class="f-group">
         <div class="f-label">{{ $t(label) }}</div>
-        <div v-if="key === 'ratings'" class="f-rating">
+        <div class="f-rating">
           <input type="range" min="0" max="5" step="1" v-model="minRating" />
           <span class="rv">{{ minRating || $t('filter.all') }}</span>
         </div>
-        <div v-else class="f-chips">
+      </div>
+
+      <!-- 标记：固定 FLAGS 常量 -->
+      <div v-else-if="key === 'flags'" class="f-group">
+        <div class="f-label">{{ $t(label) }}</div>
+        <div class="f-chips">
           <button
-            v-for="f in selectedFirst(key, field, fullList(key))"
-            :key="f.name"
+            v-for="[f, flabel] in FLAGS"
+            :key="f"
             class="f-chip"
-            :class="{ on: isOn(field, f.name) }"
-            @click="toggle(field, f.name, multi)"
-          >
-            {{ f.name }} <span class="c">{{ f.count }}</span>
-          </button>
+            :class="{ on: state.flags.includes(f) }"
+            @click="toggleFlag(f)"
+          >{{ $t(flabel) }}</button>
         </div>
       </div>
-    </template>
 
-    <!-- 标记分组：用固定 FLAGS 常量（后端不返回该分面） -->
-    <div class="f-group">
-      <div class="f-label">{{ $t('filter.flags') }}</div>
-      <div class="f-chips">
-        <button
-          v-for="[f, label] in FLAGS"
-          :key="f"
-          class="f-chip"
-          :class="{ on: state.flags.includes(f) }"
-          @click="toggleFlag(f)"
-        >{{ $t(label) }}</button>
-      </div>
-    </div>
-
-    <!-- 长尾分面（女优 / 厂商 / 系列）：可折叠 + 组内搜索 -->
-    <template v-for="[key, field, multi, label] in groups" :key="key">
-      <div v-if="COLLAPSIBLE.has(key)" class="f-group collapsible" :class="{ open: !ui[key].collapsed }">
+      <!-- 可折叠分面（类型/标签/女优/厂商/系列/番号前缀）：折叠 + 组内搜索 -->
+      <div v-else-if="COLLAPSIBLE.has(key)" class="f-group collapsible" :class="{ open: !ui[key].collapsed }">
         <div class="f-label head" @click="toggleCollapse(key)">
-          <span class="t">{{ label }}</span>
+          <span class="t">{{ $t(label) }}</span>
           <span class="n tabular">{{ fullList(key).length }}</span>
           <span class="caret">{{ ui[key].collapsed ? '▸' : '▾' }}</span>
         </div>
@@ -168,6 +158,22 @@ defineExpose({ focus: () => {} })
         <div v-if="!ui[key].q && ui[key].collapsed && fullList(key).length > INITIAL" class="f-more">
           <button class="btn tiny ghost" @click="toggleCollapse(key)">
             {{ $t('filter.showAll') }} {{ fullList(key).length }} {{ $t('filter.values') }}{{ $t(label) }}
+          </button>
+        </div>
+      </div>
+
+      <!-- 普通分面（低基数，始终展开）：年份等 -->
+      <div v-else class="f-group">
+        <div class="f-label">{{ $t(label) }}</div>
+        <div class="f-chips">
+          <button
+            v-for="f in selectedFirst(key, field, fullList(key))"
+            :key="f.name"
+            class="f-chip"
+            :class="{ on: isOn(field, f.name) }"
+            @click="toggle(field, f.name, multi)"
+          >
+            {{ f.name }} <span class="c">{{ f.count }}</span>
           </button>
         </div>
       </div>
@@ -207,4 +213,6 @@ defineExpose({ focus: () => {} })
   color: var(--c-text); border-radius: 8px; padding: 6px 9px; font: inherit; font-size: 12px;
 }
 .f-more { margin-top: 8px; }
+/* 展开后的折叠分组：内容较多时内部滚动，避免单个分组撑爆浮层/侧栏 */
+.f-group.collapsible.open .f-chips { max-height: 38vh; overflow-y: auto; padding-right: 4px; }
 </style>

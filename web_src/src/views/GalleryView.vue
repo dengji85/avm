@@ -1,5 +1,5 @@
 <script setup>
-import { ref, reactive, computed, onMounted, onUnmounted, nextTick } from 'vue'
+import { ref, reactive, computed, watch, onMounted, onUnmounted, nextTick } from 'vue'
 import { state, SORTS, FLAGS, resetFilters, hasActiveFilter } from '../state.js'
 import { useLibrary } from '../composables/useLibrary.js'
 import { getContinueWatching, clearContinueWatching, deleteMovie, scrapeOne, addToCollection, coverThumbUrl } from '../api.js'
@@ -22,6 +22,23 @@ const contLoading = ref(false)
 
 /* 视图模式：grid | list */
 const viewMode = ref('grid')
+
+/* 手机端筛选栏折叠状态：默认收起，点击「筛选条件」以浮层弹出，不遮盖影片内容 */
+const showFilter = ref(false)
+
+/* 移动端沉浸式：向上浏览隐藏顶栏/工具栏，下拉到顶部恢复 */
+const navHidden = ref(false)
+let vbEl = null
+let mqMobile = null
+function onViewScroll() {
+  if (!mqMobile || !mqMobile.matches) { navHidden.value = false; return }
+  if (!vbEl) return
+  navHidden.value = vbEl.scrollTop > 80
+}
+function syncBodyClass() {
+  document.body.classList.toggle('nav-hidden', navHidden.value)
+}
+watch(navHidden, syncBodyClass)
 
 const showContinue = computed(() =>
   !hasActiveFilter() && state.page === 1 && cont.value.length > 0,
@@ -92,11 +109,19 @@ onMounted(() => {
   window.addEventListener('keydown', onKey)
   window.addEventListener('click', closeCtx)
   window.addEventListener('scroll', closeCtx, true)
+  mqMobile = window.matchMedia('(max-width: 900px)')
+  vbEl = document.querySelector('.view-body')
+  if (vbEl) vbEl.addEventListener('scroll', onViewScroll, { passive: true })
+  mqMobile.addEventListener('change', onViewScroll)
+  onViewScroll()
 })
 onUnmounted(() => {
   window.removeEventListener('keydown', onKey)
   window.removeEventListener('click', closeCtx)
   window.removeEventListener('scroll', closeCtx, true)
+  if (vbEl) vbEl.removeEventListener('scroll', onViewScroll)
+  if (mqMobile) mqMobile.removeEventListener('change', onViewScroll)
+  document.body.classList.remove('nav-hidden')
 })
 
 /* 筛选摘要（用于顶部筛选条） */
@@ -161,9 +186,18 @@ onMounted(() => {
 
 <template>
   <section class="view gallery-layout">
-    <!-- 常驻筛选侧栏 -->
-    <aside class="filter-rail">
+    <!-- 手机端：筛选收起为按钮，点击展开 -->
+    <button class="btn filter-toggle" :class="{ active: showFilter }" @click="showFilter = !showFilter">
+      {{ showFilter ? '收起筛选 ▲' : '筛选条件 ▼' }}
+    </button>
+
+    <!-- 手机端：筛选浮层遮罩，点击关闭 -->
+    <div class="filter-mask" v-if="showFilter" @click="showFilter = false"></div>
+
+    <!-- 常驻筛选侧栏（手机上作为浮层） -->
+    <aside class="filter-rail" :class="{ open: showFilter }">
       <MovieFilter />
+      <button class="btn filter-done" @click="showFilter = false">完成</button>
     </aside>
 
     <!-- 主区 -->
@@ -297,6 +331,11 @@ onMounted(() => {
 </template>
 
 <style scoped>
+/* 手机端浮层相关元素：桌面默认隐藏，仅窄屏 media 内显示 */
+.filter-toggle { display: none; }
+.filter-done { display: none; }
+.filter-mask { display: none; }
+
 .gallery-layout { display: flex; flex-direction: row; gap: 18px; align-items: stretch; flex: 1; min-height: 0; }
 .filter-rail {
   width: 240px; flex: none;
@@ -337,6 +376,37 @@ onMounted(() => {
 
 @media (max-width: 900px) {
   .gallery-layout { flex-direction: column; }
-  .filter-rail { width: 100%; position: static; max-height: none; }
+  /* 手机端筛选栏：浮层抽屉式，默认隐藏，展开时从顶部滑下、可滚动、不挤压影片内容 */
+  .filter-rail {
+    position: fixed;
+    left: 0; right: 0; top: 0;
+    width: 100%;
+    max-height: 72vh;
+    display: none;
+    z-index: 70;
+    border-radius: 0 0 var(--r-lg) var(--r-lg);
+    background: var(--c-surface);
+    box-shadow: 0 12px 30px rgba(0,0,0,.35);
+    padding-bottom: 56px; /* 给底部「完成」按钮留位 */
+  }
+  .filter-rail.open { display: block; overflow-y: auto; }
+  .filter-toggle { display: inline-flex; align-self: flex-start; }
+  .filter-mask {
+    display: block;
+    position: fixed; inset: 0;
+    background: rgba(0,0,0,.45);
+    z-index: 65;
+  }
+  .filter-done {
+    position: sticky; bottom: 0;
+    display: block;
+    width: 100%;
+    margin-top: 10px;
+    padding: 12px;
+    font-weight: 600;
+    background: var(--c-primary); color: #fff;
+    border: 0; border-radius: var(--r-md);
+    cursor: pointer;
+  }
 }
 </style>

@@ -7,6 +7,7 @@ import re
 import sqlite3
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
+from . import subtitles
 from .db import query_all, query_one, scalar
 
 _TAXONOMY = {"actresses", "genres", "studios", "series", "tags"}
@@ -646,6 +647,7 @@ def movie_detail(conn: sqlite3.Connection, movie_id: int) -> Optional[Dict[str, 
         (movie_id,),
     )
     row["progress"] = movie_progress(conn, movie_id)
+    row["subtitles"] = subtitles.list_subtitles(conn, movie_id)
     return row
 
 

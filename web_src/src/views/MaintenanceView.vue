@@ -4,11 +4,13 @@ import PageHead from '../components/PageHead.vue'
 import OverviewTab from './maintenance/OverviewTab.vue'
 import StorageHealthTab from './maintenance/StorageHealthTab.vue'
 import ScrapeLogsTab from './maintenance/ScrapeLogsTab.vue'
+import SubtitleTab from './maintenance/SubtitleTab.vue'
 
 // 维护中心子标签：直接绑定全局 state.maintTab，便于跨视图/重渲染保持位置
 const TABS = [
   { id: 'overview', label: 'maint.overview', icon: '🏠' },
   { id: 'storage', label: 'maint.storage', icon: '🩺' },
+  { id: 'subtitle', label: 'maint.subtitle', icon: '💬' },
   { id: 'logs', label: 'maint.logs', icon: '📜' },
 ]
 const setTab = (id) => { state.maintTab = id }
@@ -32,6 +34,7 @@ const setTab = (id) => { state.maintTab = id }
     <div class="view-body tab-body">
       <OverviewTab v-show="state.maintTab === 'overview'" />
       <StorageHealthTab v-show="state.maintTab === 'storage'" />
+      <SubtitleTab v-show="state.maintTab === 'subtitle'" />
       <ScrapeLogsTab v-show="state.maintTab === 'logs'" />
     </div>
   </section>

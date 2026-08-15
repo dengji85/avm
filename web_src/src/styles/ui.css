@@ -209,6 +209,22 @@ input[type='range'] { accent-color: var(--c-primary); cursor: pointer; height: a
 }
 .section-title .count { color: var(--c-text-3); font-size: var(--fs-sm); font-weight: 400; }
 
+/* ---------------- 局域网访问：二维码 + 地址 ---------------- */
+.lan-share-body { display: flex; gap: var(--sp-4); flex-wrap: wrap; align-items: flex-start; }
+.qr-wrap { display: flex; flex-direction: column; align-items: center; gap: var(--sp-2); }
+.qr-img { width: 200px; height: 200px; border-radius: var(--r-sm); background: #fff; padding: 6px; border: 1px solid var(--c-line); }
+.lan-urls { display: flex; flex-direction: column; gap: var(--sp-2); flex: 1 1 260px; min-width: 0; }
+.addr-pick { display: flex; flex-direction: column; gap: var(--sp-1); margin-bottom: var(--sp-1); }
+.addr-pick .inp { width: 100%; }
+.url-row { display: flex; align-items: center; gap: var(--sp-2); padding: var(--sp-2) var(--sp-3); border: 1px solid var(--c-line); border-radius: var(--r-sm); cursor: pointer; transition: border-color .15s, background .15s; }
+.url-row:hover { border-color: var(--c-line-strong); background: var(--c-surface-2); }
+.url-row.active { border-color: var(--c-accent, #5b9dff); background: var(--c-accent-soft, rgba(91,157,255,.10)); }
+.url-row .url { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--fs-sm); }
+@media (max-width: 640px) {
+  .lan-share-body { flex-direction: column; }
+  .qr-img { width: 168px; height: 168px; }
+}
+
 /* ---------------- 骨架屏 ---------------- */
 .skeleton {
   position: relative;

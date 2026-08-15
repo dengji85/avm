@@ -509,8 +509,36 @@
 @media (max-width: 900px) {
   .sidebar { position: absolute; left: 0; top: var(--h-topnav); bottom: 0; z-index: 30; box-shadow: var(--sh-3); }
   .sidebar:not(.mobile-open) { display: none; }
-  .topnav .search { max-width: none; }
+  .topnav { flex-wrap: wrap; height: auto; padding: 8px 12px; gap: var(--sp-2); }
+  .topnav .search { max-width: none; flex: 1 1 auto; min-width: 0; }
+  /* 主导航整行横滑，换行到第二行，避免与品牌/搜索挤压 */
+  .topnav .main-tabs { order: 10; flex: 1 1 100%; margin: 4px 0 0; border-radius: var(--r-md); }
   :root { --card-min: 138px; --w-drawer: 100vw; }
   .view-body { padding: var(--sp-3); }
   .toolbar { padding: var(--sp-2) var(--sp-3); }
+
+  /* 沉浸式：向上浏览时收起顶栏与影片库工具栏/筛选条，释放内容区域 */
+  body.nav-hidden .topnav {
+    height: 0; padding-top: 0; padding-bottom: 0;
+    overflow: hidden; opacity: 0;
+    transition: height var(--t-base), opacity var(--t-base), padding var(--t-base);
+  }
+  body.nav-hidden .toolbar,
+  body.nav-hidden .filter-bar {
+    max-height: 0; min-height: 0; padding-top: 0; padding-bottom: 0;
+    overflow: hidden; opacity: 0; border-color: transparent;
+    transition: max-height var(--t-base), opacity var(--t-base), padding var(--t-base);
+  }
+  /* 非隐藏态也加过渡，保证来回平滑 */
+  .topnav { transition: height var(--t-base), opacity var(--t-base), padding var(--t-base); }
+  .toolbar, .filter-bar { transition: max-height var(--t-base), opacity var(--t-base), padding var(--t-base); }
+}
+
+/* 极窄屏（竖屏手机）：卡片更小、工具栏换行、减少留白，保证不出横向滚动条 */
+@media (max-width: 480px) {
+  :root { --card-min: 116px; }
+  .view-body { padding: var(--sp-2); }
+  .toolbar { flex-wrap: wrap; gap: var(--sp-2); padding: var(--sp-2); }
+  .topnav .search { min-width: 0; flex: 1 1 auto; }
+  .card-grid { gap: var(--sp-2); }
 }

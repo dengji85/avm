@@ -119,35 +119,71 @@ _AD_KEYWORDS = (
 import re as _re
 _AD_RE = _re.compile("|".join(f"(?:{p})" for p in _AD_KEYWORDS), _re.I)
 
-# 分卷/分片识别：同一影片被切成多段保存，文件名形如 xxx_1 / xxx_2 / xxx-cd1 / xxx.part3
+# 分卷/分片识别：同一影片被切成多段保存，文件名形如
+#   xxx_1 / xxx_2          （下划线 + 序号）
+#   xxx-cd1 / xxx-CD2      （cd/part/disk/vol + 序号）
+#   xxx.part3 / xxx.part03 （part + 序号）
+#   xxx (1).mp4 / (2)      （括号序号）
+#   xxx-a / xxx-b          （字母序号）
 # 这类多文件是「合法分卷」，不应算作同番号重复版本，也不应被当成劣质/损坏误删。
 # 仅当组内多个文件去掉末尾序号后缀后「基础名相同」且序号不同，才判定为分卷。
-_PART_RE = _re.compile(r"^(?P<base>.*?)(?:[-_.\s]?(?:cd|part|disk|vol))?(\d+)$", _re.I)
+
+# 各种分段序号后缀（匹配末尾，区分大小写由调用处统一 lower）
+_PART_PATTERNS = [
+    r"[-_.\s]?\((\d+)\)",          # (1) / (01)
+    r"[-_.\s]?\[(\d+)\]",          # [2]
+    r"[-_.\s]?(?:cd|part|disk|vol|dvd)[-_.\s]?(\d+)",  # cd1 / part03 / disk 2
+    r"[-_.\s]([a-z])\b",           # -a / _b（单字母分卷，需前置分隔符避免误吞番号末位）
+    r"[-_.\s](\d+)$",              # 末尾纯数字序号：_1 / -2 / 空格3（必须锚定行尾）
+]
+_PART_RES = [_re.compile(p, _re.I) for p in _PART_PATTERNS]
 
 
 def _split_part(stem_name: str):
     """把文件名主干拆成 (基础名, 序号)。无序号返回 (原名, None)。
 
-    基础名会去掉末尾的分隔符（_ - . 空格），避免 'ABC-123_' 这类残留。
+    序号可以是数字或单字母（a/b/c…）。基础名会去掉末尾残留的分隔符
+    （_ - . 空格），避免 'ABC-123_' 这类尾巴。
+
+    重要防误判：番号本身形如 ABC-123（字母+数字），其末尾数字 123 也会被
+    '[-_.\s](\d+)$' 命中。若拆分后基础名里已不含任何数字（如 ABC），说明命中的
+    其实是番号末位而非分卷序号，此时回退为「无序号」，避免把番号末位当成分段。
     """
-    m = _PART_RE.match(stem_name or "")
-    if not m:
-        return (stem_name or "", None)
-    return (m.group("base").rstrip("_-. "), int(m.group(2)))
+    s = (stem_name or "").strip()
+    if not s:
+        return ("", None)
+    for rx in _PART_RES:
+        m = rx.search(s)
+        if m:
+            num = m.group(1)
+            base = s[: m.start()].rstrip("_-. ")
+            if num.isdigit() and not any(ch.isdigit() for ch in base):
+                # 拆分后基础名无数字 → 命中的是番号末位，不是分卷
+                return (s, None)
+            key = num.lower() if num.isalpha() else int(num)
+            return (base, key)
+    return (s, None)
 
 
 def _mark_multi_part(files: List[dict]) -> bool:
     """就地给 files 标注 multi_part。返回整组是否全部为分卷。
 
     规则：按「去序号后的基础名」聚合，若某基础名下出现 ≥2 个不同序号，
-    则这些文件属于同一影片的分卷集合。
+    则这些文件属于同一影片的分卷集合（明显分段，不算重复版本）。
+
+    额外保护：当组内所有文件基础名都相同、但只有一个（或零个）带序号时，
+    视为「同一基础名的不同文件」而非分卷——避免把 'ABC-123.mp4' 与
+    'ABC-123-CD1.mp4' 这种「整片 + 单分卷」误判为分卷而漏报真实重复。
     """
     bases: Dict[str, set] = {}
+    has_part = False
     for f in files:
         stem = os.path.splitext(f.get("filename") or "")[0]
         base, num = _split_part(stem)
         f["_base"] = base
-        bases.setdefault(base, set()).add(num)
+        if num is not None:
+            has_part = True
+            bases.setdefault(base, set()).add(num)
     mp_ids = set()
     for base, nums in bases.items():
         if len(nums) >= 2:  # 同一基础名、多个不同序号 → 分卷
@@ -156,7 +192,7 @@ def _mark_multi_part(files: List[dict]) -> bool:
                     mp_ids.add(f["id"])
     for f in files:
         f["multi_part"] = f["id"] in mp_ids
-    return bool(mp_ids) and len(mp_ids) == len(files)
+    return bool(mp_ids) and len(mp_ids) == len(files) and has_part
 
 # 分辨率档位 → 权重（用于跨档位质量比较）
 _RES_ORDER = {"": 0, "480p": 1, "720p": 2, "1080p": 3, "1440p": 4, "2160p": 5}

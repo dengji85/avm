@@ -1,7 +1,7 @@
 <script setup>
-import { onMounted, onBeforeUnmount, watch } from 'vue'
+import { onMounted, onBeforeUnmount, watch, ref } from 'vue'
 import { state, applyTheme } from './state.js'
-import { getFacets, getConfig } from './api.js'
+import { getFacets, getConfig, onNoToken } from './api.js'
 import { toast } from './utils.js'
 import { useTasks } from './composables/useTasks.js'
 
@@ -9,6 +9,9 @@ import TopNav from './components/TopNav.vue'
 import ToastLayer from './components/ToastLayer.vue'
 import ConfirmDialog from './components/ConfirmDialog.vue'
 import DetailDrawer from './components/DetailDrawer.vue'
+import TokenGate from './components/TokenGate.vue'
+
+const tokenGate = ref(null)
 
 import HomeView from './views/HomeView.vue'
 import GalleryView from './views/GalleryView.vue'
@@ -57,6 +60,7 @@ watch(() => state.view, () => {
 
 onMounted(async () => {
   applyTheme()
+  onNoToken(() => tokenGate.value && tokenGate.value.open())
   await Promise.all([loadFacets(), loadConfig()])
   tasks.start()
   window.addEventListener('avm-refresh', onGlobalRefresh)
@@ -82,5 +86,6 @@ function onFilterChange() { /* 由各视图自行响应 state 变化 */ }
     <DetailDrawer />
     <ToastLayer />
     <ConfirmDialog />
+    <TokenGate ref="tokenGate" />
   </div>
 </template>

@@ -4,7 +4,7 @@ import { state } from '../state.js'
 import {
   getConfig, putConfig, listProviders, testScraper as apiTest,
   parsePreview as apiParse, fsList, sniffCovers, csvUrl, cacheAvatars,
-  fillActressAvatars, rescanLocalCovers,
+  fillActressAvatars, rescanLocalCovers, getServerInfo, resetToken, checkUpdate,
 } from '../api.js'
 import { toast, confirmDialog } from '../utils.js'
 import { useTasks } from '../composables/useTasks.js'
@@ -19,6 +19,7 @@ const TABS = [
   ['parser', 'settings.tab.parser'],
   ['ai', 'settings.tab.ai'],
   ['appearance', 'settings.tab.appearance'],
+  ['remote', 'settings.tab.remote'],
   ['about', 'settings.tab.about'],
 ]
 const tab = ref('library')
@@ -56,7 +57,9 @@ async function load() {
   try {
     const c = await getConfig()
     Object.assign(cfg, c)
-    cfg.library = Object.assign({ paths: [], min_size_mb: 0, ignore_keywords: [], video_extensions: [] }, c.library)
+    cfg.library = Object.assign({ paths: [], min_size_mb: 0, ignore_keywords: [], video_extensions: [], auto_scan_interval: 0 }, c.library)
+    autoScan.value = Number(cfg.library.auto_scan_interval) > 0
+    autoScanInterval.value = Number(cfg.library.auto_scan_interval) > 0 ? Number(cfg.library.auto_scan_interval) : 10
     cfg.cover = Object.assign({ auto_local: false, download: false }, c.cover)
     cfg.media = Object.assign(
       { avatar_dir: 'avatars', fanart_dir: 'fanarts', avatar_download: false, fanart_download: true },
@@ -84,6 +87,8 @@ async function load() {
 }
 
 /* ---------------- 媒体库 ---------------- */
+const autoScan = ref(false)
+const autoScanInterval = ref(10)
 async function saveLibrary() {
   saving.value = true
   try {
@@ -95,6 +100,7 @@ async function saveLibrary() {
         ignore_keywords: ignoreText.value.split(/[,，]/).map((s) => s.trim()).filter(Boolean),
         video_extensions: extText.value.split(/[,，]/).map((s) => s.trim().toLowerCase())
           .filter(Boolean).map((s) => (s.startsWith('.') ? s : '.' + s)),
+        auto_scan_interval: autoScan.value ? Math.max(1, Number(autoScanInterval.value) || 10) : 0,
       },
       cover: { auto_local: !!cfg.cover.auto_local, download: !!cfg.cover.download },
       media: {
@@ -296,7 +302,107 @@ const parseStats = computed(() => {
   return { n, ok, rate: n ? Math.round((ok / n) * 100) : 0 }
 })
 
-onMounted(load)
+/* ---------------- 访问与远程 ---------------- */
+const serverInfo = reactive({ host: '127.0.0.1', port: 8770, access_token: '', require_token_remote: true })
+const showTok = ref(false)
+const tokInput = ref('')
+const savingTok = ref(false)
+const requireToken = ref(true)
+function maskToken(tok) {
+  if (!tok) return '—'
+  if (tok.length <= 8) return tok
+  return tok.slice(0, 4) + '•'.repeat(Math.min(24, tok.length - 8)) + tok.slice(-4)
+}
+async function copyTok() {
+  try { await navigator.clipboard.writeText(serverInfo.access_token); toast(t('settings.copied'), 'ok') }
+  catch (e) { toast(t('settings.copyFailed'), 'err') }
+}
+async function doResetToken() {
+  try { const r = await resetToken(); serverInfo.access_token = r.access_token; tokInput.value = r.access_token; toast(t('settings.tokenReset'), 'ok') }
+  catch (e) { toast(e.message, 'err') }
+}
+async function saveToken() {
+  const v = (tokInput.value || '').trim()
+  if (v && (v.length < 8 || /\s/.test(v))) { toast(t('settings.tokenInvalid'), 'err'); return }
+  savingTok.value = true
+  try {
+    await putConfig({ server: { access_token: v } })
+    serverInfo.access_token = v || serverInfo.access_token
+    toast(t('settings.tokenSaved'), 'ok')
+  } catch (e) { toast(e.message, 'err') }
+  finally { savingTok.value = false }
+}
+const qrAddr = ref('')
+const qrUrl = computed(() => `/api/server/qr?addr=${encodeURIComponent(qrAddr.value || '')}&_=${Date.now()}`)
+const isLocal = (u) => /(^|[/:])(127\.0\.0\.1|localhost|0\.0\.0\.0)(:|\/|$)/i.test(u)
+const lanUrls = computed(() => (serverInfo.access_urls || []).filter((u) => !isLocal(u)))
+async function copyText(text) {
+  try { await navigator.clipboard.writeText(text); toast(t('settings.copied'), 'ok') }
+  catch (e) { toast(t('settings.copyFailed'), 'err') }
+}
+async function saveRequireToken() {
+  try { await putConfig({ server: { require_token_remote: requireToken.value } }); toast(t('settings.saved'), 'ok') }
+  catch (e) { toast(e.message, 'err') }
+}
+
+async function loadServerInfo() {
+  try {
+    const r = await getServerInfo()
+    Object.assign(serverInfo, r)
+    requireToken.value = r.require_token_remote
+    const urls = (r.access_urls || []).filter((u) => !/(^|[/:])(127\.0\.0\.1|localhost|0\.0\.0\.0)(:|\/|$)/i.test(u))
+    if (urls.length) qrAddr.value = urls[0]
+    if (r.access_token) tokInput.value = r.access_token
+    if (r.app_version) appVersion.value = r.app_version
+    if (typeof r.update_feed === 'string') feedInput.value = r.update_feed
+  } catch (e) { /* 非致命 */ }
+}
+
+/* ---------------- 版本检查 ---------------- */
+const RELEASE_URL = 'https://github.com/dengji85/avm/releases'
+const REPO_URL = 'https://github.com/dengji85/avm'
+const releaseUrl = RELEASE_URL
+const repoUrl = REPO_URL
+const appVersion = ref('')
+const checking = ref(false)
+const updateState = reactive({ checked: false, update_available: false, latest: '', download_url: '', released: '', notes: '', error: '' })
+async function checkForUpdate() {
+  if (checking.value) return
+  checking.value = true
+  updateState.checked = false
+  updateState.error = ''
+  try {
+    const r = await checkUpdate()
+    updateState.checked = true
+    updateState.update_available = !!r.update_available
+    updateState.latest = r.latest || r.current || ''
+    updateState.download_url = r.download_url || ''
+    updateState.released = r.released || ''
+    updateState.notes = r.notes || ''
+    updateState.error = r.error || ''
+    if (r.current && !appVersion.value) appVersion.value = r.current
+  } catch (e) {
+    updateState.checked = true
+    updateState.error = e.message || String(e)
+  } finally {
+    checking.value = false
+  }
+}
+
+/* ---------------- 更新源（手动地址） ---------------- */
+const feedInput = ref('')
+const savingFeed = ref(false)
+async function saveFeed() {
+  if (savingFeed.value) return
+  savingFeed.value = true
+  try {
+    await putConfig({ server: { update_feed: feedInput.value.trim() } })
+    toast(t('settings.feedSaved'), 'ok')
+  } catch (e) { toast(e.message || String(e), 'err') }
+  finally { savingFeed.value = false }
+}
+
+onMounted(async () => { await load(); await loadServerInfo() })
 </script>
 
 <template>
@@ -361,6 +467,20 @@ onMounted(load)
               <label>{{ $t('settings.ffmpegPath') }}</label>
               <input v-model="cfg.ffmpeg_path" :placeholder="$t('settings.ffmpegPh')" />
               <span class="hint">{{ $t('settings.ffmpegHint') }}</span>
+            </div>
+            <div class="field">
+              <label class="switch">
+                <input type="checkbox" v-model="autoScan" @change="saveLibrary" />
+                <span>{{ $t('settings.autoScan') }}</span>
+              </label>
+              <span class="hint">{{ $t('settings.autoScanHint') }}</span>
+            </div>
+            <div class="field-row" v-if="autoScan">
+              <label>{{ $t('settings.autoScanInterval') }}</label>
+              <div class="hstack">
+                <input type="number" v-model="autoScanInterval" min="1" style="width:120px" @change="saveLibrary" />
+                <span class="muted">{{ $t('settings.minutes') }}</span>
+              </div>
             </div>
           </div>
           <div class="panel-foot">
@@ -651,34 +771,127 @@ onMounted(load)
         </div>
       </template>
 
+      <!-- ============ 远程（访问与远程） ============ -->
+      <template v-else-if="tab === 'remote'">
+        <div class="panel">
+          <div class="panel-head">{{ $t('settings.access') }}</div>
+          <div class="panel-body">
+            <div class="field">
+              <label>{{ $t('settings.listenAddr') }}</label>
+              <span class="mono">{{ serverInfo.host }}:{{ serverInfo.port }}</span>
+              <span class="muted">{{ serverInfo.host === '0.0.0.0' ? $t('settings.lanOn') : $t('settings.lanOff') }}</span>
+            </div>
+            <div class="field col">
+              <label>{{ $t('settings.accessToken') }}</label>
+              <div class="tok-row">
+                <input class="inp mono" v-model="tokInput" :type="showTok ? 'text' : 'password'" :placeholder="$t('settings.tokenPh')" @keyup.enter="saveToken" />
+                <button class="btn tiny ghost" @click="showTok = !showTok">{{ showTok ? '🙈' : '👁' }}</button>
+                <button class="btn tiny ghost" @click="copyTok" :disabled="!serverInfo.access_token">{{ $t('settings.copy') }}</button>
+                <button class="btn tiny" :disabled="savingTok" @click="saveToken">{{ savingTok ? $t('settings.saving') : $t('settings.saveFeed') }}</button>
+                <button class="btn tiny ghost" @click="doResetToken" :title="$t('settings.resetToken')">🔄</button>
+              </div>
+              <span class="muted">{{ $t('settings.tokenHint') }}</span>
+            </div>
+            <div class="fw-tip" v-if="lanUrls.length">
+              <div class="fw-tip-title">⚠️ {{ $t('settings.fwTitle') }}</div>
+              <div class="fw-tip-body">{{ $t('settings.fwBody') }}</div>
+              <code class="fw-cmd mono">netsh advfirewall firewall add rule name="AVM" dir=in action=allow protocol=TCP localport={{ serverInfo.port }} profile=any edge=yes</code>
+            </div>
+            <div class="field col lan-share" v-if="lanUrls.length">
+              <label>{{ $t('settings.lanAccess') }}</label>
+              <div class="lan-share-body">
+                <div class="qr-wrap">
+                  <img class="qr-img" :src="qrUrl" alt="QR" />
+                  <div class="muted sm center">{{ $t('settings.scanHint') }}</div>
+                </div>
+                <div class="lan-urls">
+                  <div
+                    v-for="u in lanUrls"
+                    :key="u"
+                    class="url-row"
+                    :class="{ active: qrAddr === u }"
+                    @click="qrAddr = u"
+                  >
+                    <code class="mono url">{{ u }}</code>
+                    <button class="btn tiny ghost" @click.stop="copyText(u)">{{ $t('settings.copy') }}</button>
+                  </div>
+                  <span class="muted sm">{{ $t('settings.tapToQr') }}</span>
+                </div>
+              </div>
+            </div>
+            <div class="field">
+              <label class="switch">
+                <input type="checkbox" v-model="requireToken" @change="saveRequireToken" />
+                <span>{{ $t('settings.requireToken') }}</span>
+              </label>
+            </div>
+          </div>
+        </div>
+      </template>
+
       <!-- ============ 关于 ============ -->
       <template v-else>
+        <!-- 主视觉：品牌 + 版本 + 操作 -->
+        <div class="about-hero">
+          <div class="about-brand">{{ $t('settings.brand') }}</div>
+          <div class="about-sub">{{ $t('settings.aboutSub') }}</div>
+          <div class="about-ver">
+            <span class="about-ver-tag">{{ $t('settings.curVersion') }}</span>
+            <span class="about-ver-num mono">{{ appVersion || '—' }}</span>
+          </div>
+          <div class="about-actions">
+            <button class="btn" :disabled="checking" @click="checkForUpdate">{{ checking ? $t('settings.checking') : $t('settings.checkUpdate') }}</button>
+            <a class="btn ghost" :href="releaseUrl" target="_blank" rel="noopener">{{ $t('settings.goDownload') }}</a>
+            <a class="btn ghost" :href="repoUrl" target="_blank" rel="noopener">{{ $t('settings.homepage') }}</a>
+          </div>
+          <div v-if="updateState.error" class="about-update err">{{ updateState.error }}</div>
+          <div v-else-if="updateState.checked" class="about-update">
+            <div v-if="updateState.update_available" class="upd">
+              🎉 {{ $t('settings.newVersion') }} <b class="mono">{{ updateState.latest }}</b>
+              <span v-if="updateState.released" class="muted">（{{ updateState.released }}）</span>
+              <a v-if="updateState.download_url" class="ver-dl" :href="updateState.download_url" target="_blank" rel="noopener">{{ $t('settings.download') }}</a>
+              <div v-if="updateState.notes" class="ver-notes">{{ updateState.notes }}</div>
+            </div>
+            <div v-else class="ok">✅ {{ $t('settings.upToDate') }} <span class="muted">（{{ updateState.latest }}）</span></div>
+          </div>
+          <p class="about-local muted">{{ $t('settings.aboutLocal') }}</p>
+        </div>
+
+        <!-- 次：数据管理 -->
         <div class="panel">
-          <div class="panel-head">{{ $t('settings.exportData') }}</div>
+          <div class="panel-head">{{ $t('settings.dataMgmt') }}</div>
           <div class="panel-body">
-            <p class="muted">{{ $t('settings.exportCsvDesc') }}</p>
-            <div><a class="btn" :href="csvUrl()" target="_blank">{{ $t('settings.exportCsv') }}</a></div>
+            <div class="sub-block">
+              <div class="sub-title">{{ $t('settings.exportData') }}</div>
+              <p class="muted">{{ $t('settings.exportCsvDesc') }}</p>
+              <a class="btn tiny" :href="csvUrl()" target="_blank">{{ $t('settings.exportCsv') }}</a>
+            </div>
+            <div class="sub-block">
+              <div class="sub-title">{{ $t('settings.backupMig') }}</div>
+              <p class="muted">{{ $t('settings.backupMigDesc') }}</p>
+              <ul class="tips">
+                <li><b>{{ $t('settings.tipUpgrade').split('：')[0] }}</b>：{{ $t('settings.tipUpgrade').split('：').slice(1).join('：') }}</li>
+                <li><b>{{ $t('settings.tipMove').split('：')[0] }}</b>：{{ $t('settings.tipMove').split('：').slice(1).join('：') }}</li>
+                <li><b>{{ $t('settings.tipCustom').split('：')[0] }}</b>：{{ $t('settings.tipCustom').split('：').slice(1).join('：') }}</li>
+                <li><b>{{ $t('settings.tipCsv').split('：')[0] }}</b>：{{ $t('settings.tipCsv').split('：').slice(1).join('：') }}</li>
+              </ul>
+            </div>
+            <details class="adv">
+              <summary>{{ $t('settings.updateFeed') }}</summary>
+              <div class="feed-row">
+                <input class="inp" v-model.trim="feedInput" :placeholder="$t('settings.updateFeedPh')" />
+                <button class="btn tiny" :disabled="savingFeed" @click="saveFeed">{{ savingFeed ? $t('settings.saving') : $t('settings.saveFeed') }}</button>
+              </div>
+              <span class="muted sm">{{ $t('settings.updateFeedHint') }}</span>
+            </details>
           </div>
         </div>
+
+        <!-- 次：快捷键 -->
         <div class="panel">
-          <div class="panel-head">{{ $t('settings.backupMig') }}</div>
+          <div class="panel-head">{{ $t('settings.shortcuts') }}</div>
           <div class="panel-body">
-            <p class="muted">{{ $t('settings.backupMigDesc') }}</p>
-            <ul class="tips">
-              <li><b>{{ $t('settings.tipUpgrade').split('：')[0] }}</b>：{{ $t('settings.tipUpgrade').split('：').slice(1).join('：') }}</li>
-              <li><b>{{ $t('settings.tipMove').split('：')[0] }}</b>：{{ $t('settings.tipMove').split('：').slice(1).join('：') }}</li>
-              <li><b>{{ $t('settings.tipCustom').split('：')[0] }}</b>：{{ $t('settings.tipCustom').split('：').slice(1).join('：') }}</li>
-              <li><b>{{ $t('settings.tipCsv').split('：')[0] }}</b>：{{ $t('settings.tipCsv').split('：').slice(1).join('：') }}</li>
-            </ul>
-          </div>
-        </div>
-        <div class="panel">
-          <div class="panel-head">{{ $t('settings.aboutTitle') }}</div>
-          <div class="panel-body">
-            <p><b>{{ $t('settings.brand') }}</b> — {{ $t('settings.aboutSub') }}</p>
-            <p class="muted">{{ $t('settings.aboutLocal') }}</p>
             <div class="kbd-list">
-              <div class="section-title">{{ $t('settings.shortcuts') }}</div>
               <div class="kb"><kbd>Ctrl</kbd>+<kbd>K</kbd> 或 <kbd>/</kbd><span>{{ $t('settings.focusSearch') }}</span></div>
               <div class="kb"><kbd>Esc</kbd><span>{{ $t('settings.closeModal') }}</span></div>
               <div class="kb"><kbd>←</kbd> <kbd>→</kbd><span>{{ $t('settings.swipeSkip') }}</span></div>
@@ -762,6 +975,19 @@ onMounted(load)
 .adv summary:hover { color: var(--c-text); }
 .adv textarea { margin-top: var(--sp-2); font-family: 'JetBrains Mono', monospace; font-size: var(--fs-sm); }
 
+.ver-check { margin-top: var(--sp-4); padding-top: var(--sp-4); border-top: 1px dashed var(--c-border, #2a2a2a); }
+.ver-row { display: flex; align-items: center; gap: var(--sp-3); flex-wrap: wrap; }
+.ver-now { font-size: var(--fs-sm); color: var(--c-text-2); }
+.ver-now b { color: var(--c-text); }
+.ver-msg { margin-top: var(--sp-2); font-size: var(--fs-sm); }
+.ver-msg.upd { color: var(--c-warn, #ffb454); }
+.ver-msg.ok { color: var(--c-ok, #4caf50); }
+.ver-dl { margin-left: var(--sp-2); color: var(--c-accent, #5b9dff); text-decoration: underline; }
+.ver-notes { margin-top: var(--sp-1); color: var(--c-text-3); white-space: pre-wrap; line-height: 1.5; }
+.ver-feed { margin-top: var(--sp-3); }
+.ver-feed .feed-row { display: flex; gap: var(--sp-2); margin-top: var(--sp-1); }
+.ver-feed .feed-row .inp { flex: 1; min-width: 0; }
+
 .test-out {
   margin: 0;
   padding: var(--sp-3);
@@ -807,5 +1033,55 @@ kbd {
   border: 1px solid var(--c-line-strong);
   background: var(--c-surface-2);
   font-size: var(--fs-xs);
+}
+
+/* ---- 关于页：主视觉 ---- */
+.about-hero {
+  padding: var(--sp-6) var(--sp-5);
+  border-radius: var(--r-lg);
+  background: linear-gradient(135deg, var(--c-accent-soft, rgba(91,157,255,.12)), transparent 70%);
+  border: 1px solid var(--c-line);
+  margin-bottom: var(--sp-4);
+}
+.about-brand { font-size: 1.9rem; font-weight: 700; letter-spacing: .02em; }
+.about-sub { margin-top: var(--sp-1); color: var(--c-text-2); font-size: var(--fs-md); }
+.about-ver { margin-top: var(--sp-4); display: flex; align-items: baseline; gap: var(--sp-2); }
+.about-ver-tag { font-size: var(--fs-sm); color: var(--c-text-3); }
+.about-ver-num { font-size: 1.4rem; font-weight: 700; color: var(--c-accent, #5b9dff); }
+.about-actions { margin-top: var(--sp-4); display: flex; gap: var(--sp-2); flex-wrap: wrap; }
+.about-update { margin-top: var(--sp-3); font-size: var(--fs-sm); }
+.about-update .upd { color: var(--c-warn, #ffb454); }
+.about-update .ok { color: var(--c-ok, #4caf50); }
+.about-update.err { color: var(--c-err, #ff6b6b); }
+.about-local { margin-top: var(--sp-4); font-size: var(--fs-sm); }
+
+/* ---- 关于页：次区块 ---- */
+.sub-block { padding: var(--sp-3) 0; border-bottom: 1px solid var(--c-line); }
+.sub-block:first-child { padding-top: 0; }
+.sub-block:last-child { padding-bottom: 0; border-bottom: none; }
+.sub-title { font-weight: 600; margin-bottom: var(--sp-1); }
+.sub-block .btn.tiny { margin-top: var(--sp-1); }
+
+/* ---- 远程：防火墙提示 ---- */
+.fw-tip {
+  margin-bottom: var(--sp-4);
+  padding: var(--sp-3) var(--sp-4);
+  border: 1px solid var(--c-warn-line, #6b5320);
+  background: var(--c-warn-soft, rgba(255,180,84,.10));
+  border-radius: var(--r-md);
+}
+.fw-tip-title { font-weight: 700; color: var(--c-warn, #ffb454); margin-bottom: var(--sp-1); }
+.fw-tip-body { font-size: var(--fs-sm); color: var(--c-text-2); line-height: 1.6; }
+.fw-cmd {
+  display: block;
+  margin-top: var(--sp-2);
+  padding: var(--sp-2);
+  background: var(--c-surface-2);
+  border-radius: var(--r-sm);
+  font-size: var(--fs-xs);
+  color: var(--c-text);
+  overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
 }
 </style>

@@ -1,5 +1,16 @@
 // 统一 API 请求封装。开发期由 vite proxy 转发 /api 到后端。
 const API = '/api'
+const TOKEN_KEY = 'avm_access_token'
+
+export function getToken() {
+  try { return localStorage.getItem(TOKEN_KEY) || '' } catch (e) { return '' }
+}
+export function setToken(t) {
+  try { if (t) localStorage.setItem(TOKEN_KEY, t); else localStorage.removeItem(TOKEN_KEY) } catch (e) {}
+}
+// 远程访问被拒时由 App 注册的回调触发登录模态
+let _onNoToken = null
+export function onNoToken(cb) { _onNoToken = cb }
 
 export async function api(path, options = {}) {
   const opts = Object.assign({ headers: {} }, options)
@@ -7,10 +18,18 @@ export async function api(path, options = {}) {
     opts.headers['Content-Type'] = 'application/json'
     opts.body = JSON.stringify(opts.body)
   }
+  const tok = getToken()
+  if (tok) opts.headers['X-Access-Token'] = tok
   const res = await fetch(API + path, opts)
   let data = null
   try { data = await res.json() } catch (e) { data = null }
   if (!res.ok) {
+    if (res.status === 401 && data && data.code === 'NO_TOKEN') {
+      if (_onNoToken) _onNoToken()
+      const err = new Error('需要访问令牌')
+      err.code = 'NO_TOKEN'
+      throw err
+    }
     const detail = data && (data.detail || (data.errors && data.errors[0] && data.errors[0].msg))
     throw new Error(typeof detail === 'string' ? detail : `请求失败 (${res.status})`)
   }
@@ -40,6 +59,11 @@ export const coverThumbUrl = (id, w = 360) => `${API}/cover/${id}?w=${w}`
 export const previewUrl = (movieId, fname) => `${API}/covers/preview/${movieId}/${encodeURIComponent(fname)}`
 export const streamUrl = (id) => `${API}/stream/${id}`
 export const csvUrl = () => `${API}/export/csv`
+
+/* ---------------- 服务/访问控制 ---------------- */
+export const getServerInfo = () => get('/server/info')
+export const resetToken = () => post('/server/reset-token')
+export const checkUpdate = (channel = 'stable') => get(`/server/check-update?channel=${encodeURIComponent(channel)}`)
 
 /* 女优头像 / 影片背景大图（fanart）：统一走后端接口，兼容本地文件名与远程 URL（墙内代理） */
 export const avatarUrl = (avatar) => avatar ? `${API}/avatar/${encodeURIComponent(avatar)}` : ''
@@ -133,6 +157,10 @@ export const scrapeSkips = () => get('/scrape/skips')
 export const scrapeSkipsClear = (movie_id = 0) => del('/scrape/skips', { movie_id })
 export const maintenanceSummary = () => get('/maintenance/summary')
 export const reparseCodes = (body = {}) => post('/reparse-codes', body)
+export const matchSubtitles = (body) => post('/subtitles/match', body)
+export const alignSubtitles = (body) => post('/subtitles/align', body)
+export const uploadAndMatchSubtitles = (formData) =>
+  post('/subtitles/upload-and-match', formData, { headers: { 'Content-Type': 'multipart/form-data' } })
 
 /* ---------------- AI 增强 ---------------- */
 export const aiStatus = () => get('/ai/status')

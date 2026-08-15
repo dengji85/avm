@@ -92,6 +92,15 @@ function goMaintenance() {
 }
 const themeIcon = computed(() => (state.theme === 'dark' ? '☾' : '☀'))
 
+// 窄屏下隐藏非核心 Tab（如统计/赏析），保留影片库等核心入口；窗口宽度响应式
+const isNarrow = ref(typeof window !== 'undefined' && window.innerWidth <= 640)
+function onResize() { isNarrow.value = window.innerWidth <= 640 }
+onMounted(() => window.addEventListener('resize', onResize))
+onBeforeUnmount(() => window.removeEventListener('resize', onResize))
+// 手机上保留：首页、影片库；统计等可隐藏（用户确认手机上非必需）
+const NAV_TABS_CORE = ['home', 'gallery']
+const navTabsVisible = computed(() => NAV_TABS.filter(t => !isNarrow.value || NAV_TABS_CORE.includes(t.id)))
+
 // 进度环：用 conic-gradient 模拟（indeterminate 时走 CSS 旋转动画）
 function ringStyle(p) {
   if (p < 0) return {}
@@ -152,7 +161,7 @@ async function setScrapeFilter(taskId, f) {
 
     <nav class="main-tabs" aria-label="主导航">
       <button
-        v-for="t in NAV_TABS"
+        v-for="t in navTabsVisible"
         :key="t.id"
         class="tab"
         :class="{ active: state.view === t.id }"
@@ -165,10 +174,9 @@ async function setScrapeFilter(taskId, f) {
       <input
         ref="searchEl"
         v-model="kw"
-        type="search"
+        type="text"
         :placeholder="semantic && aiEnabled ? $t('tasks.semanticOn') : $t('tasks.searchPlaceholder')"
         @keydown.enter="submit"
-        @search="submit"
       />
       <button
         v-if="aiEnabled"
@@ -192,7 +200,7 @@ async function setScrapeFilter(taskId, f) {
           :data-tip="$t('tasks.center')"
         >
           <span v-if="anyRunning" class="spinner"></span>
-          <span v-else class="ico">≣</span>
+          <span v-else class="ico">🗂</span>
           <span v-if="anyRunning" class="pctn">{{ overallPct }}%</span>
         </button>
 
@@ -406,7 +414,11 @@ async function setScrapeFilter(taskId, f) {
   background: var(--c-surface-2, #161a22);
   border: 1px solid var(--c-line, #232833);
   border-radius: var(--r-pill, 999px);
+  overflow-x: auto;
+  scrollbar-width: none;
+  max-width: 100%;
 }
+.main-tabs::-webkit-scrollbar { display: none; }
 .tab {
   appearance: none;
   border: 0;
@@ -420,15 +432,13 @@ async function setScrapeFilter(taskId, f) {
   cursor: pointer;
   transition: background .15s, color .15s;
   white-space: nowrap;
+  flex: 0 0 auto;
 }
 .tab:hover { color: var(--c-text, #e8ebf0); background: var(--c-surface-3, #1e232e); }
 .tab.active {
   color: #fff;
   background: linear-gradient(180deg, var(--c-primary, #4f8cff), var(--c-primary-2, #3a6fd8));
   box-shadow: 0 1px 6px rgba(79,140,255,.35);
-}
-@media (max-width: 900px) {
-  .main-tabs { display: none; }
 }
 
 .search .clr {
@@ -704,7 +714,22 @@ async function setScrapeFilter(taskId, f) {
 .tp-hist-body { padding: 0 var(--sp-3) var(--sp-2); }
 
 @media (max-width: 900px) {
-  .task-pop { width: calc(100vw - 24px); }
+  /* 任务中心在手机上改为视口级浮层（fixed），避免基于右上角按钮定位溢出屏幕 */
+  .task-pop {
+    position: fixed;
+    width: auto;
+    left: 12px; right: 12px;
+    top: 60px;
+    max-height: min(82vh, 680px);
+  }
+  /* 内部进度区在窄屏防止挤压 */
+  .tp-current { word-break: break-word; }
+  .tp-actions { flex-wrap: wrap; }
+  .tp-foot { flex-wrap: wrap; }
+}
+@media (max-width: 480px) {
+  .task-pop { left: 8px; right: 8px; top: 56px; max-height: 86vh; }
+  .tp-head b { font-size: var(--fs-sm); }
 }
 
 </style>

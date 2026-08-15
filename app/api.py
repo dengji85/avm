@@ -6,6 +6,7 @@ import csv
 import copy
 import io
 import os
+import socket
 import platform
 import string
 import subprocess
@@ -13,6 +14,8 @@ import threading
 import json
 import sys
 import hashlib
+import tempfile
+import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -20,12 +23,15 @@ from fastapi import APIRouter, Body, File, HTTPException, Query, Request, Upload
 from fastapi.responses import FileResponse, PlainTextResponse, Response, StreamingResponse
 
 from . import ai as ai_mod
-from . import dedupe, images, nfo as nfo_mod, providers, scanner, scraper, store
+from . import dedupe, images, nfo as nfo_mod, providers, scanner, scraper, store, subtitles
 from .config import COVER_DIR, DATA_DIR, avatar_dir, _deep_merge, load_config, update_config
 from .db import connect, db, query_all, query_one
 from .jobs import SCAN, SCRAPE
 
 router = APIRouter(prefix="/api")
+
+# 当前程序版本（与发布版本保持一致）。
+APP_VERSION = "1.9.0"
 
 
 # ------------------------------------------------------------------ 影片列表
@@ -981,6 +987,200 @@ def put_config(payload: Dict[str, Any] = Body(default={})) -> Dict[str, Any]:
     return update_config(payload)
 
 
+def _lan_addresses() -> List[str]:
+    """返回本机所有非回环 IPv4 地址（供局域网访问展示）。"""
+    addrs: List[str] = []
+    try:
+        for info in socket.getaddrinfo(socket.gethostname(), None):
+            if info[0] == socket.AF_INET:
+                ip = info[4][0]
+                if ip and not ip.startswith("127.") and ip not in addrs:
+                    addrs.append(ip)
+    except Exception:
+        pass
+    # 兜底：UDP 探测本机对外 IP
+    if not addrs:
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(("8.8.8.8", 80))
+            ip = s.getsockname()[0]
+            if ip and not ip.startswith("127."):
+                addrs.append(ip)
+        except Exception:
+            pass
+        finally:
+            s.close()
+    # 排序：把大概率是虚拟化/容器网桥的网段（172.16/12、链路本地 169.254）排到最后，
+    # 让真正的局域网地址（如 192.168.x / 10.x / 143.168.x 等）排在前面，二维码默认更可能正确。
+    def _rank(ip: str) -> int:
+        if ip.startswith("169.254."):
+            return 2
+        if ip.startswith("172."):
+            oct2 = ip.split(".")[1]
+            if oct2.isdigit() and 16 <= int(oct2) <= 31:
+                return 2
+        return 0
+    return sorted(addrs, key=_rank)
+
+
+@router.get("/server/info")
+def server_info() -> Dict[str, Any]:
+    """返回访问令牌与监听信息（供前端设置页展示）。"""
+    from .config import ensure_access_token
+    cfg = load_config(refresh=True)
+    host = cfg.get("server", {}).get("host", "127.0.0.1")
+    port = cfg.get("server", {}).get("port", 8770)
+    tok = ensure_access_token()
+    lan = _lan_addresses()
+    local_url = f"http://127.0.0.1:{port}/"
+    urls = [local_url]
+    for ip in lan:
+        urls.append(f"http://{ip}:{port}/?token={tok}")
+    return {
+        "host": host,
+        "port": port,
+        "access_token": tok,
+        "require_token_remote": cfg.get("server", {}).get("require_token_remote", True),
+        "lan_addresses": lan,
+        "access_urls": urls,
+        "local_url": local_url,
+        "app_version": APP_VERSION,
+        "update_feed": cfg.get("server", {}).get("update_feed", ""),
+    }
+
+
+def _parse_version(v: str) -> List[int]:
+    """把 '1.9.0' 之类版本号解析为可比大小的整数元组（忽略非数字尾）。"""
+    out: List[int] = []
+    for part in str(v or "").split("."):
+        num = ""
+        for ch in part:
+            if ch.isdigit():
+                num += ch
+            else:
+                break
+        out.append(int(num) if num else 0)
+    return out
+
+
+def _newer(ver: str, base: str) -> bool:
+    """ver 是否比 base 更新（按数字段逐个比较）。"""
+    a, b = _parse_version(ver), _parse_version(base)
+    n = max(len(a), len(b))
+    a += [0] * (n - len(a))
+    b += [0] * (n - len(b))
+    return a > b
+
+
+@router.get("/server/check-update")
+def check_update(channel: str = Query("stable")) -> Dict[str, Any]:
+    """检查是否有新版本。
+
+    从配置 server.update_feed 指向的版本清单读取最新版本信息，与当前版本比较。
+    两种来源自动识别：
+      1) GitHub Releases API（如 https://api.github.com/repos/owner/repo/releases/latest）：
+         解析 tag_name(版本，自动去 v 前缀) / html_url(发布页) / body(更新说明) /
+         published_at(日期)。发版即在 git 打 tag 并创建 Release 即可生效。
+      2) 自建版本清单 JSON：{"version": "1.9.1", "channel": "stable",
+         "download_url": "...", "released": "2026-08-15", "notes": "..."}
+    若未配置 feed 或拉取失败，则仅返回当前版本（update_available=False）。
+    """
+    cfg = load_config(refresh=True)
+    feed_url = (cfg.get("server", {}).get("update_feed") or "").strip()
+    result: Dict[str, Any] = {
+        "current": APP_VERSION,
+        "channel": channel,
+        "update_available": False,
+        "latest": APP_VERSION,
+        "download_url": "",
+        "released": "",
+        "notes": "",
+        "error": "",
+    }
+    if not feed_url:
+        result["error"] = "未配置更新源 (server.update_feed)"
+        return result
+    try:
+        import requests
+        resp = requests.get(feed_url, timeout=8, headers={"User-Agent": "AVM-update-check"})
+        resp.raise_for_status()
+        feed = resp.json()
+    except Exception as e:  # noqa: BLE001
+        result["error"] = f"无法获取更新信息：{e}"
+        return result
+
+    latest = ""
+    download_url = ""
+    released = ""
+    notes = ""
+    feed_channel = channel
+    if isinstance(feed, dict) and feed.get("tag_name"):
+        # GitHub Releases 结构
+        tag = str(feed.get("tag_name") or "")
+        latest = tag[1:] if tag.startswith("v") or tag.startswith("V") else tag
+        download_url = feed.get("html_url") or ""
+        notes = feed.get("body") or ""
+        published = feed.get("published_at") or feed.get("created_at") or ""
+        if published:
+            released = published[:10]  # 取 YYYY-MM-DD
+        prerelease = feed.get("prerelease", False)
+        draft = feed.get("draft", False)
+        if prerelease or draft:
+            feed_channel = "beta"  # 预发布/草稿不参与 stable 更新判定
+    else:
+        # 通用版本清单 JSON
+        latest = str(feed.get("version") or APP_VERSION)
+        download_url = feed.get("download_url", "")
+        released = feed.get("released", "")
+        notes = feed.get("notes", "")
+        feed_channel = feed.get("channel", channel)
+
+    result["latest"] = latest or APP_VERSION
+    result["download_url"] = download_url
+    result["released"] = released
+    result["notes"] = notes
+    if feed_channel == channel and _newer(latest, APP_VERSION):
+        result["update_available"] = True
+    return result
+
+
+@router.get("/server/qr")
+def server_qr(addr: str = "", size: int = 220) -> Response:
+    """生成访问二维码（含 token 的局域网地址），返回 PNG。
+
+    addr 可为空（默认取首个局域网地址）、主机名/IP，或完整 URL。
+    """
+    from .config import ensure_access_token
+    cfg = load_config(refresh=True)
+    port = cfg.get("server", {}).get("port", 8770)
+    tok = ensure_access_token()
+    if addr:
+        if addr.startswith("http://") or addr.startswith("https://"):
+            text = addr
+        else:
+            text = f"http://{addr}:{port}/?token={tok}"
+    else:
+        lan = _lan_addresses()
+        text = f"http://{lan[0] if lan else '127.0.0.1'}:{port}/?token={tok}" if lan else f"http://127.0.0.1:{port}/"
+    import qrcode
+    qr = qrcode.QRCode(box_size=8, border=2, error_correction=qrcode.constants.ERROR_CORRECT_M)
+    qr.add_data(text)
+    qr.make(fit=True)
+    img = qr.make_image(fill_color="#111", back_color="#fff")
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return Response(content=buf.getvalue(), media_type="image/png")
+
+
+@router.post("/server/reset-token")
+def reset_token() -> Dict[str, Any]:
+    """重置访问令牌（留空后由 ensure_access_token 生成新值）。"""
+    from .config import ensure_access_token
+    update_config({"server": {"access_token": ""}})
+    tok = ensure_access_token()
+    return {"access_token": tok}
+
+
 @router.get("/fs/list")
 def fs_list(path: str = Query("")) -> Dict[str, Any]:
     """给设置页做目录选择用。path 为空时返回盘符 / 根目录。"""
@@ -1201,3 +1401,78 @@ def health() -> Dict[str, Any]:
         "scan_running": SCAN.running,
         "scrape_running": SCRAPE.running,
     }
+
+
+# ------------------------------------------------------------------ 字幕匹配与对齐
+
+
+@router.get("/movies/{movie_id}/subtitles")
+def list_movie_subtitles(movie_id: int) -> List[Dict[str, Any]]:
+    with db() as conn:
+        if not store.movie_detail(conn, movie_id):
+            raise HTTPException(404, "影片不存在")
+        return subtitles.list_subtitles(conn, movie_id)
+
+
+@router.post("/subtitles/match")
+def match_subtitles(payload: Dict[str, Any] = Body(default={})) -> Dict[str, Any]:
+    """扫描字幕包目录，按番号匹配库内影片（仅探测，不改磁盘/库）。"""
+    directory = str(payload.get("directory", "")).strip()
+    if not directory or not os.path.isdir(directory):
+        raise HTTPException(400, "请提供有效的字幕目录")
+    with db() as conn:
+        return subtitles.match_subtitles_to_movies(conn, directory)
+
+
+@router.post("/subtitles/upload-and-match")
+async def upload_and_match_subtitles(files: List[UploadFile] = File(default=[])) -> Dict[str, Any]:
+    """前端用 <input type=file multiple> 选择字幕文件，上传后在服务端做匹配。
+
+    文件先落到临时目录，再按番号匹配库内影片；不改写原上传文件，仅探测。
+    """
+    if not files:
+        raise HTTPException(400, "请选择字幕文件")
+    tmp_dir = Path(tempfile.gettempdir()) / "avm_subs"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    saved: List[str] = []
+    for f in files:
+        suffix = os.path.splitext(f.filename or "")[1].lower()
+        if suffix not in subtitles.SUBTITLE_EXTS:
+            continue
+        dest = tmp_dir / f"{uuid.uuid4().hex}{suffix}"
+        data = await f.read()
+        dest.write_bytes(data)
+        saved.append(str(dest))
+    if not saved:
+        raise HTTPException(400, "未识别到字幕文件（支持 srt/ass/ssa/vtt/sub/smi/txt）")
+    with db() as conn:
+        res = subtitles.match_subtitle_files(conn, saved)
+    res["uploaded"] = saved
+    return res
+
+
+@router.post("/subtitles/align")
+def align_subtitles(payload: Dict[str, Any] = Body(default={})) -> Dict[str, Any]:
+    """把字幕对齐到影片：重命名/复制到视频同目录，并登记数据库。
+
+    body: { items: [{ subtitle_path, movie_id }], copy?: bool }
+    对每个条目执行，并返回每个条目的对齐结果。
+    """
+    items = payload.get("items") or []
+    if not isinstance(items, list) or not items:
+        raise HTTPException(400, "items 不能为空")
+    copy = bool(payload.get("copy", False))
+    results = []
+    with db() as conn:
+        for it in items:
+            sp = str(it.get("subtitle_path", "")).strip()
+            mid = int(it.get("movie_id", 0))
+            if not sp or not mid:
+                results.append({"ok": False, "error": "参数缺失", "subtitle_path": sp})
+                continue
+            try:
+                res = subtitles.align_subtitle(conn, sp, mid, copy=copy)
+                results.append({"ok": True, **res})
+            except Exception as e:  # noqa: BLE001
+                results.append({"ok": False, "error": str(e), "subtitle_path": sp})
+    return {"ok": True, "results": results}

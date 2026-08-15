@@ -24,6 +24,7 @@ const playing = ref(false)
 const previews = ref([])
 const pvLoading = ref(false)
 const similar = ref([])
+const pendingAutoplay = ref(false)
 const editing = ref(false)
 const draft = ref({})
 const lightbox = ref('')
@@ -125,6 +126,10 @@ async function setRating(v) {
 async function play() {
   try { await playMovie(id.value); toast(t('player.launchedExternal'), 'ok') }
   catch (e) { toast(e.message, 'err') }
+}
+function playSimilar(s) {
+  state.currentId = s.id
+  pendingAutoplay.value = true
 }
 
 // 详情页「重新刮削」复用批量刮削任务管线，进度会出现在右上角任务中心。
@@ -421,7 +426,16 @@ function filterByTag(tag) {
 }
 
 /* ---------- 生命周期 ---------- */
-watch(id, (v) => { if (v) { bust.value = Date.now(); load() } })
+watch(id, async (v) => {
+  if (v) {
+    bust.value = Date.now()
+    await load()
+    if (pendingAutoplay.value) {
+      pendingAutoplay.value = false
+      playing.value = true
+    }
+  }
+})
 watch(tab, (t) => {
   if (t === 'preview' && !previews.value.length) loadPreviews(false)
 })
@@ -517,6 +531,9 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', onKey); document.r
                   <span v-if="quality" class="badge accent">{{ quality }}</span>
                   <span v-if="mv.vr" class="badge">VR</span>
                   <span v-if="mv.leak" class="badge err">{{ $t('detail.leak') }}</span>
+                  <span v-for="s in (mv.subtitles || [])" :key="s.id" class="badge sub" :title="s.path">
+                    {{ $t('detail.subFile', { lang: s.lang || '字幕' }) }}
+                  </span>
                 </div>
 
                 <!-- 关键信息 -->
@@ -708,6 +725,7 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', onKey); document.r
             <div class="rail-list">
               <div v-for="s in similar" :key="s.id" class="sim" @click="state.currentId = s.id">
                 <img :src="coverThumbUrl(s.id, 220)" alt="" @error="coverFallback" />
+                <button class="sim-play" :title="$t('detail.playNow')" @click.stop="playSimilar(s)">▶</button>
                 <div class="sim-t ellipsis">{{ s.title || s.code }}</div>
               </div>
               <div v-if="!similar.length" class="empty small"><div class="icon">≈</div><div class="desc">{{ $t('detail.noSimilar') }}</div></div>
@@ -730,7 +748,7 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', onKey); document.r
 .dh-title { font-size: var(--fs-lg); font-weight: 600; flex: 1; min-width: 0; }
 
 /* 主体：左主区 + 右相似推荐侧栏，常驻并排 */
-.drawer-body { display: flex; flex-direction: row; overflow: hidden; }
+.drawer-body { display: flex; flex-direction: row; overflow: hidden; flex: 1; min-height: 0; }
 .dd-content { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; overflow-y: auto; }
 .dd-similar-rail {
   flex: none; width: 300px;
@@ -854,11 +872,24 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', onKey); document.r
 .sim img { width: 100%; aspect-ratio: 2/3; object-fit: cover; border-radius: var(--r-sm); background: var(--c-surface-2); transition: transform var(--t-base); }
 .sim:hover img { transform: translateY(-2px); box-shadow: var(--sh-2); }
 .sim-t { font-size: var(--fs-xs); color: var(--c-text-2); margin-top: 4px; }
+.sim-play {
+  position: absolute; top: 6px; right: 6px;
+  width: 30px; height: 30px; border: 0; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(0, 0, 0, 0.55); color: #fff; font-size: 13px; line-height: 1;
+  cursor: pointer; opacity: 0; transform: scale(0.9); transition: opacity var(--t-base), transform var(--t-base);
+  backdrop-filter: blur(2px);
+}
+.sim { position: relative; }
+.sim:hover .sim-play, .sim:focus-within .sim-play { opacity: 1; transform: scale(1); }
+.sim-play:hover { background: var(--c-accent, #e0457b); }
+@media (hover: none) { .sim-play { opacity: 1; transform: scale(1); } }
 
-/* 窄屏：相似推荐侧栏移到主区下方，全宽 */
+/* 窄屏：相似推荐侧栏移到主区下方，全宽；各自独立滚动，避免覆盖/重叠 */
 @media (max-width: 1100px) {
   .drawer-body { flex-direction: column; }
-  .dd-similar-rail { width: auto; border-left: 0; border-top: 1px solid var(--c-line); }
+  .dd-content { flex: 1 1 auto; min-height: 0; }
+  .dd-similar-rail { flex: none; width: auto; border-left: 0; border-top: 1px solid var(--c-line); max-height: 42vh; }
   .rail-list { flex-direction: row; flex-wrap: wrap; }
   .rail-list .sim { width: 112px; }
 }
@@ -891,6 +922,15 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', onKey); document.r
   .dd-top { flex-direction: column; }
   .dd-cover { width: 160px; }
   .edit-form .two { grid-template-columns: 1fr; }
+}
+
+/* 极窄屏（竖屏手机）：缩小封面与内边距，播放器铺满，避免横向溢出 */
+@media (max-width: 480px) {
+  .dd-top { gap: var(--sp-3); }
+  .dd-cover { width: 120px; }
+  .dd-content { padding: var(--sp-3) var(--sp-3) var(--sp-10); }
+  .dd-actions { gap: var(--sp-1); }
+  .dd-actions .act { flex: 1 1 auto; }
 }
 
 /* 头部按钮贴近 drawer 顶边，tooltip 改为朝下显示，避免被顶边裁切 */

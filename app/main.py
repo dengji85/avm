@@ -2,14 +2,17 @@
 """FastAPI 应用装配。"""
 from __future__ import annotations
 
-from fastapi import FastAPI
+import time
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.types import Scope, Receive, Send
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import __version__
 from .api import router
-from .config import WEB_DIR, ensure_dirs, DATA_DIR, CONFIG_PATH
+from .config import WEB_DIR, ensure_dirs, DATA_DIR, CONFIG_PATH, load_config, ensure_access_token
 from .db import init_db
 
 app = FastAPI(title="片匣 · 本地 AV 收藏管理", version=__version__, docs_url="/api/docs")
@@ -21,6 +24,55 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+_LOCAL_ADDRS = {"127.0.0.1", "::1", "localhost", "testclient"}
+
+# 路由判断：这些路径无需令牌即可访问（静态资源、首页、健康检查、接口文档）
+_PUBLIC_PREFIXES = ("/assets", "/api/health", "/api/docs", "/api/openapi.json")
+
+
+def _is_local(scope: Scope) -> bool:
+    host = (scope.get("client") or ("", 0))[0] or ""
+    return host in _LOCAL_ADDRS
+
+
+def _token_valid(scope: Scope, cfg_token: str) -> bool:
+    if not cfg_token:
+        return True  # 未启用令牌，等同于关闭保护
+    headers = scope.get("headers") or []
+    hmap = {k.decode("latin-1").lower(): v.decode("latin-1") for k, v in headers}
+    provided = hmap.get("x-access-token")
+    if not provided:
+        # 兼容 ?token=xxx
+        qs = scope.get("query_string", b"").decode("latin-1")
+        for pair in qs.split("&"):
+            if pair.startswith("token="):
+                provided = pair.split("=", 1)[1]
+                break
+    return provided == cfg_token
+
+
+class AccessTokenMiddleware(BaseHTTPMiddleware):
+    """远程访问强制带访问令牌；本机 127.0.0.1 与公开资源豁免。"""
+
+    async def dispatch(self, request: Request, call_next):
+        path = request.url.path
+        if path.startswith(_PUBLIC_PREFIXES) or path == "/" or path == "/index.html":
+            return await call_next(request)
+        cfg = load_config()
+        if not cfg.get("server", {}).get("require_token_remote", True):
+            return await call_next(request)
+        if _is_local(request.scope):
+            return await call_next(request)
+        tok = (cfg.get("server", {}).get("access_token") or "").strip()
+        if _token_valid(request.scope, tok):
+            return await call_next(request)
+        return JSONResponse(
+            status_code=401,
+            content={"detail": "需要访问令牌", "code": "NO_TOKEN"},
+        )
+
+
+app.add_middleware(AccessTokenMiddleware)
 app.include_router(router)
 
 
@@ -75,6 +127,65 @@ def _startup() -> None:
     init_db()
     _backup_database()
     _record_version()
+    tok = ensure_access_token()
+    cfg = load_config()
+    host = cfg.get("server", {}).get("host", "127.0.0.1")
+    if host in ("0.0.0.0", ""):
+        print("=" * 48)
+        print("远程访问已开启，局域网设备需携带访问令牌：")
+        print("  " + tok)
+        print("前端设置页可查看/重置令牌；本机 127.0.0.1 访问免令牌。")
+        print("=" * 48)
+    _start_auto_scan()
+
+
+def _start_auto_scan() -> None:
+    """后台定时增量扫描：按 library.auto_scan_interval（分钟）轮询媒体库。
+
+    复用 scanner.run_scan(incremental=True) 的增量能力（仅处理新增/变更文件），
+    与手动扫描共享 SCAN 锁，避免并发写库冲突。间隔为 0 时不启动。
+    """
+    import threading
+
+    from . import scanner
+    from .api import SCAN
+
+    def _loop() -> None:
+        while True:
+            interval = int(load_config().get("library", {}).get("auto_scan_interval", 0) or 0)
+            if interval <= 0:
+                # 未启用：睡眠较长后重试（配置可能在运行时被打开）
+                time.sleep(60)
+                continue
+            # 睡眠间隔（秒），按分钟换算
+            time.sleep(interval * 60)
+            try:
+                if SCAN.running:
+                    continue  # 手动扫描进行中，跳过本轮
+                if not (load_config().get("library", {}).get("paths") or []):
+                    continue  # 还没配置扫描目录
+                if not SCAN.start():
+                    continue
+                def _run():
+                    try:
+                        scanner.run_scan(
+                            progress_cb=SCAN.update,
+                            incremental=True,
+                            auto_cleanup=True,
+                        )
+                        SCAN.finish("自动扫描完成")
+                    except Exception as e:  # noqa: BLE001
+                        SCAN.error(str(e))
+                        SCAN.finish("自动扫描失败：" + str(e))
+                threading.Thread(target=_run, daemon=True).start()
+            except Exception:  # noqa: BLE001
+                try:
+                    SCAN.cancel()
+                except Exception:
+                    pass
+
+    t = threading.Thread(target=_loop, name="auto-scan", daemon=True)
+    t.start()
 
 
 @app.exception_handler(Exception)
