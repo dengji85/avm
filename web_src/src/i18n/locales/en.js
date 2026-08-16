@@ -797,7 +797,7 @@ export default {
     tipCsv: 'Export fallback: "Data export" below can export metadata as CSV as a plain-text backup.',
     aboutTitle: 'About',
     brand: 'AVM (片匣)',
-    aboutSub: 'Local AV collection manager',
+    aboutSub: 'A local-first AV collection manager — organize, scrape, analyze, and turn playlists into a clear read on your taste.',
     aboutLocal: 'All data is stored locally and never uploaded to any server.',
     curVersion: 'Current version',
     buildDate: 'Build date',

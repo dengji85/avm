@@ -797,7 +797,7 @@ export default {
     tipCsv: '匯出兜底：下方「資料匯出」可把中繼資料匯出為 CSV，作為純文字備份。',
     aboutTitle: '關於',
     brand: '片匣 (AVM)',
-    aboutSub: '本地 AV 收藏管理工具',
+    aboutSub: '本地優先的 AV 收藏管理工具——整理、刮削、統計、分析、片單，一站式讀懂你的口味。',
     aboutLocal: '所有資料均保存在本地，不會上傳到任何伺服器。',
     curVersion: '當前版本',
     buildDate: '編譯日期',

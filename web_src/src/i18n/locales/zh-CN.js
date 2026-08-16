@@ -808,7 +808,7 @@ export default {
     tipCsv: '导出兜底：下方「数据导出」可把元数据导出为 CSV，作为纯文本备份。',
     aboutTitle: '关于',
     brand: '片匣 (AVM)',
-    aboutSub: '本地 AV 收藏管理工具',
+    aboutSub: '本地优先的 AV 收藏管理工具——整理、刮削、统计、分析、片单，一站式读懂你的口味。',
     aboutLocal: '所有数据均保存在本地，不会上传到任何服务器。',
     curVersion: '当前版本',
     buildDate: '编译日期',
