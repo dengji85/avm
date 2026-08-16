@@ -2,9 +2,11 @@
 """数据访问层：影片的增删改查、分类归并、检索与统计。"""
 from __future__ import annotations
 
+from datetime import datetime
 import json
 import re
 import sqlite3
+import unicodedata
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from . import subtitles
@@ -55,6 +57,17 @@ FLAG_CLAUSES = {
 
 def norm_name(name: Any) -> str:
     return re.sub(r"\s+", " ", str(name or "")).strip()
+
+
+def _smart_code(s: Any) -> str:
+    """番号智能归一：全角转半角、转小写、去掉 - _ 空格 等分隔符。
+    这样 'MMC-004' / 'mmc004' / 'ＭＭＣ004' 都能互相命中。"""
+    if not s:
+        return ""
+    s = unicodedata.normalize("NFKC", str(s))
+    s = s.lower()
+    s = re.sub(r"[\s\-_/．.。·]", "", s)
+    return s
 
 
 # 分辨率质量排序，用于同番号多版本里挑选「最佳版」
@@ -121,11 +134,11 @@ def upsert_scanned_file(conn: sqlite3.Connection, parsed: Dict[str, Any],
     movie = query_one(conn, "SELECT * FROM movies WHERE key = ?", (parsed["key"],))
     if movie is None:
         cur = conn.execute(
-            """INSERT INTO movies(key, code, has_code, code_rule, title, folder,
+            """INSERT INTO movies(key, code, code_norm, has_code, code_rule, title, folder,
                                   subtitle, uncensored, leak, hd4k, vr, resolution)
-               VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
-                parsed["key"], parsed["code"], parsed["has_code"], parsed["code_rule"],
+                parsed["key"], parsed["code"], _smart_code(parsed["code"]), parsed["has_code"], parsed["code_rule"],
                 parsed["title"], parsed["folder"], parsed["subtitle"],
                 parsed["uncensored"], parsed["leak"], parsed["hd4k"], parsed["vr"],
                 parsed["resolution"],
@@ -214,7 +227,9 @@ SELECT m.id, m.key, m.code, m.has_code, m.title, m.original_title, m.release_dat
           JOIN genres g ON g.id = mg.genre_id WHERE mg.movie_id = m.id) AS genre_str,
        COALESCE(wp.position, 0) AS progress_seconds,
        COALESCE(wp.duration, 0) AS duration_seconds,
-       COALESCE(wp.finished, 0) AS progress_finished
+       COALESCE(wp.finished, 0) AS progress_finished,
+       (SELECT COUNT(*) FROM movie_files f
+          WHERE f.movie_id = m.id AND COALESCE(f.missing, 0) = 0) AS playable_cnt
 FROM movies m
 LEFT JOIN studios st ON st.id = m.studio_id
 LEFT JOIN series  se ON se.id = m.series_id
@@ -230,14 +245,17 @@ def _build_where(params: Dict[str, Any]) -> Tuple[str, List[Any]]:
     q = norm_name(params.get("q"))
     if q:
         like = f"%{q}%"
+        code_like = f"%{_smart_code(q)}%"
         clauses.append(
-            "(m.code LIKE ? OR m.title LIKE ? OR m.original_title LIKE ? OR m.plot LIKE ?"
+            "(m.code_norm LIKE ?"
+            " OR m.title LIKE ? OR m.original_title LIKE ? OR m.plot LIKE ?"
             " OR m.director LIKE ? OR m.folder LIKE ?"
             " OR EXISTS(SELECT 1 FROM movie_actress ma JOIN actresses a ON a.id = ma.actress_id"
             "           WHERE ma.movie_id = m.id AND a.name LIKE ?)"
             " OR EXISTS(SELECT 1 FROM movie_files f WHERE f.movie_id = m.id AND f.filename LIKE ?))"
         )
-        args.extend([like] * 8)
+        args.append(code_like)
+        args.extend([like] * 7)
 
     for kind in ("actress", "genre", "tag"):
         sub = _multi_clause(kind, params.get(kind), op, args)
@@ -326,6 +344,7 @@ def _row_to_card(row: Dict[str, Any]) -> Dict[str, Any]:
     row["studio"] = row.get("studio") or ""
     row["series"] = row.get("series") or ""
     row["watchlist"] = int(row.get("watchlist") or 0)
+    row["playable"] = int(row.get("playable_cnt") or 0) > 0
     row["display_code"] = row["code"] if row["has_code"] else ""
     return row
 
@@ -478,6 +497,157 @@ def watch_analytics(conn: sqlite3.Connection) -> Dict[str, Any]:
         FROM watch_sessions s JOIN movies m ON m.id=s.movie_id
         GROUP BY m.id ORDER BY total_sec DESC LIMIT 12""")
 
+    # 播放方式分布
+    by_method = [{'method': x['method'] or 'external', 'sessions': int(x['c']),
+                  'sec': float(x['ws'])}
+                 for x in query_all(conn,
+                 "SELECT method, COUNT(*) AS c, COALESCE(SUM(watched_sec),0) AS ws "
+                 "FROM watch_sessions GROUP BY method ORDER BY c DESC")]
+
+    # 月度趋势（观看时长）
+    by_month = [{'month': x['ym'], 'sessions': int(x['c']), 'sec': float(x['ws'])}
+                for x in query_all(conn,
+                "SELECT strftime('%Y-%m', started_at) AS ym, COUNT(*) AS c, "
+                "COALESCE(SUM(watched_sec),0) AS ws FROM watch_sessions "
+                "GROUP BY ym ORDER BY ym")]
+
+    # ---- 完成度与复看 ----
+    comp = query_one(conn, """
+        SELECT
+            COUNT(*) AS sessions,
+            SUM(CASE WHEN finished=1 THEN 1 ELSE 0 END) AS finished_s,
+            COALESCE(SUM(s.watched_sec),0) AS ws,
+            COALESCE(SUM(CASE WHEN m.runtime>0 THEN s.watched_sec END),0) AS ws_with_rt,
+            COALESCE(SUM(CASE WHEN m.runtime>0 THEN m.runtime*60.0 END),0) AS rt_total
+        FROM watch_sessions s
+        LEFT JOIN movies m ON m.id=s.movie_id""") or {}
+    sessions_n = int(comp.get('sessions') or 0)
+    finished_n = int(comp.get('finished_s') or 0)
+    overall_rate = (float(comp.get('ws_with_rt') or 0) /
+                    float(comp.get('rt_total') or 1)) if comp.get('rt_total') else 0.0
+    completion = {
+        'finish_rate': (finished_n / sessions_n) if sessions_n else 0.0,
+        'avg_completion': min(1.0, overall_rate),
+    }
+
+    # 复看：每片被看次数，含二刷及以上占比
+    rew = query_all(conn,
+        "SELECT movie_id, COUNT(*) AS c FROM watch_sessions GROUP BY movie_id")
+    movie_count = len(rew)
+    rewatched = [r for r in rew if int(r['c']) >= 2]
+    avg_rewatch = (sum(int(r['c']) for r in rew) / movie_count) if movie_count else 0.0
+    rewatch = {
+        'rewatched_movies': len(rewatched),
+        'rewatch_rate': (len(rewatched) / movie_count) if movie_count else 0.0,
+        'avg_sessions_per_movie': avg_rewatch,
+        'top': [{'movie_id': r['movie_id'], 'sessions': int(r['c'])}
+                for r in sorted(rew, key=lambda x: -int(x['c']))[:10]],
+    }
+
+    # ---- 星期节律 ----
+    by_weekday = []
+    for r in query_all(conn,
+        "SELECT CAST(strftime('%w', started_at) AS INTEGER) AS wd, "
+        "COUNT(*) AS c, COALESCE(SUM(watched_sec),0) AS ws "
+        "FROM watch_sessions GROUP BY wd ORDER BY wd"):
+        by_weekday.append({'wd': int(r['wd']), 'sessions': int(r['c']),
+                           'sec': float(r['ws'])})
+    # 工作日为 1-5，周末 0,6
+    work_s = sum(x['sec'] for x in by_weekday if x['wd'] in (1, 2, 3, 4, 5))
+    week_s = sum(x['sec'] for x in by_weekday if x['wd'] in (0, 6))
+    weekday_split = {'workday_sec': work_s, 'weekend_sec': week_s,
+                     'ratio': (work_s / week_s) if week_s else (1.0 if work_s else 0.0)}
+
+    # ---- 连续打卡 / 空窗 ----
+    days = sorted({r['d'] for r in query_all(conn,
+        "SELECT DATE(started_at) AS d FROM watch_sessions")})
+    streak_cur = streak_max = 0
+    gap_max = 0
+    if days:
+        streak_cur = streak_max = 1
+        max_gap = None
+        for i in range(1, len(days)):
+            d0 = datetime.strptime(days[i - 1], '%Y-%m-%d')
+            d1 = datetime.strptime(days[i], '%Y-%m-%d')
+            delta = (d1 - d0).days
+            if delta == 1:
+                streak_cur += 1
+                streak_max = max(streak_max, streak_cur)
+            else:
+                streak_cur = 1
+                if max_gap is None or delta > max_gap:
+                    max_gap = delta
+        gap_max = max_gap or 0
+    # 当前连续（从最近一天往前数）
+    streak_now = 0
+    if days:
+        streak_now = 1
+        for i in range(len(days) - 1, 0, -1):
+            d0 = datetime.strptime(days[i - 1], '%Y-%m-%d')
+            d1 = datetime.strptime(days[i], '%Y-%m-%d')
+            if (d1 - d0).days == 1:
+                streak_now += 1
+            else:
+                break
+    streak = {'current': streak_now, 'max': streak_max, 'longest_gap_days': gap_max}
+
+    # ---- 近 12 周 vs 前 12 周 活跃度 ----
+    wk = query_all(conn,
+        "SELECT strftime('%Y-W%W', started_at) AS yw, "
+        "COUNT(*) AS c, COALESCE(SUM(watched_sec),0) AS ws "
+        "FROM watch_sessions GROUP BY yw ORDER BY yw")
+    if len(wk) >= 2:
+        half = len(wk) // 2
+        recent_ws = sum(float(x['ws']) for x in wk[half:])
+        older_ws = sum(float(x['ws']) for x in wk[:half]) or 1
+        trend = {'recent_sec': recent_ws,
+                 'older_sec': sum(float(x['ws']) for x in wk[:half]),
+                 'growth': (recent_ws / older_ws) - 1.0}
+    else:
+        trend = {'recent_sec': 0.0, 'older_sec': 0.0, 'growth': 0.0}
+
+    # ---- 偏好 × 内容 结合分析（需 join movies 属性）----
+    def join_agg(sql):
+        return query_all(conn, sql)
+
+    # 评分档 × 平均观看时长/次数
+    rating_x = []
+    for r in join_agg(
+        "SELECT CASE WHEN m.rating>=4 THEN '4-5' WHEN m.rating>=3 THEN '3-4' "
+        "WHEN m.rating>0 THEN '1-3' ELSE 'unrated' END AS band, "
+        "COUNT(*) AS c, COALESCE(SUM(s.watched_sec),0) AS ws "
+        "FROM watch_sessions s JOIN movies m ON m.id=s.movie_id GROUP BY band"):
+        rating_x.append({'band': r['band'], 'sessions': int(r['c']),
+                         'sec': float(r['ws']),
+                         'avg_sec': (float(r['ws']) / int(r['c'])) if r['c'] else 0.0})
+    # 无码 vs 有码
+    unc_x = []
+    for r in join_agg(
+        "SELECT CASE WHEN m.uncensored=1 THEN 'uncensored' ELSE 'censored' END AS k, "
+        "COUNT(*) AS c, COALESCE(SUM(s.watched_sec),0) AS ws, "
+        "COUNT(DISTINCT s.movie_id) AS mv FROM watch_sessions s "
+        "JOIN movies m ON m.id=s.movie_id GROUP BY k"):
+        unc_x.append({'key': r['k'], 'sessions': int(r['c']),
+                      'sec': float(r['ws']), 'movies': int(r['mv'])})
+    # 时长档位：观看分布 vs 库存量分布
+    def bucket(minutes):
+        if minutes <= 0:
+            return 'unknown'
+        if minutes < 40:
+            return 'lt40'
+        if minutes <= 90:
+            return '40_90'
+        return 'gt90'
+    watched_buckets = {'lt40': 0.0, '40_90': 0.0, 'gt90': 0.0, 'unknown': 0.0}
+    for r in join_agg(
+        "SELECT m.runtime AS rt, COALESCE(SUM(s.watched_sec),0) AS ws "
+        "FROM watch_sessions s JOIN movies m ON m.id=s.movie_id GROUP BY s.movie_id"):
+        watched_buckets[bucket(int(r['rt'] or 0))] += float(r['ws'] or 0)
+    library_buckets = {'lt40': 0, '40_90': 0, 'gt90': 0, 'unknown': 0}
+    for r in query_all(conn, "SELECT runtime FROM movies WHERE runtime>0"):
+        library_buckets[bucket(int(r['runtime'] or 0))] += 1
+    duration_profile = {'watched': watched_buckets, 'library': library_buckets}
+
     return {
         'total_sec': total_sec,
         'sessions': sessions,
@@ -487,10 +657,22 @@ def watch_analytics(conn: sqlite3.Connection) -> Dict[str, Any]:
         'last_at': tot.get('last_at'),
         'avg_session_sec': (total_sec / sessions) if sessions else 0,
         'by_hour': by_hour,
+        'by_method': by_method,
+        'by_month': by_month,
         'profile': {'genres': genres, 'actresses': actresses, 'studios': studios,
                     'series': series, 'directors': directors},
         'recent': [dict(r) for r in recent],
         'top_movies': [dict(r) for r in top_movies],
+        # 新增：完成度 / 复看 / 时间节律 / 结合分析
+        'completion': completion,
+        'rewatch': rewatch,
+        'by_weekday': by_weekday,
+        'weekday_split': weekday_split,
+        'streak': streak,
+        'trend': trend,
+        'rating_x': rating_x,
+        'uncensored_x': unc_x,
+        'duration_profile': duration_profile,
     }
 
 
@@ -683,6 +865,8 @@ def update_movie(conn: sqlite3.Connection, movie_id: int, payload: Dict[str, Any
     if "code" in payload:
         sets.append("has_code = ?")
         args.append(1 if norm_name(payload["code"]) else 0)
+        sets.append("code_norm = ?")
+        args.append(_smart_code(payload["code"]))
 
     for field, table in (("studio", "studios"), ("publisher", "studios"), ("series", "series")):
         if field in payload:
@@ -847,11 +1031,40 @@ def similar_movies(conn: sqlite3.Connection, movie_id: int, limit: int = 12) -> 
 
 # ----- 用户自建片单 -----
 
+# 系统预置片单：随影片库自动更新，不可删除/手动编辑。
+# 本质是按特殊排序键动态聚合的 smart 片单。
+SYSTEM_COLLECTIONS = [
+    {"key": "top_played", "name": "播放最多", "sort": "play_desc", "desc": "按播放次数从高到低"},
+    {"key": "top_rated", "name": "评分最高", "sort": "rating_desc", "desc": "按用户评分从高到低"},
+    {"key": "most_actresses", "name": "群星荟萃", "sort": "actress_count_desc", "desc": "出演女优最多的作品"},
+    {"key": "latest_added", "name": "最近入库", "sort": "added_desc", "desc": "最近加入影片库的影片"},
+]
+
+
+def ensure_system_collections(conn: sqlite3.Connection) -> None:
+    """保证系统片单存在（按 system_key 去重），已存在则跳过。"""
+    existing = {r["system_key"] for r in query_all(conn, "SELECT system_key FROM collections WHERE system_key <> ''")}
+    for sc in SYSTEM_COLLECTIONS:
+        if sc["key"] in existing:
+            continue
+        create_collection(
+            conn, sc["name"], kind="system",
+            rule={"params": {"sort": sc["sort"]}},
+            system_key=sc["key"],
+        )
+
+
+def system_collection_desc(system_key: str) -> str:
+    for sc in SYSTEM_COLLECTIONS:
+        if sc["key"] == system_key:
+            return sc["desc"]
+    return ""
+
 
 def list_collections(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
     rows = query_all(
         conn,
-        """SELECT c.id, c.name, c.kind, c.rule, c.cover_movie_id,
+        """SELECT c.id, c.name, c.kind, c.rule, c.system_key, c.cover_movie_id,
                   (SELECT COUNT(*) FROM collection_items ci WHERE ci.collection_id = c.id) AS count,
                   (SELECT m.cover FROM collection_items ci JOIN movies m ON m.id = ci.movie_id
                       WHERE ci.collection_id = c.id AND m.cover <> '' LIMIT 1) AS cover,
@@ -859,17 +1072,67 @@ def list_collections(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
                       WHERE ci.collection_id = c.id AND m.cover <> '' LIMIT 1) AS cover_id
            FROM collections c ORDER BY c.created_at DESC, c.id DESC""",
     )
-    return [dict(r) for r in rows]
+    out = []
+    for r in rows:
+        d = dict(r)
+        if (d.get("kind") or "manual") != "manual":
+            # 智能片单：影片由规则动态计算，不存 collection_items，需实时统计
+            try:
+                params = _smart_params(d.get("rule"))
+            except Exception:
+                params = {}
+            res = search_movies(conn, {**params, "page_size": 3})
+            d["count"] = int(res.get("total") or 0)
+            previews = [m for m in res.get("items", []) if m.get("cover")]
+            d["preview_ids"] = [int(m["id"]) for m in previews[:3]]
+            if previews:
+                d["cover"] = previews[0]["cover"]
+                d["cover_id"] = int(previews[0]["id"])
+            else:
+                d["cover"] = ""
+                d["cover_id"] = None
+            d["rule_params"] = params
+            if d.get("kind") == "system":
+                d["system_desc"] = system_collection_desc(d.get("system_key") or "")
+        else:
+            # 前 3 部有封面的影片 id，用于列表拼图预览
+            previews = query_all(
+                conn,
+                """SELECT m.id FROM collection_items ci
+                     JOIN movies m ON m.id = ci.movie_id
+                     WHERE ci.collection_id = ? AND m.cover <> ''
+                     ORDER BY ci.position ASC LIMIT 3""",
+                (d["id"],),
+            )
+            d["preview_ids"] = [int(x["id"]) for x in previews]
+        out.append(d)
+    return out
 
 
-def create_collection(conn: sqlite3.Connection, name: str, kind: str = "manual", rule: Any = "") -> int:
+def _smart_params(rule: Any) -> Dict[str, Any]:
+    """从 collections.rule 解析出 search_movies 用的参数。"""
+    if isinstance(rule, str):
+        if not rule:
+            return {}
+        try:
+            rule = json.loads(rule)
+        except Exception:
+            return {}
+    if isinstance(rule, dict):
+        return rule.get("params") or {}
+    return {}
+
+
+def create_collection(conn: sqlite3.Connection, name: str, kind: str = "manual", rule: Any = "",
+                      system_key: str = "") -> int:
     name = norm_name(name)
     if not name:
         raise ValueError("片单名称不能为空")
     if isinstance(rule, (dict, list)):
         rule = _j(rule)
     return int(conn.execute(
-        "INSERT INTO collections(name, kind, rule) VALUES(?,?,?)", (name, kind, rule or "")).lastrowid)
+        "INSERT INTO collections(name, kind, rule, system_key) VALUES(?,?,?,?)",
+        (name, kind, rule or "", system_key or "")).lastrowid)
 
 
 def rename_collection(conn: sqlite3.Connection, cid: int, name: str) -> None:
@@ -880,13 +1143,16 @@ def rename_collection(conn: sqlite3.Connection, cid: int, name: str) -> None:
 
 
 def delete_collection(conn: sqlite3.Connection, cid: int) -> None:
+    info = conn.execute("SELECT kind FROM collections WHERE id=?", (cid,)).fetchone()
+    if info and (info["kind"] or "manual") == "system":
+        raise ValueError("系统片单不可删除")
     conn.execute("DELETE FROM collections WHERE id = ?", (cid,))
 
 
 def add_to_collection(conn: sqlite3.Connection, cid: int, movie_id: int) -> None:
     info = conn.execute("SELECT kind FROM collections WHERE id=?", (cid,)).fetchone()
-    if info and (info["kind"] or "manual") == "smart":
-        raise ValueError("智能清单由规则自动生成，不能手动添加")
+    if info and (info["kind"] or "manual") != "manual":
+        raise ValueError("智能/系统清单由规则自动生成，不能手动添加")
     conn.execute(
         "INSERT OR IGNORE INTO collection_items(collection_id, movie_id, position) "
         "SELECT ?, ?, COALESCE(MAX(position), 0) + 1 FROM collection_items WHERE collection_id = ?",
@@ -896,6 +1162,35 @@ def add_to_collection(conn: sqlite3.Connection, cid: int, movie_id: int) -> None
 def remove_from_collection(conn: sqlite3.Connection, cid: int, movie_id: int) -> None:
     conn.execute(
         "DELETE FROM collection_items WHERE collection_id = ? AND movie_id = ?", (cid, movie_id))
+
+
+def reorder_collection(conn: sqlite3.Connection, cid: int, ordered_ids: List[int]) -> None:
+    """按给定的 movie_id 顺序重排手动清单（仅 manual 生效）。"""
+    info = conn.execute("SELECT kind FROM collections WHERE id=?", (cid,)).fetchone()
+    if info and (info["kind"] or "manual") == "smart":
+        raise ValueError("智能清单由规则自动生成，不能手动排序")
+    # 仅保留确实属于该清单的 id，按传入顺序写回 position
+    valid = {r[0] for r in conn.execute(
+        "SELECT movie_id FROM collection_items WHERE collection_id = ?", (cid,)).fetchall()}
+    seq = [mid for mid in ordered_ids if mid in valid]
+    for pos, mid in enumerate(seq, start=1):
+        conn.execute(
+            "UPDATE collection_items SET position = ? WHERE collection_id = ? AND movie_id = ?",
+            (pos, cid, mid))
+
+
+def get_collection_playhead(conn: sqlite3.Connection, cid: int):
+    row = conn.execute(
+        "SELECT movie_id FROM collection_playhead WHERE collection_id = ?", (cid,)).fetchone()
+    return row["movie_id"] if row else None
+
+
+def set_collection_playhead(conn: sqlite3.Connection, cid: int, movie_id: int) -> None:
+    conn.execute(
+        "INSERT INTO collection_playhead(collection_id, movie_id) VALUES(?, ?) "
+        "ON CONFLICT(collection_id) DO UPDATE SET movie_id = excluded.movie_id, "
+        "updated_at = datetime('now','localtime')",
+        (cid, movie_id))
 
 
 def smart_query(conn: sqlite3.Connection, rule: Any, page: int = 1,
@@ -951,7 +1246,7 @@ def smart_query(conn: sqlite3.Connection, rule: Any, page: int = 1,
 def collection_movies(conn: sqlite3.Connection, cid: int, page: int = 1,
                       size: int = 60) -> Dict[str, Any]:
     info = conn.execute("SELECT kind, rule FROM collections WHERE id=?", (cid,)).fetchone()
-    if info and (info["kind"] or "manual") == "smart":
+    if info and (info["kind"] or "manual") != "manual":
         return smart_query(conn, info["rule"], page, size)
     total = int(scalar(conn, "SELECT COUNT(*) FROM collection_items WHERE collection_id = ?", (cid,)))
     pages = max(1, (total + size - 1) // size)
@@ -968,6 +1263,7 @@ def collection_movies(conn: sqlite3.Connection, cid: int, page: int = 1,
         "page": page,
         "page_size": size,
         "pages": pages,
+        "playhead": get_collection_playhead(conn, cid),
         "items": [_row_to_card(r) for r in rows],
     }
 
@@ -1123,8 +1419,14 @@ def batch_update(conn, movie_ids, payload):
             conn.execute("UPDATE movies SET " + ", ".join(sets) + " WHERE id = ?", args)
             updated += 1
         if tags is not None:
-            conn.execute("DELETE FROM movie_tag WHERE movie_id = ?", (mid,))
+            # 与详情页单个操作一致：在影片已有标签基础上并集追加，而非整体替换
+            cur = {r[0] for r in conn.execute(
+                "SELECT t.name FROM movie_tag mt JOIN tags t ON t.id = mt.tag_id WHERE mt.movie_id = ?",
+                (mid,)).fetchall()}
             for t in tags:
+                if t: cur.add(t)
+            conn.execute("DELETE FROM movie_tag WHERE movie_id = ?", (mid,))
+            for t in cur:
                 tid = ensure_tag(conn, t)
                 conn.execute("INSERT OR IGNORE INTO movie_tag(movie_id, tag_id) VALUES(?,?)", (mid, tid))
             updated += 1
@@ -1201,6 +1503,34 @@ def toggle_follow(conn: sqlite3.Connection, actress_id: int) -> int:
     return nv
 
 
+# ----------------------------------------------------------------- 智能片单下拉用高频词
+def taxonomy(conn: sqlite3.Connection) -> Dict[str, Any]:
+    """返回用于智能片单筛选下拉的高频类型/女优/系列，避免用户手敲。"""
+    return {
+        "genres": [
+            {"name": r["name"], "count": int(r["count"])}
+            for r in query_all(
+                conn,
+                "SELECT g.name, COUNT(*) AS count FROM movie_genre mg "
+                "JOIN genres g ON g.id = mg.genre_id GROUP BY g.id ORDER BY count DESC LIMIT 60")
+        ],
+        "actresses": [
+            {"name": r["name"], "count": int(r["count"])}
+            for r in query_all(
+                conn,
+                "SELECT a.name, COUNT(*) AS count FROM movie_actress ma "
+                "JOIN actresses a ON a.id = ma.actress_id GROUP BY a.id ORDER BY count DESC LIMIT 60")
+        ],
+        "series": [
+            {"name": r["name"], "count": int(r["count"])}
+            for r in query_all(
+                conn,
+                "SELECT se.name, COUNT(*) AS count FROM movies m "
+                "JOIN series se ON se.id = m.series_id GROUP BY se.id ORDER BY count DESC LIMIT 60")
+        ],
+    }
+
+
 # ----------------------------------------------------------------- 排行榜
 def rankings(conn: sqlite3.Connection, kind: str = "watched", limit: int = 30) -> List[Dict[str, Any]]:
     kind = str(kind or "watched")
@@ -1221,21 +1551,66 @@ def rankings(conn: sqlite3.Connection, kind: str = "watched", limit: int = 30) -
     return [_row_to_card(r) for r in rows]
 
 
-def watch_history(conn: sqlite3.Connection, page: int = 1,
-                  size: int = 50) -> Dict[str, Any]:
-    """按时间倒序返回每次观看的明细（一条观看记录一行）。"""
+def watch_history(conn: sqlite3.Connection, page: int = 1, size: int = 50,
+                  from_: str = None, to_: str = None,
+                  method: str = None, q: str = None) -> Dict[str, Any]:
+    """按时间倒序返回每次观看的明细（一条观看记录一行），支持筛选与汇总。
+
+    from_/to_: 起始/结束时间（YYYY-MM-DD 或 YYYY-MM-DD HH:MM:SS）
+    method:    播放方式过滤（builtin/external/system）
+    q:         番号或标题关键字
+    """
     page = max(1, int(page or 1))
     size = min(200, max(1, int(size or 50)))
     offset = (page - 1) * size
-    total = int(scalar(conn, "SELECT COUNT(*) FROM watch_sessions") or 0)
-    rows = query_all(conn, """
+
+    where = []
+    args: list = []
+    if from_:
+        where.append("s.started_at >= ?")
+        args.append(from_)
+    if to_:
+        # 兼容只给日期的情况：补齐到当天末尾
+        to_val = to_
+        if len(to_val) == 10:
+            to_val += " 23:59:59"
+        where.append("s.started_at <= ?")
+        args.append(to_val)
+    if method:
+        where.append("s.method = ?")
+        args.append(method)
+    if q:
+        code_like = f"%{_smart_code(q)}%"
+        like = f"%{q}%"
+        where.append("(m.code_norm LIKE ? OR m.title LIKE ?)")
+        args.extend([code_like, like])
+
+    wsql = (" WHERE " + " AND ".join(where)) if where else ""
+
+    total = int(scalar(conn, f"SELECT COUNT(*) FROM watch_sessions s JOIN movies m ON m.id=s.movie_id{wsql}", args) or 0)
+    rows = query_all(conn, f"""
         SELECT s.id, s.movie_id, s.started_at, s.ended_at, s.watched_sec,
                s.finished, s.method, s.start_pos, s.end_pos,
-               m.code, m.title, m.cover, m.year, st.name AS studio
+               m.code, m.title, m.cover, m.year, st.name AS studio,
+               (SELECT f.filename FROM movie_files f
+                  WHERE f.movie_id = m.id ORDER BY f.part ASC, f.id ASC LIMIT 1) AS file_name,
+               (SELECT COUNT(*) FROM movie_files f
+                  WHERE f.movie_id = m.id AND COALESCE(f.missing,0)=0) AS playable_cnt
         FROM watch_sessions s
         JOIN movies m ON m.id = s.movie_id
         LEFT JOIN studios st ON st.id = m.studio_id
-        ORDER BY s.started_at DESC, s.id DESC LIMIT ? OFFSET ?""", (size, offset))
+        {wsql}
+        ORDER BY s.started_at DESC, s.id DESC LIMIT ? OFFSET ?""", args + [size, offset])
+
+    # 汇总（基于筛选后的全集，而非当前页）
+    summ = query_one(conn, f"""
+        SELECT COALESCE(SUM(s.watched_sec),0) AS total_sec,
+               COUNT(DISTINCT s.movie_id) AS movies,
+               COUNT(DISTINCT DATE(s.started_at)) AS days
+        FROM watch_sessions s
+        JOIN movies m ON m.id = s.movie_id
+        {wsql}""", args) or {}
+
     items = [{
         "id": r["id"],
         "movie_id": r["movie_id"],
@@ -1244,6 +1619,8 @@ def watch_history(conn: sqlite3.Connection, page: int = 1,
         "cover": r["cover"],
         "studio": r["studio"],
         "year": r["year"],
+        "file_name": r["file_name"],
+        "playable": int(r["playable_cnt"] or 0) > 0,
         "started_at": r["started_at"],
         "ended_at": r["ended_at"],
         "watched_sec": float(r["watched_sec"] or 0),
@@ -1257,6 +1634,12 @@ def watch_history(conn: sqlite3.Connection, page: int = 1,
         "page": page,
         "page_size": size,
         "pages": max(1, (total + size - 1) // size),
+        "summary": {
+            "total_sec": float(summ.get("total_sec") or 0),
+            "movies": int(summ.get("movies") or 0),
+            "days": int(summ.get("days") or 0),
+            "sessions": total,
+        },
         "items": items,
     }
 

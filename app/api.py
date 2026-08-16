@@ -32,6 +32,9 @@ router = APIRouter(prefix="/api")
 
 # 当前程序版本（与发布版本保持一致）。
 APP_VERSION = "1.11.0"
+# 编译/构建日期，格式 YYYY-MM-DD。由 build.py 在打包时重写为实际构建日期；
+# 源码运行（python run.py）默认显示源码最近修改时间对应的日期。
+BUILD_DATE = "2026-08-16"
 
 
 # ------------------------------------------------------------------ 影片列表
@@ -420,6 +423,12 @@ def get_stats() -> Dict[str, Any]:
         return data
 
 
+@router.get("/profile")
+def get_profile_route() -> Dict[str, Any]:
+    with db() as conn:
+        return store.taxonomy(conn)
+
+
 @router.get("/rankings")
 def get_rankings(kind: str = "watched", limit: int = 30) -> Dict[str, Any]:
     with db() as conn:
@@ -427,9 +436,16 @@ def get_rankings(kind: str = "watched", limit: int = 30) -> Dict[str, Any]:
 
 
 @router.get("/watch-history")
-def get_watch_history(page: int = 1, size: int = 50) -> Dict[str, Any]:
+def get_watch_history(
+    page: int = 1,
+    size: int = 50,
+    from_: str = Query(None, alias="from"),
+    to: str = Query(None, alias="to"),
+    method: str = Query(None),
+    q: str = Query(None),
+) -> Dict[str, Any]:
     with db() as conn:
-        return store.watch_history(conn, page, size)
+        return store.watch_history(conn, page, size, from_, to, method, q)
 
 
 @router.get("/stats-enhanced")
@@ -771,7 +787,7 @@ def scrape_failures(
     with db() as conn:
         logs = query_all(conn,
                          "SELECT * FROM scrape_logs WHERE status<>'ok' "
-                         "ORDER BY ts DESC LIMIT ?", (int(limit),))
+                         "ORDER BY started_at DESC LIMIT ?", (int(limit),))
         skips = set()
         if only_unskipped:
             for r in query_all(conn, "SELECT code FROM scrape_skip"):
@@ -791,11 +807,26 @@ def scrape_failures(
             "movie_id": row.get("movie_id"),
             "provider": row.get("provider"),
             "reason": row.get("reason"),
-            "ts": row.get("ts"),
+            "ts": row.get("started_at"),
             "diagnosis": diag,
         })
     groups = scrape_diag.group_failures([it["diagnosis"] for it in items])
     return {"ok": True, "items": items, "groups": groups, "total": len(items)}
+
+
+@router.post("/open-file")
+def open_file(payload: Dict[str, Any] = Body(default={})) -> Dict[str, Any]:
+    """在文件管理器中定位并选中指定路径（用于刮削失败但未入库的影片）。"""
+    path = (payload.get("path") or "").strip()
+    if not path:
+        raise HTTPException(400, "缺少 path 参数")
+    if not os.path.exists(path) and not os.path.exists(os.path.dirname(path)):
+        raise HTTPException(404, f"文件不存在：{path}")
+    try:
+        _open_path(path, reveal=True)
+    except Exception as exc:
+        raise HTTPException(500, f"打开文件夹失败：{exc}")
+    return {"ok": True, "path": path}
 
 
 @router.post("/scrape/retry-neterr")
@@ -805,7 +836,7 @@ def retry_neterr_failures(payload: Dict[str, Any] = Body(default={})) -> Dict[st
         codes = set()
         logs = query_all(conn,
                          "SELECT code, detail FROM scrape_logs WHERE status<>'ok' "
-                         "ORDER BY ts DESC LIMIT 500")
+                         "ORDER BY started_at DESC LIMIT 500")
         for row in logs:
             diag = scrape_diag.diagnose(row.get("detail"))
             if diag["summary_kind"] in ("neterr", "blocked") or any(
@@ -1126,6 +1157,23 @@ def _lan_addresses() -> List[str]:
     return sorted(addrs, key=_rank)
 
 
+def _build_date() -> str:
+    """返回编译/构建日期。
+
+    - 若 BUILD_DATE 已被打包脚本改写为真实构建日期则直接使用；
+    - 否则（源码直接运行）回退到本文件最近修改日期，作为"代码编译日期"。
+    """
+    import datetime as _dt
+    default_placeholder = "2026-08-16"
+    if BUILD_DATE and BUILD_DATE != default_placeholder:
+        return BUILD_DATE
+    try:
+        mtime = os.path.getmtime(__file__)
+        return _dt.datetime.fromtimestamp(mtime).strftime("%Y-%m-%d")
+    except Exception:
+        return BUILD_DATE
+
+
 @router.get("/server/info")
 def server_info() -> Dict[str, Any]:
     """返回访问令牌与监听信息（供前端设置页展示）。"""
@@ -1148,6 +1196,7 @@ def server_info() -> Dict[str, Any]:
         "access_urls": urls,
         "local_url": local_url,
         "app_version": APP_VERSION,
+        "build_date": _build_date(),
         "update_feed": cfg.get("server", {}).get("update_feed", ""),
     }
 
@@ -1205,45 +1254,73 @@ def check_update(channel: str = Query("stable")) -> Dict[str, Any]:
         return result
     try:
         import requests
-        resp = requests.get(feed_url, timeout=8, headers={"User-Agent": "AVM-update-check"})
-        resp.raise_for_status()
-        feed = resp.json()
+        # 复用刮削代理（墙内访问 GitHub API 常需代理）
+        proxy = (cfg.get("scraper", {}).get("proxy") or "") or None
+        proxies = {"http": proxy, "https": proxy} if proxy else None
+        headers = {"User-Agent": "AVM-update-check"}
+        # 候选源：GitHub 公共加速镜像优先（墙内更稳），原始 API 兜底
+        candidates = []
+        if "api.github.com" in feed_url:
+            for mirror in ("https://ghfast.top", "https://gh-proxy.com", "https://mirror.ghproxy.com"):
+                candidates.append(feed_url.replace("https://api.github.com", f"{mirror}/https://api.github.com"))
+        candidates.append(feed_url)
+
+        def _valid(j) -> bool:
+            # 403/限流会返回 {"message":..., "documentation_url":...} 而非版本数据
+            return isinstance(j, dict) and (j.get("tag_name") or j.get("version"))
+
+        last_err = ""
+        feed = None
+        for url in candidates:
+            try:
+                resp = requests.get(url, timeout=12, headers=headers, proxies=proxies)
+                resp.raise_for_status()
+                data = resp.json()
+                if _valid(data):
+                    feed = data
+                    break
+                last_err = f"响应不含版本信息（可能限流/403）：{str(data)[:120]}"
+            except Exception as e:  # noqa: BLE001
+                last_err = str(e)
+                continue
+        if feed is None:
+            result["error"] = f"无法获取更新信息：{last_err}"
+            return result
+
+        latest = ""
+        download_url = ""
+        released = ""
+        notes = ""
+        feed_channel = channel
+        if isinstance(feed, dict) and feed.get("tag_name"):
+            # GitHub Releases 结构
+            tag = str(feed.get("tag_name") or "")
+            latest = tag[1:] if tag.startswith("v") or tag.startswith("V") else tag
+            download_url = feed.get("html_url") or ""
+            notes = feed.get("body") or ""
+            published = feed.get("published_at") or feed.get("created_at") or ""
+            if published:
+                released = published[:10]  # 取 YYYY-MM-DD
+            prerelease = feed.get("prerelease", False)
+            draft = feed.get("draft", False)
+            if prerelease or draft:
+                feed_channel = "beta"  # 预发布/草稿不参与 stable 更新判定
+        else:
+            # 通用版本清单 JSON
+            latest = str(feed.get("version") or APP_VERSION)
+            download_url = feed.get("download_url", "")
+            released = feed.get("released", "")
+            notes = feed.get("notes", "")
+            feed_channel = feed.get("channel", channel)
+
+        result["latest"] = latest or APP_VERSION
+        result["download_url"] = download_url
+        result["released"] = released
+        result["notes"] = notes
+        if feed_channel == channel and _newer(latest, APP_VERSION):
+            result["update_available"] = True
     except Exception as e:  # noqa: BLE001
         result["error"] = f"无法获取更新信息：{e}"
-        return result
-
-    latest = ""
-    download_url = ""
-    released = ""
-    notes = ""
-    feed_channel = channel
-    if isinstance(feed, dict) and feed.get("tag_name"):
-        # GitHub Releases 结构
-        tag = str(feed.get("tag_name") or "")
-        latest = tag[1:] if tag.startswith("v") or tag.startswith("V") else tag
-        download_url = feed.get("html_url") or ""
-        notes = feed.get("body") or ""
-        published = feed.get("published_at") or feed.get("created_at") or ""
-        if published:
-            released = published[:10]  # 取 YYYY-MM-DD
-        prerelease = feed.get("prerelease", False)
-        draft = feed.get("draft", False)
-        if prerelease or draft:
-            feed_channel = "beta"  # 预发布/草稿不参与 stable 更新判定
-    else:
-        # 通用版本清单 JSON
-        latest = str(feed.get("version") or APP_VERSION)
-        download_url = feed.get("download_url", "")
-        released = feed.get("released", "")
-        notes = feed.get("notes", "")
-        feed_channel = feed.get("channel", channel)
-
-    result["latest"] = latest or APP_VERSION
-    result["download_url"] = download_url
-    result["released"] = released
-    result["notes"] = notes
-    if feed_channel == channel and _newer(latest, APP_VERSION):
-        result["update_available"] = True
     return result
 
 
@@ -1351,6 +1428,7 @@ def clear_continue_watching() -> Dict[str, Any]:
 @router.get("/collections")
 def api_list_collections() -> Dict[str, Any]:
     with db() as conn:
+        store.ensure_system_collections(conn)
         return {"items": store.list_collections(conn)}
 
 
@@ -1406,7 +1484,10 @@ def api_rename_collection(cid: int, payload: Dict[str, Any] = Body(default={})) 
 @router.delete("/collections/{cid}")
 def api_delete_collection(cid: int) -> Dict[str, Any]:
     with db() as conn:
-        store.delete_collection(conn, cid)
+        try:
+            store.delete_collection(conn, cid)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
     return {"ok": True}
 
 
@@ -1432,6 +1513,25 @@ def api_add_to_collection(cid: int, payload: Dict[str, Any] = Body(default={})) 
 def api_remove_from_collection(cid: int, movie_id: int) -> Dict[str, Any]:
     with db() as conn:
         store.remove_from_collection(conn, cid, movie_id)
+    return {"ok": True}
+
+
+@router.post("/collections/{cid}/order")
+def api_reorder_collection(cid: int, payload: Dict[str, Any] = Body(default={})) -> Dict[str, Any]:
+    ids = payload.get("ids") or []
+    with db() as conn:
+        try:
+            store.reorder_collection(conn, cid, [int(x) for x in ids])
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
+    return {"ok": True}
+
+
+@router.post("/collections/{cid}/playhead")
+def api_set_playhead(cid: int, payload: Dict[str, Any] = Body(default={})) -> Dict[str, Any]:
+    movie_id = int(payload.get("movie_id"))
+    with db() as conn:
+        store.set_collection_playhead(conn, cid, movie_id)
     return {"ok": True}
 
 

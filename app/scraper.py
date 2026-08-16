@@ -30,6 +30,18 @@ from .providers.base import NetBlocked
 # 抓取结果里可以直接写回影片表的文本字段
 _TEXT_FIELDS = ("title", "original_title", "plot", "release_date", "director")
 
+# 这些字符串是浏览器错误页/网络失败页面的标题，绝不应当作影片元数据写入
+_BAD_TEXT_VALUES = (
+    "无法访问此网站", "无法访问此网站。", "ERR_CONNECTION_REFUSED",
+    "ERR_NAME_NOT_RESOLVED", "ERR_INTERNET_DISCONNECTED", "This site can’t be reached",
+    "This site can't be reached", "This page isn’t working", "Hmm, we can’t reach this page",
+)
+
+
+def _is_bad_text(value: Any) -> bool:
+    """刮削回填时，浏览器错误页标题等噪声应当丢弃。"""
+    return isinstance(value, str) and value.strip() in _BAD_TEXT_VALUES
+
 
 def _is_empty(value: Any) -> bool:
     return value in (None, "", 0, 0.0)
@@ -68,10 +80,10 @@ def apply_metadata(conn, movie_id: int, meta: Dict[str, Any], cfg: Dict[str, Any
 
     payload: Dict[str, Any] = {}
     for field in _TEXT_FIELDS:
-        if field in meta and (overwrite or _is_empty(current.get(field))):
+        if field in meta and not _is_bad_text(meta[field]) and (overwrite or _is_empty(current.get(field))):
             payload[field] = meta[field]
     # 扫描阶段的标题只是从文件名猜的，遇到真标题应当替换
-    if meta.get("title") and current.get("title") in (current.get("code"), "", None):
+    if meta.get("title") and not _is_bad_text(meta.get("title")) and current.get("title") in (current.get("code"), "", None):
         payload["title"] = meta["title"]
 
     for field in ("runtime", "rating"):

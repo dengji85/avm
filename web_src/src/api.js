@@ -77,6 +77,9 @@ export const deleteMovie = (id, deleteFile = false) => del(`/movies/${id}`, { de
 export const toggleFlag = (id, field) => post(`/movies/${id}/toggle`, { field })
 export const playMovie = (id, body = {}) => post(`/movies/${id}/play`, body)
 export const markPlayed = (id) => post(`/movies/${id}/played`)
+export const startSession = (id, body = {}) => post(`/movies/${id}/session/start`, body)
+export const updateSession = (id, sid, body = {}) => post(`/movies/${id}/session/${sid}/update`, body)
+export const endSession = (id, sid, body = {}) => post(`/movies/${id}/session/${sid}/end`, body)
 export const scrapeOne = (id, body = {}) => post(`/movies/${id}/scrape`, body)
 export const exportNfo = (id) => post(`/movies/${id}/nfo`, {})
 export const getPreviews = (id, generate = false) => get(`/movies/${id}/previews`, { generate: generate || undefined })
@@ -95,9 +98,6 @@ export function uploadCover(id, file) {
 }
 
 /* ---------------- 观看会话 / 进度 ---------------- */
-export const startSession = (id, body = {}) => post(`/movies/${id}/session/start`, body)
-export const updateSession = (id, sid, body) => post(`/movies/${id}/session/${sid}/update`, body)
-export const endSession = (id, sid, body = {}) => post(`/movies/${id}/session/${sid}/end`, body)
 export const getSessions = (id, limit = 60) => get(`/movies/${id}/sessions`, { limit })
 export const getWatchAnalytics = () => get('/watch-analytics')
 export const getContinueWatching = (limit = 20) => get('/continue-watching', { limit })
@@ -116,9 +116,11 @@ export const listCollections = () => get('/collections')
 export const createCollection = (body) => post('/collections', body)
 export const updateCollection = (cid, body) => put(`/collections/${cid}`, body)
 export const deleteCollection = (cid) => del(`/collections/${cid}`)
-export const getCollection = (cid) => get(`/collections/${cid}`)
+export const getCollection = (cid, qs) => get(`/collections/${cid}`, qs)
 export const addToCollection = (cid, movieId) => post(`/collections/${cid}/movies`, { movie_id: movieId })
 export const removeFromCollection = (cid, movieId) => del(`/collections/${cid}/movies/${movieId}`)
+export const reorderCollection = (cid, ids) => post(`/collections/${cid}/order`, { ids })
+export const setCollectionPlayhead = (cid, movieId) => post(`/collections/${cid}/playhead`, { movie_id: movieId })
 
 /* ---------------- 标签字典 ---------------- */
 export const listTags = async () => {
@@ -129,10 +131,11 @@ export const renameTag = (oldName, newName) => post('/tags/rename', { old: oldNa
 export const deleteTag = (name) => post('/tags/delete', { name })
 
 /* ---------------- 统计 / 存储 ---------------- */
+export const getProfile = () => get('/profile')
 export const getStats = () => get('/stats')
 export const getStatsEnhanced = () => get('/stats-enhanced')
 export const getRankings = (kind = 'watched', limit = 30) => get('/rankings', { kind, limit })
-export const getWatchHistory = (page = 1, size = 50) => get('/watch-history', { page, size })
+export const getWatchHistory = (params = {}) => get('/watch-history', params)
 export const getStorage = () => get('/storage')
 export const getIntegrity = () => get('/integrity')
 export const getHealthCheck = () => get('/health-check')
@@ -158,6 +161,7 @@ export const scrapeSkipsClear = (movie_id = 0) => del('/scrape/skips', { movie_i
 export const scrapeFailures = (qs = {}) => get('/scrape/failures', qs)
 export const scrapeRetryNeterr = (body = {}) => post('/scrape/retry-neterr', body)
 export const scrapeRetryWithProvider = (body = {}) => post('/scrape/retry-with-provider', body)
+export const openFile = (path) => post('/open-file', { path })
 export const maintenanceSummary = () => get('/maintenance/summary')
 export const reparseCodes = (body = {}) => post('/reparse-codes', body)
 export const matchSubtitles = (body) => post('/subtitles/match', body)

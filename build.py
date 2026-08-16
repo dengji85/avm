@@ -14,9 +14,42 @@
 
 停止：直接关闭控制台窗口，或按 Ctrl+C 优雅退出。
 """
+import re
+import os
+import datetime
 import PyInstaller.__main__
 
-PyInstaller.__main__.run([
+API_PY = os.path.join("app", "api.py")
+BUILD_DATE_RE = re.compile(r'(BUILD_DATE\s*=\s*)"[^"]*"')
+PLACEHOLDER = '"2026-08-16"'
+
+
+def _rewrite_build_date():
+    """打包时把 BUILD_DATE 常量重写成本地构建当天日期，并返回原内容以便还原。"""
+    today = datetime.date.today().strftime("%Y-%m-%d")
+    with open(API_PY, "r", encoding="utf-8") as f:
+        src = f.read()
+    if not BUILD_DATE_RE.search(src):
+        return None
+    new_src = BUILD_DATE_RE.sub(r'\g<1>"%s"' % today, src, count=1)
+    with open(API_PY, "w", encoding="utf-8") as f:
+        f.write(new_src)
+    print("[build] BUILD_DATE 已写入: %s" % today)
+    return src
+
+
+def _restore_build_date(original_src):
+    """还原 api.py，避免打包脚本污染工作区 / git。"""
+    if original_src is None:
+        return
+    with open(API_PY, "w", encoding="utf-8") as f:
+        f.write(original_src)
+    print("[build] 已还原 %s" % API_PY)
+
+
+_original_api = _rewrite_build_date()
+try:
+    PyInstaller.__main__.run([
     "run.py",
     "--name", "AVM",
     "--onedir",
@@ -37,3 +70,5 @@ PyInstaller.__main__.run([
     "--clean",
     "--noconfirm",
 ])
+finally:
+    _restore_build_date(_original_api)

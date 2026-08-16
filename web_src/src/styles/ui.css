@@ -141,6 +141,7 @@ input[type='range'] { accent-color: var(--c-primary); cursor: pointer; height: a
 }
 .badge.primary { background: var(--c-primary-soft); color: var(--c-primary-h); }
 .badge.accent  { background: var(--c-accent-soft);  color: var(--c-accent); }
+.badge.sys      { background: linear-gradient(135deg, var(--c-accent, #5b8cff), var(--c-primary, #8a5bff)); color: #fff; }
 .badge.ok      { background: var(--c-ok-soft);      color: var(--c-ok); }
 .badge.warn    { background: var(--c-warn-soft);    color: var(--c-warn); }
 .badge.err     { background: var(--c-err-soft);     color: var(--c-err); }
@@ -265,6 +266,34 @@ input[type='range'] { accent-color: var(--c-primary); cursor: pointer; height: a
   animation: spin .7s linear infinite;
 }
 .spinner.large { width: 28px; height: 28px; border-width: 3px; }
+.spinner.sm { width: 12px; height: 12px; border-width: 2px; }
+
+/* 检查更新结果提示 */
+.about-update {
+  margin: var(--sp-2) auto 0;
+  max-width: 520px;
+  padding: 10px 14px;
+  border-radius: 10px;
+  font-size: var(--fs-sm);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  text-align: left;
+}
+.about-update.ok { background: var(--c-ok-soft); color: var(--c-ok); }
+.about-update.warn { background: var(--c-warn-soft); color: var(--c-warn); }
+.about-update.err { background: var(--c-err-soft); color: var(--c-err); }
+.about-update .btn { margin-left: auto; }
+.about-notes {
+  flex-basis: 100%;
+  margin: 2px 0 0;
+  white-space: pre-wrap;
+  line-height: 1.5;
+  opacity: .9;
+  max-height: 160px;
+  overflow-y: auto;
+}
 
 /* ---------------- 分割线 ---------------- */
 .divider { height: 1px; background: var(--c-line); border: none; margin: var(--sp-3) 0; }

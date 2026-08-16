@@ -1,9 +1,10 @@
 <script setup>
 import { ref, reactive, computed, onMounted, watch } from 'vue'
 import { state } from '../state.js'
-import { getStats, getStatsEnhanced, getRankings, listMovies, getStorage } from '../api.js'
-import { fmtMin, fmtSize } from '../utils.js'
+import { getStats, getStatsEnhanced, getRankings, listMovies, getStorage, getWatchHistory, getWatchAnalytics } from '../api.js'
+import { fmtMin, fmtSize, fmtDuration, fmtDate } from '../utils.js'
 import { t } from '../i18n/index.js'
+import { toast } from '../utils.js'
 import PageHead from '../components/PageHead.vue'
 import StatGrid from '../components/StatGrid.vue'
 import EmptyState from '../components/EmptyState.vue'
@@ -11,6 +12,46 @@ import EmptyState from '../components/EmptyState.vue'
 const loading = ref(true)
 const error = ref('')
 const activeTab = ref('storage')
+
+/* ===== 观看明细（watchlog） ===== */
+const wlQuery = reactive({ from: '', to: '', method: '', q: '' })
+const wlItems = ref([])
+const wlPage = ref(1)
+const wlTotal = ref(0)
+const wlLoading = ref(false)
+const wlSummary = reactive({ sessions: 0, total_sec: 0, movies: 0, days: 0 })
+const wlHasFilter = computed(() => !!(wlQuery.from || wlQuery.to || wlQuery.method || wlQuery.q))
+
+async function loadWatchLog(keepPage = false) {
+  if (!keepPage) wlPage.value = 1
+  wlLoading.value = true
+  try {
+    const r = await getWatchHistory({
+      page: wlPage.value,
+      size: 50,
+      from: wlQuery.from || undefined,
+      to: wlQuery.to || undefined,
+      method: wlQuery.method || undefined,
+      q: wlQuery.q || undefined,
+    })
+    wlItems.value = (r && r.items) || []
+    wlTotal.value = (r && r.total) || 0
+    if (r && r.summary) Object.assign(wlSummary, r.summary)
+  } catch (e) { toast(e.message, 'err'); wlItems.value = [] } finally { wlLoading.value = false }
+}
+function applyWlFilter() { loadWatchLog(false) }
+function resetWlFilter() {
+  wlQuery.from = ''; wlQuery.to = ''; wlQuery.method = ''; wlQuery.q = ''
+  loadWatchLog(false)
+}
+function wlChangePage(delta) {
+  const next = wlPage.value + delta
+  if (next < 1 || (next - 1) * 50 >= wlTotal.value) return
+  wlPage.value = next
+  loadWatchLog(true)
+}
+// 进入 watchlog tab 时首次加载
+watch(activeTab, (v) => { if (v === 'watchlog' && !wlItems.value.length) loadWatchLog(false) })
 
 /* 概览 */
 const overview = reactive({
@@ -44,6 +85,9 @@ const ratingTop = ref([])
 const ratingLow = ref([])
 const playTop = ref([])
 const watchedTop = ref([])
+
+/* 观看多维分析（基于真实观看明细） */
+const analytics = ref({})
 
 /* 所有影片一览 */
 const allMovies = ref([])
@@ -257,10 +301,11 @@ async function loadAll() {
     ratingTop.value = rated.slice(0, 10)
     ratingLow.value = rated.slice(-10).reverse()
 
-    // 观看最久：从已看且有真实时长的影片里取 Top10（不依赖 watched_sec 字段）
-    watchedTop.value = (allMovies.value || [])
-      .filter((m) => m && m.watched && (m.runtime || 0) > 0)
-      .sort((a, b) => (b.runtime || 0) - (a.runtime || 0))
+    // 观看最久：使用真实观看明细汇总（watch_analytics.top_movies 的 total_sec）
+    const wa = await getWatchAnalytics()
+    analytics.value = wa || {}
+    watchedTop.value = (wa && wa.top_movies || [])
+      .map((m) => ({ ...m, runtime: (Number(m.total_sec) || 0) / 60 }))
       .slice(0, 10)
   } catch (e) {
     error.value = e.message || t('stats.loadFail')
@@ -310,6 +355,175 @@ const byGenreBars = computed(() => {
     share: diskTotal.value ? Math.round((d.bytes / diskTotal.value) * 100) : 0,
   }))
 })
+
+/* 观看明细辅助 */
+function wlFmtHours(sec) {
+  const h = (Number(sec) || 0) / 3600
+  return h >= 100 ? `${Math.round(h)} h` : h.toFixed(1) + ' h'
+}
+function methodLabel(method) {
+  return { builtin: t('rankings.methodBuiltin'), external: t('rankings.methodExternal'), system: t('rankings.methodSystem') }[method] || method || '—'
+}
+// 浏览器错误页标题等异常文本不应当作片名展示
+const BAD_TITLES = ['无法访问此网站', '无法访问此网站。', 'ERR_CONNECTION_REFUSED', 'This site can’t be reached']
+function displayTitle(h) {
+  const t = (h.title || '').trim()
+  if (!t || BAD_TITLES.includes(t)) return h.code || h.file_name || ('#' + h.movie_id)
+  return t
+}
+function methodTone(method) {
+  return { builtin: 'ok', external: 'accent', system: 'muted' }[method] || 'muted'
+}
+
+/* 观看分析：多维度聚合 */
+const wa = computed(() => analytics.value || {})
+const waTotal = computed(() => ({
+  sessions: wa.value.sessions || 0,
+  total_sec: wa.value.total_sec || 0,
+  movies: wa.value.movies || 0,
+  days: wa.value.days || 0,
+  avg: wa.value.avg_session_sec || 0,
+  first: wa.value.first_at,
+  last: wa.value.last_at,
+}))
+const waLast = computed(() => wa.value.last_at ? fmtDate(wa.value.last_at) : '—')
+const byHourBars = computed(() => {
+  const arr = wa.value.by_hour || []
+  const max = Math.max(1, ...arr.map((x) => Number(x) || 0))
+  return arr.map((v, h) => ({ h, label: String(h).padStart(2, '0'), value: Number(v) || 0, pct: Math.round(((Number(v) || 0) / max) * 100) }))
+})
+const byMethodBars = computed(() => {
+  const arr = wa.value.by_method || []
+  const max = Math.max(1, ...arr.map((x) => Number(x.sessions) || 0))
+  return arr.map((x) => ({ method: x.method, sessions: x.sessions || 0, sec: Number(x.sec) || 0,
+    pct: Math.round(((x.sessions || 0) / max) * 100) }))
+})
+const byMonthBars = computed(() => {
+  const arr = (wa.value.by_month || []).slice(-12)
+  const max = Math.max(1, ...arr.map((x) => Number(x.sec) || 0))
+  return arr.map((x) => ({ month: x.month, sessions: x.sessions || 0, sec: Number(x.sec) || 0,
+    pct: Math.round(((Number(x.sec) || 0) / max) * 100) }))
+})
+const profileDims = [
+  { key: 'actresses', label: () => t('stats.dimActress') },
+  { key: 'studios', label: () => t('stats.dimStudio') },
+  { key: 'genres', label: () => t('stats.dimGenre') },
+  { key: 'series', label: () => t('stats.dimSeries') },
+  { key: 'directors', label: () => t('stats.dimDirector') },
+]
+function profileBars(key) {
+  const arr = (wa.value.profile && wa.value.profile[key]) || []
+  const max = Math.max(1, ...arr.map((x) => Number(x.sec) || 0))
+  return arr.slice(0, 10).map((x) => ({
+    name: x.name, sec: Number(x.sec) || 0,
+    pct: Math.round(((Number(x.sec) || 0) / max) * 100),
+  }))
+}
+
+/* 观看分析：新增维度（完成度 / 复看 / 时间节律 / 结合分析） */
+const completion = computed(() => wa.value.completion || { finish_rate: 0, avg_completion: 0 })
+const rewatch = computed(() => wa.value.rewatch || {
+  rewatched_movies: 0, rewatch_rate: 0, avg_sessions_per_movie: 0, top: [] })
+const byWeekday = computed(() => {
+  const arr = wa.value.by_weekday || []
+  const max = Math.max(1, ...arr.map((x) => Number(x.sec) || 0))
+  // 周日为 0，调整为周一开头的展示顺序
+  const order = [1, 2, 3, 4, 5, 6, 0]
+  const map = {}
+  arr.forEach((x) => { map[x.wd] = x })
+  return order.map((wd) => {
+    const r = map[wd] || { sessions: 0, sec: 0 }
+    return { wd, label: t('stats.wd' + wd), sessions: r.sessions || 0, sec: Number(r.sec) || 0,
+      pct: Math.round((Number(r.sec) || 0) / max * 100) }
+  })
+})
+const weekdaySplit = computed(() => wa.value.weekday_split || { workday_sec: 0, weekend_sec: 0, ratio: 0 })
+const streak = computed(() => wa.value.streak || { current: 0, max: 0, longest_gap_days: 0 })
+const trend = computed(() => wa.value.trend || { recent_sec: 0, older_sec: 0, growth: 0 })
+const ratingX = computed(() => {
+  const arr = wa.value.rating_x || []
+  const labels = { '4-5': '★4-5', '3-4': '★3-4', '1-3': '★1-3', 'unrated': t('stats.unrated') }
+  const max = Math.max(1, ...arr.map((x) => Number(x.avg_sec) || 0))
+  return arr.map((x) => ({ band: x.band, label: labels[x.band] || x.band,
+    sessions: x.sessions || 0, sec: Number(x.sec) || 0, avg_sec: Number(x.avg_sec) || 0,
+    pct: Math.round((Number(x.avg_sec) || 0) / max * 100) }))
+})
+const uncensoredX = computed(() => {
+  const arr = wa.value.uncensored_x || []
+  const map = {}
+  arr.forEach((x) => { map[x.key] = x })
+  const unc = map['uncensored'] || { sessions: 0, sec: 0, movies: 0 }
+  const cen = map['censored'] || { sessions: 0, sec: 0, movies: 0 }
+  return {
+    uncensored: unc, censored: cen,
+    uncAvg: unc.sessions ? unc.sec / unc.sessions : 0,
+    cenAvg: cen.sessions ? cen.sec / cen.sessions : 0,
+  }
+})
+const durationProfile = computed(() => {
+  const dp = wa.value.duration_profile || { watched: {}, library: {} }
+  const labels = { lt40: t('stats.durLt40'), '40_90': t('stats.dur40_90'), gt90: t('stats.durGt90'), unknown: t('stats.durUnk') }
+  const order = ['lt40', '40_90', 'gt90', 'unknown']
+  const watched = dp.watched || {}, library = dp.library || {}
+  const wMax = Math.max(1, ...order.map((k) => Number(watched[k]) || 0))
+  const lMax = Math.max(1, ...order.map((k) => Number(library[k]) || 0))
+  return order.map((k) => ({
+    key: k, label: labels[k],
+    watched: Number(watched[k]) || 0, library: Number(library[k]) || 0,
+    wPct: Math.round((Number(watched[k]) || 0) / wMax * 100),
+    lPct: Math.round((Number(library[k]) || 0) / lMax * 100),
+  }))
+})
+
+/* 一句话洞察引擎：基于指标生成结构化洞察（前端按语言渲染文案） */
+const insights = computed(() => {
+  const out = []
+  const c = completion.value, rw = rewatch.value, s = streak.value, tr = trend.value
+  const ws = weekdaySplit.value, ux = uncensoredX.value
+  if (c.finish_rate >= 0) out.push({
+    icon: '✅', tone: c.finish_rate >= 0.6 ? 'ok' : 'warn',
+    key: 'finish', p: [Math.round(c.finish_rate * 100), Math.round(c.avg_completion * 100)] })
+  if (rw.rewatch_rate >= 0) out.push({
+    icon: '🔁', tone: rw.rewatch_rate >= 0.2 ? 'accent' : 'muted',
+    key: 'rewatch', p: [rw.rewatched_movies, Math.round(rw.rewatch_rate * 100), rw.avg_sessions_per_movie.toFixed(1)] })
+  if (s.max > 0) out.push({
+    icon: '🔥', tone: s.current >= 3 ? 'ok' : 'muted',
+    key: 'streak', p: [s.current, s.max, s.longest_gap_days] })
+  if (tr.recent_sec > 0 || tr.older_sec > 0) out.push({
+    icon: tr.growth >= 0 ? '📈' : '📉', tone: tr.growth >= 0 ? 'ok' : 'warn',
+    key: 'trend', p: [Math.round(tr.growth * 100)] })
+  if (ws.workday_sec || ws.weekend_sec) out.push({
+    icon: '🗓', tone: 'muted',
+    key: 'week', p: [Math.round(ws.workday_sec / 3600), Math.round(ws.weekend_sec / 3600)] })
+  if (ux.uncensored.sessions && ux.censored.sessions) out.push({
+    icon: '🔞', tone: 'accent',
+    key: 'unc', p: [Math.round(ux.uncAvg / 60), Math.round(ux.cenAvg / 60)] })
+  return out
+})
+
+// 观看分析子页：overview / rhythm / preference
+const waSeg = ref('overview')
+
+// 趋势对比条百分比（近期 vs 早期）
+function trendPct(which) {
+  const a = Number(trend.value.recent_sec) || 0
+  const b = Number(trend.value.older_sec) || 0
+  const max = Math.max(1, a, b)
+  return which === 'recent' ? Math.round(a / max * 100) : Math.round(b / max * 100)
+}
+
+// 洞察文案（按语言渲染，p 为参数数组）
+function insightText(it) {
+  switch (it.key) {
+    case 'finish': return t('stats.insFinish', { rate: it.p[0], comp: it.p[1] })
+    case 'rewatch': return t('stats.insRewatch', { n: it.p[0], rate: it.p[1], avg: it.p[2] })
+    case 'streak': return t('stats.insStreak', { cur: it.p[0], max: it.p[1], gap: it.p[2] })
+    case 'trend': return t('stats.insTrend', { pct: it.p[0] })
+    case 'week': return t('stats.insWeek', { work: it.p[0], weekend: it.p[1] })
+    case 'unc': return t('stats.insUnc', { unc: it.p[0], cen: it.p[1] })
+    default: return ''
+  }
+}
 </script>
 
 <template>
@@ -404,6 +618,8 @@ const byGenreBars = computed(() => {
         <button :class="{on: activeTab==='trend'}" @click="activeTab='trend'">{{ $t('stats.yearTrend') }}</button>
         <button :class="{on: activeTab==='fun'}" @click="activeTab='fun'">{{ $t('stats.funTop') }}</button>
         <button :class="{on: activeTab==='movies'}" @click="activeTab='movies'">{{ $t('stats.allMovies', { n: allMovies.length }) }}</button>
+        <button :class="{on: activeTab==='wanalysis'}" @click="activeTab='wanalysis'">{{ $t('stats.watchAnalysis') }}</button>
+        <button :class="{on: activeTab==='watchlog'}" @click="activeTab='watchlog'">{{ $t('stats.watchlog') }}</button>
       </div>
 
       <!-- 存储分布 -->
@@ -608,7 +824,7 @@ const byGenreBars = computed(() => {
               <h3>📺 {{ $t('stats.watchLong') }}</h3>
               <ol class="fun-list">
                 <li v-for="m in watchedTop" :key="m.id" @click="openDetail(m.id)">
-                  <span class="t ellipsis">{{ m.title || m.code }}</span><span class="dim">{{ fmtMin(Math.round((m.watched_sec || 0) / 60)) }}</span>
+                  <span class="t ellipsis">{{ m.title || m.code }}</span><span class="dim">{{ fmtMin(Math.round(m.runtime || 0)) }}</span>
                 </li>
                 <li v-if="!watchedTop.length" class="muted">{{ $t('stats.noWatch') }}</li>
               </ol>
@@ -666,6 +882,253 @@ const byGenreBars = computed(() => {
                 <span v-if="m.watched" class="pill ok">{{ $t('stats.stateWatched') }}</span>
                 <span v-if="!m.watched && !m.watchlist && !m.favorite" class="pill muted">{{ $t('stats.dash') }}</span>
               </span>
+            </div>
+          </div>
+        </section>
+      </div>
+
+      <!-- 观看分析（多维） -->
+      <div v-show="activeTab==='wanalysis'">
+        <div class="seg-tabs wa-seg">
+          <button :class="{on: waSeg==='overview'}" @click="waSeg='overview'">{{ $t('stats.waSegOverview') }}</button>
+          <button :class="{on: waSeg==='rhythm'}" @click="waSeg='rhythm'">{{ $t('stats.waSegRhythm') }}</button>
+          <button :class="{on: waSeg==='preference'}" @click="waSeg='preference'">{{ $t('stats.waSegPref') }}</button>
+        </div>
+
+        <!-- 子页：概览 -->
+        <template v-if="waSeg==='overview'">
+          <section class="card panel">
+            <div class="panel-head"><h2>{{ $t('stats.waOverview') }}</h2></div>
+            <div class="wa-kpis">
+              <div class="wa-kpi"><div class="wa-kpi-val tabular">{{ waTotal.sessions }}</div><div class="wa-kpi-label">{{ $t('stats.wlSessions') }}</div></div>
+              <div class="wa-kpi"><div class="wa-kpi-val tabular">{{ wlFmtHours(waTotal.total_sec) }}</div><div class="wa-kpi-label">{{ $t('stats.wlDuration') }}</div></div>
+              <div class="wa-kpi"><div class="wa-kpi-val tabular">{{ waTotal.movies }}</div><div class="wa-kpi-label">{{ $t('stats.wlMovies') }}</div></div>
+              <div class="wa-kpi"><div class="wa-kpi-val tabular">{{ waTotal.days }}</div><div class="wa-kpi-label">{{ $t('stats.wlDays') }}</div></div>
+              <div class="wa-kpi"><div class="wa-kpi-val tabular">{{ Math.round(completion.finish_rate*100) }}%</div><div class="wa-kpi-label">{{ $t('stats.waFinishRate') }}</div></div>
+              <div class="wa-kpi"><div class="wa-kpi-val tabular">{{ Math.round(rewatch.rewatch_rate*100) }}%</div><div class="wa-kpi-label">{{ $t('stats.waRewatchRate') }}</div></div>
+            </div>
+          </section>
+
+          <section class="card panel">
+            <div class="panel-head"><h2>{{ $t('stats.waInsights') }}</h2><span class="muted small">{{ $t('stats.waInsightsHint') }}</span></div>
+            <div v-if="!insights.length" class="muted small pad">{{ $t('stats.waNoData') }}</div>
+            <div v-else class="wa-insights">
+              <div v-for="(it,i) in insights" :key="i" class="wa-insight" :class="'tone-'+it.tone">
+                <span class="wa-insight-icon">{{ it.icon }}</span>
+                <span class="wa-insight-text">{{ insightText(it) }}</span>
+              </div>
+            </div>
+          </section>
+
+          <div class="wa-grid">
+            <section class="card panel">
+              <div class="panel-head"><h2>{{ $t('stats.waByMethod') }}</h2></div>
+              <div v-if="!byMethodBars.length" class="muted small pad">{{ $t('stats.waNoData') }}</div>
+              <div v-else class="bars">
+                <div v-for="b in byMethodBars" :key="b.method" class="bar-row">
+                  <span class="bar-label">{{ methodLabel(b.method) }}</span>
+                  <span class="bar-track"><span class="bar-fill" :style="{ width: b.pct + '%' }"></span></span>
+                  <span class="bar-val tabular">{{ b.sessions }} · {{ wlFmtHours(b.sec) }}</span>
+                </div>
+              </div>
+            </section>
+
+            <section class="card panel">
+              <div class="panel-head"><h2>{{ $t('stats.waPrefer') }}</h2><span class="muted small">{{ $t('stats.waPreferHint') }}</span></div>
+              <div class="wa-pref">
+                <div v-for="d in profileDims" :key="d.key" class="wa-pref-col">
+                  <div class="wa-pref-title">{{ d.label() }}</div>
+                  <div v-if="!profileBars(d.key).length" class="muted small pad">{{ $t('stats.waNoData') }}</div>
+                  <div v-else class="bars compact">
+                    <div v-for="b in profileBars(d.key)" :key="b.name" class="bar-row" @click="drillTo(d.key === 'actresses' ? 'actress' : d.key, b.name)">
+                      <span class="bar-label ellipsis" :title="b.name">{{ b.name }}</span>
+                      <span class="bar-track"><span class="bar-fill" :style="{ width: b.pct + '%' }"></span></span>
+                      <span class="bar-val tabular">{{ wlFmtHours(b.sec) }}</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </section>
+          </div>
+        </template>
+
+        <!-- 子页：节奏 -->
+        <template v-else-if="waSeg==='rhythm'">
+          <section class="card panel">
+            <div class="panel-head"><h2>{{ $t('stats.waByHour') }}</h2><span class="muted small">{{ $t('stats.waByHourHint') }}</span></div>
+            <div class="wa-hours">
+              <div v-for="b in byHourBars" :key="b.h" class="wa-hour" :title="b.label + ':00'">
+                <div class="wa-hour-bar" :style="{ height: b.pct + '%' }"></div>
+                <span class="wa-hour-label">{{ b.h % 6 === 0 ? b.label : '' }}</span>
+              </div>
+            </div>
+          </section>
+
+          <div class="wa-grid">
+            <section class="card panel">
+              <div class="panel-head"><h2>{{ $t('stats.waByWeekday') }}</h2></div>
+              <div class="wa-weekday">
+                <div v-for="b in byWeekday" :key="b.wd" class="wa-wd" :title="b.label">
+                  <div class="wa-wd-bar" :style="{ height: b.pct + '%' }"></div>
+                  <span class="wa-wd-label">{{ b.label }}</span>
+                </div>
+              </div>
+            </section>
+
+            <section class="card panel">
+              <div class="panel-head"><h2>{{ $t('stats.waStreak') }}</h2></div>
+              <div class="wa-kpis">
+                <div class="wa-kpi"><div class="wa-kpi-val tabular">{{ streak.current }}</div><div class="wa-kpi-label">{{ $t('stats.waStreakCur') }}</div></div>
+                <div class="wa-kpi"><div class="wa-kpi-val tabular">{{ streak.max }}</div><div class="wa-kpi-label">{{ $t('stats.waStreakMax') }}</div></div>
+                <div class="wa-kpi"><div class="wa-kpi-val tabular">{{ streak.longest_gap_days }}</div><div class="wa-kpi-label">{{ $t('stats.waGap') }}</div></div>
+              </div>
+              <div class="muted small pad">{{ $t('stats.waWeekSplit', { work: Math.round(weekdaySplit.workday_sec/3600), weekend: Math.round(weekdaySplit.weekend_sec/3600) }) }}</div>
+            </section>
+          </div>
+
+          <section class="card panel">
+            <div class="panel-head"><h2>{{ $t('stats.waTrend') }}</h2><span class="muted small">{{ $t('stats.waTrendHint') }}</span></div>
+            <div class="wa-trend">
+              <div class="wa-trend-side">
+                <div class="wa-trend-num tabular" :class="trend.growth>=0?'up':'down'">{{ trend.growth>=0?'+':'' }}{{ Math.round(trend.growth*100) }}%</div>
+                <div class="muted small">{{ $t('stats.waTrendGrowth') }}</div>
+              </div>
+              <div class="wa-trend-detail">
+                <div class="bar-row"><span class="bar-label">{{ $t('stats.waRecent') }}</span><span class="bar-track"><span class="bar-fill" :style="{width: trendPct('recent')+'%'}"></span></span><span class="bar-val tabular">{{ wlFmtHours(trend.recent_sec) }}</span></div>
+                <div class="bar-row"><span class="bar-label">{{ $t('stats.waOlder') }}</span><span class="bar-track"><span class="bar-fill" :style="{width: trendPct('older')+'%'}"></span></span><span class="bar-val tabular">{{ wlFmtHours(trend.older_sec) }}</span></div>
+              </div>
+            </div>
+          </section>
+        </template>
+
+        <!-- 子页：偏好 × 内容 -->
+        <template v-else-if="waSeg==='preference'">
+          <div class="wa-pref-grid">
+            <section class="card panel">
+              <div class="panel-head"><h2>{{ $t('stats.waRatingX') }}</h2><span class="muted small">{{ $t('stats.waRatingXHint') }}</span></div>
+              <div v-if="!ratingX.length" class="muted small pad">{{ $t('stats.waNoData') }}</div>
+              <div v-else class="bars">
+                <div v-for="b in ratingX" :key="b.band" class="bar-row">
+                  <span class="bar-label">{{ b.label }}</span>
+                  <span class="bar-track"><span class="bar-fill" :style="{ width: b.pct + '%' }"></span></span>
+                  <span class="bar-val tabular">{{ b.sessions }} · {{ Math.round(b.avg_sec/60) }}m</span>
+                </div>
+              </div>
+            </section>
+
+            <section class="card panel">
+              <div class="panel-head"><h2>{{ $t('stats.waUncX') }}</h2></div>
+              <div class="wa-kpis">
+                <div class="wa-kpi"><div class="wa-kpi-val tabular">{{ Math.round(uncensoredX.uncAvg/60) }}m</div><div class="wa-kpi-label">{{ $t('stats.waUncAvg') }}</div></div>
+                <div class="wa-kpi"><div class="wa-kpi-val tabular">{{ Math.round(uncensoredX.cenAvg/60) }}m</div><div class="wa-kpi-label">{{ $t('stats.waCenAvg') }}</div></div>
+                <div class="wa-kpi"><div class="wa-kpi-val tabular">{{ uncensoredX.uncensored.movies }}</div><div class="wa-kpi-label">{{ $t('stats.waUncMovies') }}</div></div>
+              </div>
+            </section>
+          </div>
+
+          <section class="card panel">
+            <div class="panel-head"><h2>{{ $t('stats.waDurX') }}</h2><span class="muted small">{{ $t('stats.waDurXHint') }}</span></div>
+            <div class="wa-dur">
+              <div v-for="b in durationProfile" :key="b.key" class="wa-dur-row">
+                <span class="wa-dur-label">{{ b.label }}</span>
+                <div class="wa-dur-bars">
+                  <div class="wa-dur-line"><span class="wa-dur-tag watched">{{ $t('stats.waWatched') }}</span><span class="bar-track"><span class="bar-fill ok" :style="{width: b.wPct+'%'}"></span></span><span class="bar-val tabular">{{ wlFmtHours(b.watched) }}</span></div>
+                  <div class="wa-dur-line"><span class="wa-dur-tag library">{{ $t('stats.waLibrary') }}</span><span class="bar-track"><span class="bar-fill muted" :style="{width: b.lPct+'%'}"></span></span><span class="bar-val tabular">{{ b.library }}</span></div>
+                </div>
+              </div>
+            </div>
+          </section>
+        </template>
+
+        <EmptyState v-if="!waTotal.sessions" icon="👁" :title="$t('stats.wlEmpty')" :desc="$t('stats.wlEmptyDesc')" />
+      </div>
+
+      <!-- 观看明细 -->
+      <div v-show="activeTab==='watchlog'">
+        <div class="wh-filter">
+          <div class="wh-fields">
+            <label class="wh-field">
+              <span>{{ $t('stats.wlFrom') }}</span>
+              <input type="date" v-model="wlQuery.from" @change="applyWlFilter" />
+            </label>
+            <label class="wh-field">
+              <span>{{ $t('stats.wlTo') }}</span>
+              <input type="date" v-model="wlQuery.to" @change="applyWlFilter" />
+            </label>
+            <label class="wh-field">
+              <span>{{ $t('stats.wlMethod') }}</span>
+              <select v-model="wlQuery.method" @change="applyWlFilter">
+                <option value="">{{ $t('stats.all') }}</option>
+                <option value="builtin">{{ $t('rankings.methodBuiltin') }}</option>
+                <option value="external">{{ $t('rankings.methodExternal') }}</option>
+                <option value="system">{{ $t('rankings.methodSystem') }}</option>
+              </select>
+            </label>
+            <label class="wh-field grow">
+              <span>{{ $t('stats.wlQ') }}</span>
+              <input type="text" v-model="wlQuery.q" :placeholder="$t('stats.wlQPh')" @keyup.enter="applyWlFilter" @blur="applyWlFilter" />
+            </label>
+            <button class="btn tiny ghost" v-if="wlHasFilter" @click="resetWlFilter">{{ $t('stats.reset') }}</button>
+          </div>
+
+          <div class="wh-summary" v-if="!wlLoading && wlTotal">
+            <div class="wh-card">
+              <div class="wh-card-val tabular">{{ wlSummary.sessions }}</div>
+              <div class="wh-card-label">{{ $t('stats.wlSessions') }}</div>
+            </div>
+            <div class="wh-card">
+              <div class="wh-card-val tabular">{{ wlFmtHours(wlSummary.total_sec) }}</div>
+              <div class="wh-card-label">{{ $t('stats.wlDuration') }}</div>
+            </div>
+            <div class="wh-card">
+              <div class="wh-card-val tabular">{{ wlSummary.movies }}</div>
+              <div class="wh-card-label">{{ $t('stats.wlMovies') }}</div>
+            </div>
+            <div class="wh-card">
+              <div class="wh-card-val tabular">{{ wlSummary.days }}</div>
+              <div class="wh-card-label">{{ $t('stats.wlDays') }}</div>
+            </div>
+          </div>
+        </div>
+
+        <section class="card panel">
+          <div class="panel-head">
+            <h2>{{ $t('stats.watchlog') }}</h2>
+            <span class="muted small">{{ $t('stats.wlCount', { n: wlTotal }) }}</span>
+          </div>
+
+          <div v-if="wlLoading" class="loading-block"><div class="spinner"></div></div>
+          <EmptyState v-else-if="!wlItems.length" icon="👁" :title="$t('stats.wlEmpty')" :desc="$t('stats.wlEmptyDesc')" />
+
+          <div v-else>
+            <div class="tbl wl-tbl">
+              <div class="trow th">
+                <span class="c-movie">{{ $t('stats.colMovie') }}</span>
+                <span class="c-when">{{ $t('stats.colWhen') }}</span>
+                <span class="c-dur">{{ $t('stats.colDur') }}</span>
+                <span class="c-method">{{ $t('stats.colMethod') }}</span>
+              </div>
+              <div
+                v-for="h in wlItems"
+                :key="h.id"
+                class="trow"
+                :class="{ 'no-src': !h.playable }"
+                @click="openDetail(h.movie_id)"
+              >
+                <span class="c-movie ellipsis">{{ displayTitle(h) }}</span>
+                <span class="c-when tabular muted">{{ fmtDate(h.started_at) }}</span>
+                <span class="c-dur tabular muted">{{ fmtDuration(h.watched_sec) }}</span>
+                <span class="c-method">
+                  <span v-if="!h.playable" class="pill nosrc">{{ $t('stats.wlNoSource') }}</span>
+                  <span v-else class="pill" :class="methodTone(h.method)">{{ methodLabel(h.method) }}</span>
+                </span>
+              </div>
+            </div>
+
+            <div class="wh-pager">
+              <button class="btn tiny" :disabled="wlPage <= 1" @click="wlChangePage(-1)">‹</button>
+              <span class="tabular">{{ wlPage }} / {{ Math.max(1, Math.ceil(wlTotal / 50)) }}</span>
+              <button class="btn tiny" :disabled="wlPage * 50 >= wlTotal" @click="wlChangePage(1)">›</button>
             </div>
           </div>
         </section>
@@ -931,4 +1394,134 @@ const byGenreBars = computed(() => {
 .pill.accent { background: rgba(120,120,255,.16); color: var(--c-accent); }
 .pill.ok { background: rgba(47,174,106,.16); color: #2fae6a; }
 .pill.muted { background: var(--c-surface-2); color: var(--c-text-3); }
+
+/* 观看明细：筛选栏与汇总 */
+.wh-filter {
+  display: flex; flex-direction: column; gap: var(--sp-3);
+  margin-top: 18px; padding: var(--sp-3) var(--sp-4);
+  background: var(--c-surface); border: 1px solid var(--c-line); border-radius: var(--r-md);
+}
+.wh-fields { display: flex; flex-wrap: wrap; align-items: flex-end; gap: var(--sp-3); }
+.wh-field { display: flex; flex-direction: column; gap: 4px; font-size: var(--fs-xs); color: var(--c-text-3); }
+.wh-field.grow { flex: 1; min-width: 180px; }
+.wh-field span { padding-left: 2px; }
+.wh-field input, .wh-field select {
+  height: 32px; padding: 0 var(--sp-2); border-radius: var(--r-sm);
+  border: 1px solid var(--c-line); background: var(--c-surface-2); color: var(--c-text);
+  font-size: var(--fs-sm); font-family: inherit;
+}
+.wh-field input:focus, .wh-field select:focus { outline: none; border-color: var(--c-primary); }
+
+.wh-summary { display: grid; grid-template-columns: repeat(4, 1fr); gap: var(--sp-3); }
+.wh-card {
+  display: flex; flex-direction: column; gap: 2px; padding: var(--sp-3);
+  border-radius: var(--r-sm); background: var(--c-surface-2); border: 1px solid var(--c-line);
+}
+.wh-card-val { font-size: var(--fs-xl, 20px); font-weight: 700; color: var(--c-primary); }
+.wh-card-label { font-size: var(--fs-xs); color: var(--c-text-3); }
+
+.wh-pager {
+  display: flex; align-items: center; justify-content: center; gap: var(--sp-3);
+  padding: var(--sp-3); font-size: var(--fs-sm); color: var(--c-text-2);
+}
+.wh-pager button:disabled { opacity: .45; cursor: default; }
+
+/* 观看明细表列 */
+.wl-tbl .trow { grid-template-columns: minmax(0, 1fr) 130px 90px 110px; }
+.wl-tbl .c-when, .wl-tbl .c-dur { text-align: right; }
+.wl-tbl .c-method { text-align: right; }
+.wl-tbl .pill { display: inline-block; padding: 1px 9px; border-radius: 99px; font-size: 11px; font-weight: 600; }
+.wl-tbl .pill.ok { background: rgba(47,174,106,.16); color: #2fae6a; }
+.wl-tbl .pill.accent { background: rgba(120,120,255,.16); color: var(--c-accent); }
+.wl-tbl .pill.muted { background: var(--c-surface-2); color: var(--c-text-3); }
+.wl-tbl .trow.no-src .c-movie { color: var(--c-text-3); }
+.wl-tbl .pill.nosrc { background: var(--c-surface-2); color: var(--c-text-3); border: 1px solid var(--c-line); }
+
+@media (max-width: 640px) {
+  .wh-summary { grid-template-columns: repeat(2, 1fr); }
+  .wl-tbl .trow { grid-template-columns: minmax(0,1fr) 96px; }
+  .wl-tbl .c-dur, .wl-tbl .c-method { display: none; }
+}
+
+/* ===== 观看分析 ===== */
+.wa-kpis { display: grid; grid-template-columns: repeat(6, 1fr); gap: var(--sp-3); padding: var(--sp-3); }
+.wa-kpi { display: flex; flex-direction: column; gap: 2px; padding: var(--sp-3); border-radius: var(--r-sm); background: var(--c-surface-2); border: 1px solid var(--c-line); }
+.wa-kpi-val { font-size: var(--fs-xl, 20px); font-weight: 700; color: var(--c-primary); }
+.wa-kpi-label { font-size: var(--fs-xs); color: var(--c-text-3); }
+
+.wa-grid { display: grid; grid-template-columns: 1.4fr 1fr; gap: var(--sp-4); margin-top: var(--sp-4); }
+.wa-hours { display: flex; align-items: flex-end; gap: 3px; height: 160px; padding: 8px 4px 0; }
+.wa-hour { flex: 1; display: flex; flex-direction: column; align-items: center; height: 100%; justify-content: flex-end; gap: 4px; }
+.wa-hour-bar { width: 70%; min-height: 2px; border-radius: 3px 3px 0 0; background: linear-gradient(180deg, var(--c-primary), color-mix(in srgb, var(--c-primary) 55%, #000)); }
+.wa-hour-label { font-size: 9px; color: var(--c-text-3); }
+
+.wa-months { display: flex; align-items: flex-end; gap: 6px; height: 180px; padding: 8px 4px 0; }
+.wa-month { flex: 1; display: flex; flex-direction: column; align-items: center; height: 100%; justify-content: flex-end; gap: 4px; }
+.wa-month-bar { width: 70%; min-height: 2px; border-radius: 3px 3px 0 0; background: linear-gradient(180deg, var(--c-accent), color-mix(in srgb, var(--c-accent) 55%, #000)); cursor: default; }
+.wa-month-label { font-size: 10px; color: var(--c-text-3); }
+
+.wa-pref { display: grid; grid-template-columns: 1fr; gap: var(--sp-4); }
+.wa-pref-col { min-width: 0; }
+.wa-pref-title { font-size: var(--fs-sm); font-weight: 700; color: var(--c-text-2); margin-bottom: var(--sp-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.bars.compact .bar-row {
+  grid-template-columns: minmax(0, 200px) minmax(0, 1fr) auto;
+  gap: 12px; margin-bottom: 6px; min-height: 34px; padding: 4px 6px;
+}
+.bars.compact .bar-label {
+  font-size: 13px; line-height: 1.3; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; min-width: 0;
+}
+.bars.compact .bar-val { font-size: 12px; }
+.pad { padding: var(--sp-3); }
+
+/* 观看分析子页切换 */
+.wa-seg { display: flex; gap: var(--sp-2); margin-bottom: var(--sp-3); flex-wrap: wrap; }
+.wa-seg button { padding: 7px 16px; border-radius: 999px; border: 1px solid var(--c-border); background: var(--c-bg-soft); color: var(--c-text-2); font-size: var(--fs-sm); cursor: pointer; transition: .15s; }
+.wa-seg button:hover { border-color: var(--c-accent); }
+.wa-seg button.on { background: var(--c-accent); color: #fff; border-color: var(--c-accent); }
+
+/* 洞察卡片 */
+.wa-insights { display: flex; flex-direction: column; gap: var(--sp-2); }
+.wa-insight { display: flex; align-items: flex-start; gap: var(--sp-2); padding: 10px 12px; border-radius: 10px; background: var(--c-bg-soft); border-left: 3px solid var(--c-border); font-size: var(--fs-sm); line-height: 1.5; }
+.wa-insight-icon { font-size: 18px; line-height: 1.2; }
+.wa-insight.tone-ok { border-left-color: var(--c-ok); }
+.wa-insight.tone-warn { border-left-color: #e0a000; }
+.wa-insight.tone-accent { border-left-color: var(--c-accent); }
+.wa-insight.tone-muted { border-left-color: var(--c-text-3); }
+
+/* 星期节律 */
+.wa-weekday { display: flex; align-items: flex-end; gap: 6px; height: 160px; padding: 8px 4px 0; }
+.wa-wd { flex: 1; display: flex; flex-direction: column; align-items: center; height: 100%; justify-content: flex-end; gap: 4px; }
+.wa-wd-bar { width: 60%; min-height: 2px; border-radius: 3px 3px 0 0; background: linear-gradient(180deg, var(--c-accent), color-mix(in srgb, var(--c-accent) 55%, #000)); }
+.wa-wd-label { font-size: 10px; color: var(--c-text-3); }
+
+/* 趋势 */
+.wa-trend { display: flex; gap: var(--sp-4); align-items: center; flex-wrap: wrap; }
+.wa-trend-side { text-align: center; min-width: 90px; }
+.wa-trend-num { font-size: 28px; font-weight: 800; }
+.wa-trend-num.up { color: var(--c-ok); }
+.wa-trend-num.down { color: #e05555; }
+.wa-trend-detail { flex: 1; min-width: 220px; }
+
+/* 偏好子页全宽单列 */
+.wa-pref-grid { display: grid; grid-template-columns: 1fr; gap: var(--sp-3); }
+
+/* 时长档位 拥有 vs 观看 */
+.wa-dur { display: flex; flex-direction: column; gap: var(--sp-3); }
+.wa-dur-row { display: flex; align-items: center; gap: var(--sp-3); }
+.wa-dur-label { width: 92px; font-size: var(--fs-sm); color: var(--c-text-2); flex-shrink: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.wa-dur-bars { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 6px; }
+.wa-dur-line { display: flex; align-items: center; gap: var(--sp-2); }
+.wa-dur-tag { width: 48px; font-size: 10px; text-align: center; padding: 2px 0; border-radius: 4px; flex-shrink: 0; }
+.wa-dur-tag.watched { background: color-mix(in srgb, var(--c-ok) 18%, transparent); color: var(--c-ok); }
+.wa-dur-tag.library { background: var(--c-bg-sunken); color: var(--c-text-3); }
+
+@media (max-width: 900px) {
+  .wa-kpis { grid-template-columns: repeat(3, 1fr); }
+  .wa-grid { grid-template-columns: 1fr; }
+}
+@media (max-width: 640px) {
+  .wa-kpis { grid-template-columns: repeat(2, 1fr); }
+  .wa-insights { gap: var(--sp-2); }
+}
 </style>

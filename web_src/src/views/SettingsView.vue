@@ -4,7 +4,7 @@ import { state } from '../state.js'
 import {
   getConfig, putConfig, listProviders, testScraper as apiTest,
   parsePreview as apiParse, fsList, sniffCovers, csvUrl, cacheAvatars,
-  fillActressAvatars, rescanLocalCovers, getServerInfo, resetToken, checkUpdate,
+  fillActressAvatars, rescanLocalCovers,   getServerInfo, resetToken, checkUpdate,
 } from '../api.js'
 import { toast, confirmDialog } from '../utils.js'
 import { useTasks } from '../composables/useTasks.js'
@@ -354,52 +354,42 @@ async function loadServerInfo() {
     if (urls.length) qrAddr.value = urls[0]
     if (r.access_token) tokInput.value = r.access_token
     if (r.app_version) appVersion.value = r.app_version
-    if (typeof r.update_feed === 'string') feedInput.value = r.update_feed
+    if (r.build_date) buildDate.value = r.build_date
   } catch (e) { /* 非致命 */ }
 }
 
-/* ---------------- 版本检查 ---------------- */
+/* ---------------- 版本与下载 ---------------- */
 const RELEASE_URL = 'https://github.com/dengji85/avm/releases'
 const REPO_URL = 'https://github.com/dengji85/avm'
 const releaseUrl = RELEASE_URL
 const repoUrl = REPO_URL
 const appVersion = ref('')
-const checking = ref(false)
-const updateState = reactive({ checked: false, update_available: false, latest: '', download_url: '', released: '', notes: '', error: '' })
-async function checkForUpdate() {
-  if (checking.value) return
-  checking.value = true
-  updateState.checked = false
-  updateState.error = ''
-  try {
-    const r = await checkUpdate()
-    updateState.checked = true
-    updateState.update_available = !!r.update_available
-    updateState.latest = r.latest || r.current || ''
-    updateState.download_url = r.download_url || ''
-    updateState.released = r.released || ''
-    updateState.notes = r.notes || ''
-    updateState.error = r.error || ''
-    if (r.current && !appVersion.value) appVersion.value = r.current
-  } catch (e) {
-    updateState.checked = true
-    updateState.error = e.message || String(e)
-  } finally {
-    checking.value = false
-  }
-}
+const buildDate = ref('')
 
-/* ---------------- 更新源（手动地址） ---------------- */
-const feedInput = ref('')
-const savingFeed = ref(false)
-async function saveFeed() {
-  if (savingFeed.value) return
-  savingFeed.value = true
+/* 检查更新 */
+const checkingUpdate = ref(false)
+const updateState = ref('idle') // idle | upToDate | newVersion | error
+const updateInfo = reactive({ latest: '', downloadUrl: '', released: '', notes: '', error: '' })
+async function doCheckUpdate() {
+  if (checkingUpdate.value) return
+  checkingUpdate.value = true
+  updateState.value = 'idle'
   try {
-    await putConfig({ server: { update_feed: feedInput.value.trim() } })
-    toast(t('settings.feedSaved'), 'ok')
-  } catch (e) { toast(e.message || String(e), 'err') }
-  finally { savingFeed.value = false }
+    const r = await checkUpdate('stable')
+    updateInfo.latest = r.latest || appVersion.value
+    updateInfo.downloadUrl = r.download_url || ''
+    updateInfo.released = r.released || ''
+    updateInfo.notes = r.notes || ''
+    updateInfo.error = r.error || ''
+    if (r.error) updateState.value = 'error'
+    else if (r.update_available) updateState.value = 'newVersion'
+    else updateState.value = 'upToDate'
+  } catch (e) {
+    updateState.value = 'error'
+    updateInfo.error = e.message || String(e)
+  } finally {
+    checkingUpdate.value = false
+  }
 }
 
 onMounted(async () => { await load(); await loadServerInfo() })
@@ -838,23 +828,28 @@ onMounted(async () => { await load(); await loadServerInfo() })
           <div class="about-ver">
             <span class="about-ver-tag">{{ $t('settings.curVersion') }}</span>
             <span class="about-ver-num mono">{{ appVersion || '—' }}</span>
+            <span class="about-build muted">{{ buildDate || '' }}</span>
           </div>
           <div class="about-actions">
-            <button class="btn" :disabled="checking" @click="checkForUpdate">{{ checking ? $t('settings.checking') : $t('settings.checkUpdate') }}</button>
-            <a class="btn ghost" :href="releaseUrl" target="_blank" rel="noopener">{{ $t('settings.goDownload') }}</a>
+            <button class="btn ghost" :disabled="checkingUpdate" @click="doCheckUpdate">
+              <span v-if="checkingUpdate" class="spinner sm"></span>
+              {{ checkingUpdate ? $t('settings.checking') : $t('settings.checkUpdate') }}
+            </button>
             <a class="btn ghost" :href="repoUrl" target="_blank" rel="noopener">{{ $t('settings.homepage') }}</a>
           </div>
-          <div v-if="updateState.error" class="about-update err">{{ updateState.error }}</div>
-          <div v-else-if="updateState.checked" class="about-update">
-            <div v-if="updateState.update_available" class="upd">
-              🎉 {{ $t('settings.newVersion') }} <b class="mono">{{ updateState.latest }}</b>
-              <span v-if="updateState.released" class="muted">（{{ updateState.released }}）</span>
-              <a v-if="updateState.download_url" class="ver-dl" :href="updateState.download_url" target="_blank" rel="noopener">{{ $t('settings.download') }}</a>
-              <div v-if="updateState.notes" class="ver-notes">{{ updateState.notes }}</div>
-            </div>
-            <div v-else class="ok">✅ {{ $t('settings.upToDate') }} <span class="muted">（{{ updateState.latest }}）</span></div>
-          </div>
           <p class="about-local muted">{{ $t('settings.aboutLocal') }}</p>
+          <div v-if="updateState === 'upToDate'" class="about-update ok">
+            {{ $t('settings.upToDate') }} · v{{ appVersion }}
+          </div>
+          <div v-else-if="updateState === 'newVersion'" class="about-update warn">
+            <span>{{ $t('settings.newVersion') }}：v{{ updateInfo.latest }}<template v-if="updateInfo.released">（{{ updateInfo.released }}）</template></span>
+            <a class="btn tiny primary" :href="updateInfo.downloadUrl || releaseUrl" target="_blank" rel="noopener">{{ $t('settings.download') }}</a>
+            <p v-if="updateInfo.notes" class="about-notes">{{ updateInfo.notes }}</p>
+          </div>
+          <div v-else-if="updateState === 'error'" class="about-update err">
+            <span>{{ $t('settings.updateFailed') }}</span>
+            <a class="btn tiny" :href="releaseUrl" target="_blank" rel="noopener">{{ $t('settings.goRelease') }}</a>
+          </div>
         </div>
 
         <!-- 次：数据管理 -->
@@ -876,14 +871,6 @@ onMounted(async () => { await load(); await loadServerInfo() })
                 <li><b>{{ $t('settings.tipCsv').split('：')[0] }}</b>：{{ $t('settings.tipCsv').split('：').slice(1).join('：') }}</li>
               </ul>
             </div>
-            <details class="adv">
-              <summary>{{ $t('settings.updateFeed') }}</summary>
-              <div class="feed-row">
-                <input class="inp" v-model.trim="feedInput" :placeholder="$t('settings.updateFeedPh')" />
-                <button class="btn tiny" :disabled="savingFeed" @click="saveFeed">{{ savingFeed ? $t('settings.saving') : $t('settings.saveFeed') }}</button>
-              </div>
-              <span class="muted sm">{{ $t('settings.updateFeedHint') }}</span>
-            </details>
           </div>
         </div>
 
@@ -984,9 +971,6 @@ onMounted(async () => { await load(); await loadServerInfo() })
 .ver-msg.ok { color: var(--c-ok, #4caf50); }
 .ver-dl { margin-left: var(--sp-2); color: var(--c-accent, #5b9dff); text-decoration: underline; }
 .ver-notes { margin-top: var(--sp-1); color: var(--c-text-3); white-space: pre-wrap; line-height: 1.5; }
-.ver-feed { margin-top: var(--sp-3); }
-.ver-feed .feed-row { display: flex; gap: var(--sp-2); margin-top: var(--sp-1); }
-.ver-feed .feed-row .inp { flex: 1; min-width: 0; }
 
 .test-out {
   margin: 0;
@@ -1035,24 +1019,21 @@ kbd {
   font-size: var(--fs-xs);
 }
 
-/* ---- 关于页：主视觉 ---- */
+/* ---- 关于页：主视觉（与 .panel 卡片风格一致） ---- */
 .about-hero {
-  padding: var(--sp-6) var(--sp-5);
+  padding: var(--sp-5);
   border-radius: var(--r-lg);
-  background: linear-gradient(135deg, var(--c-accent-soft, rgba(91,157,255,.12)), transparent 70%);
+  background: var(--c-surface);
   border: 1px solid var(--c-line);
   margin-bottom: var(--sp-4);
 }
 .about-brand { font-size: 1.9rem; font-weight: 700; letter-spacing: .02em; }
 .about-sub { margin-top: var(--sp-1); color: var(--c-text-2); font-size: var(--fs-md); }
-.about-ver { margin-top: var(--sp-4); display: flex; align-items: baseline; gap: var(--sp-2); }
+.about-ver { margin-top: var(--sp-4); display: flex; align-items: baseline; gap: var(--sp-2); flex-wrap: wrap; }
+.about-build { font-size: var(--fs-sm); color: var(--c-text-3); }
 .about-ver-tag { font-size: var(--fs-sm); color: var(--c-text-3); }
 .about-ver-num { font-size: 1.4rem; font-weight: 700; color: var(--c-accent, #5b9dff); }
 .about-actions { margin-top: var(--sp-4); display: flex; gap: var(--sp-2); flex-wrap: wrap; }
-.about-update { margin-top: var(--sp-3); font-size: var(--fs-sm); }
-.about-update .upd { color: var(--c-warn, #ffb454); }
-.about-update .ok { color: var(--c-ok, #4caf50); }
-.about-update.err { color: var(--c-err, #ff6b6b); }
 .about-local { margin-top: var(--sp-4); font-size: var(--fs-sm); }
 
 /* ---- 关于页：次区块 ---- */

@@ -12,13 +12,13 @@ const KINDS = [
   ['favorite', 'rankings.favorite', (m) => `${m.rating || 0} 星`],
 ]
 
-const TABS = [...KINDS.map((k) => k[0]), 'history']
-
 const kind = ref('watched')
 const items = ref([])
+const loading = ref(false)
+
+// 观看历史（简单列表，明细查询见统计页）
 const historyPage = ref(1)
 const historyTotal = ref(0)
-const loading = ref(false)
 
 const isHistory = computed(() => kind.value === 'history')
 const fmt = computed(() => (KINDS.find((k) => k[0] === kind.value) || KINDS[0])[2])
@@ -37,7 +37,7 @@ async function load(k) {
   loading.value = true
   try {
     if (k === 'history') {
-      const r = await getWatchHistory(historyPage.value, 50)
+      const r = await getWatchHistory({ page: historyPage.value, size: 50 })
       items.value = (r && r.items) || []
       historyTotal.value = (r && r.total) || 0
     } else {
@@ -250,5 +250,54 @@ onMounted(() => load('watched'))
   padding: var(--sp-3);
   font-size: var(--fs-sm);
   color: var(--c-text-2);
+}
+
+/* 观看明细：筛选栏 */
+.wh-filter {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  padding: var(--sp-3) var(--sp-4);
+  background: var(--c-surface);
+  border: 1px solid var(--c-line);
+  border-radius: var(--r-md);
+  margin: 0 var(--sp-4) var(--sp-2);
+}
+.wh-fields { display: flex; flex-wrap: wrap; align-items: flex-end; gap: var(--sp-3); }
+.wh-field { display: flex; flex-direction: column; gap: 4px; font-size: var(--fs-xs); color: var(--c-text-3); }
+.wh-field.grow { flex: 1; min-width: 180px; }
+.wh-field span { padding-left: 2px; }
+.wh-field input, .wh-field select {
+  height: 32px;
+  padding: 0 var(--sp-2);
+  border-radius: var(--r-sm);
+  border: 1px solid var(--c-line);
+  background: var(--c-surface-2);
+  color: var(--c-text);
+  font-size: var(--fs-sm);
+  font-family: inherit;
+}
+.wh-field input:focus, .wh-field select:focus { outline: none; border-color: var(--c-primary); }
+
+/* 汇总卡片 */
+.wh-summary {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: var(--sp-3);
+}
+.wh-card {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: var(--sp-3);
+  border-radius: var(--r-sm);
+  background: var(--c-surface-2);
+  border: 1px solid var(--c-line);
+}
+.wh-card-val { font-size: var(--fs-xl, 20px); font-weight: 700; color: var(--c-primary-h); }
+.wh-card-label { font-size: var(--fs-xs); color: var(--c-text-3); }
+
+@media (max-width: 640px) {
+  .wh-summary { grid-template-columns: repeat(2, 1fr); }
 }
 </style>

@@ -1,7 +1,7 @@
 <script setup>
 import { ref, reactive, onMounted, computed } from 'vue'
 import { state } from '../../state.js'
-import { scrapeFailures, scrapeRetryNeterr, scrapeRetryWithProvider, listProviders, scrapeOne } from '../../api.js'
+import { scrapeFailures, scrapeRetryNeterr, scrapeRetryWithProvider, listProviders, scrapeOne, openFile } from '../../api.js'
 import { toast } from '../../utils.js'
 import { t } from '../../i18n/index.js'
 
@@ -70,7 +70,17 @@ async function retryWithProvider() {
   } catch (e) { toast(e.message, 'err') } finally { busy.value = false }
 }
 
-function viewMovie(id) { if (id) { state.currentId = id; state.view = 'detail' } }
+async function viewMovie(it) {
+  if (!it) return
+  // 已入库：跳转影片详情
+  if (it.movie_id) { state.currentId = it.movie_id; state.view = 'detail'; return }
+  // 未入库但有文件路径：在文件管理器定位文件
+  if (it.file_path) {
+    try { await openFile(it.file_path) } catch (e) { toast(e.message || t('maint.failOpenErr'), 'err') }
+    return
+  }
+  toast(t('maint.failNoMovie'), 'err')
+}
 
 // 由 diagnosis.summary_kind 决定整行配色
 function rowClass(d) { return 'k-' + (d && d.summary_kind || 'miss') }
@@ -120,7 +130,7 @@ onMounted(() => { load(); loadProviders() })
         <tbody>
           <tr v-for="it in items" :key="it.code" :class="rowClass(it.diagnosis)">
             <td class="c"><input type="checkbox" :checked="isSel(it.code)" @change="toggle(it.code)" /></td>
-            <td class="mono c cp" @click="viewMovie(it.movie_id)">{{ it.code || '—' }}</td>
+            <td class="mono c cp" @click="viewMovie(it)">{{ it.code || '—' }}</td>
             <td class="diag">{{ it.diagnosis.headline }}</td>
             <td class="srcs">
               <span v-for="s in it.diagnosis.sources" :key="s.provider" class="src" :class="'k-' + s.kind"
@@ -129,7 +139,11 @@ onMounted(() => { load(); loadProviders() })
               </span>
             </td>
             <td class="rec">{{ it.diagnosis.recommend }}</td>
-            <td class="c"><button class="btn tiny" @click="viewMovie(it.movie_id)">{{ t('maint.failViewMovie') }}</button></td>
+            <td class="c">
+              <button class="btn tiny" @click="viewMovie(it)">
+                {{ it.movie_id ? t('maint.failViewMovie') : (it.file_path ? t('maint.failOpenFolder') : t('maint.failNoAction')) }}
+              </button>
+            </td>
           </tr>
         </tbody>
       </table>

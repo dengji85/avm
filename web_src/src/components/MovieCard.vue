@@ -4,6 +4,7 @@ import { state } from '../state.js'
 import { coverThumbUrl, toggleFlag, playMovie } from '../api.js'
 import { coverFallback, fmtMin, fmtSize, toast, qualityTag } from '../utils.js'
 import { t } from '../i18n/index.js'
+import AddToCollectionBtn from './AddToCollectionBtn.vue'
 
 const props = defineProps({
   movie: { type: Object, required: true },
@@ -105,8 +106,9 @@ async function play(e) {
         <span v-if="m.code" class="tag code">{{ m.code }}</span>
       </div>
 
-      <!-- 右上：收藏 -->
+      <!-- 右上：收藏 + 加片单 -->
       <div class="tr">
+        <AddToCollectionBtn :movie-id="m.id" variant="card" />
         <button class="fav" :class="{ on: m.favorite }" @click="fav" :data-tip="m.favorite ? '取消收藏' : '收藏'">
           {{ m.favorite ? '♥' : '♡' }}
         </button>

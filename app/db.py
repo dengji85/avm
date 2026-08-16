@@ -20,6 +20,7 @@ CREATE TABLE IF NOT EXISTS movies (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     key             TEXT    NOT NULL UNIQUE,   -- 唯一归并键：番号或无番号时的路径指纹
     code            TEXT    DEFAULT '',        -- 展示用番号
+    code_norm       TEXT    DEFAULT '',        -- 智能检索归一番号：半角/小写/去分隔符
     has_code        INTEGER DEFAULT 0,
     code_rule       TEXT    DEFAULT '',        -- 命中的识别规则名
     title           TEXT    DEFAULT '',
@@ -183,6 +184,12 @@ CREATE TABLE IF NOT EXISTS collection_items (
 CREATE INDEX IF NOT EXISTS idx_wp_updated ON watch_progress(updated_at);
 CREATE INDEX IF NOT EXISTS idx_ci_coll    ON collection_items(collection_id);
 
+CREATE TABLE IF NOT EXISTS collection_playhead (
+    collection_id INTEGER PRIMARY KEY REFERENCES collections(id) ON DELETE CASCADE,
+    movie_id      INTEGER NOT NULL REFERENCES movies(id)        ON DELETE CASCADE,
+    updated_at    TEXT DEFAULT (datetime('now','localtime'))
+);
+
 CREATE TABLE IF NOT EXISTS watch_sessions (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     movie_id   INTEGER NOT NULL REFERENCES movies(id) ON DELETE CASCADE,
@@ -221,6 +228,14 @@ def init_db() -> None:
 def _migrate(conn: sqlite3.Connection) -> None:
     """为新版本新增的列做 ALTER 迁移，保证老库可平滑升级。"""
     movie_cols = {r[1] for r in conn.execute("PRAGMA table_info(movies)").fetchall()}
+    if "code_norm" not in movie_cols:
+        conn.execute("ALTER TABLE movies ADD COLUMN code_norm TEXT DEFAULT ''")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_movies_codenorm ON movies(code_norm)")
+        # 存量番号归一化：用 Python 的 _smart_code（半角/小写/去分隔符/全角转半角）全部重算，
+        # 避免依赖 SQLite 的 LOWER，保证 code_norm 一律小写，大小写搜索都能命中。
+        from store import _smart_code
+        for code, mid in conn.execute("SELECT code, id FROM movies WHERE code <> ''"):
+            conn.execute("UPDATE movies SET code_norm = ? WHERE id = ?", (_smart_code(code), mid))
     if "resolution" not in movie_cols:
         conn.execute("ALTER TABLE movies ADD COLUMN resolution TEXT DEFAULT ''")
     if "watchlist" not in movie_cols:
@@ -269,6 +284,8 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE collections ADD COLUMN kind TEXT DEFAULT 'manual'")
     if "rule" not in coll_cols:
         conn.execute("ALTER TABLE collections ADD COLUMN rule TEXT DEFAULT ''")
+    if "system_key" not in coll_cols:
+        conn.execute("ALTER TABLE collections ADD COLUMN system_key TEXT DEFAULT ''")
     conn.execute(
         "CREATE TABLE IF NOT EXISTS movie_previews ("
         "movie_id INTEGER PRIMARY KEY REFERENCES movies(id) ON DELETE CASCADE, "

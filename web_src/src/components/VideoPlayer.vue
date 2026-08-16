@@ -10,7 +10,7 @@ const props = defineProps({
   movieId: { type: Number, required: true },
   startAt: { type: Number, default: 0 },
 })
-const emit = defineEmits(['close', 'progress'])
+const emit = defineEmits(['close', 'progress', 'ended'])
 
 const containerEl = ref(null)
 const failed = ref(false)
@@ -88,6 +88,7 @@ function onError() {
 function onEnded() {
   saveProgress(true)
   endSessionNow(1)
+  emit('ended')
 }
 
 /** 结束观看会话，落库真实观看时长 */

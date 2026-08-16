@@ -541,4 +541,13 @@
   .toolbar { flex-wrap: wrap; gap: var(--sp-2); padding: var(--sp-2); }
   .topnav .search { min-width: 0; flex: 1 1 auto; }
   .card-grid { gap: var(--sp-2); }
+
+  /* 触屏无 hover：卡片操作常驻可见，避免加片单/收藏/播放点不到 */
+  .card .fav,
+  .card .play-fab { opacity: 1; }
+  .card .tr { gap: 6px; }
+  .card .atc-fab { width: 30px; height: 30px; font-size: 18px; }
+  .card .fav { width: 28px; height: 28px; font-size: 14px; }
+  /* 触屏上封面缩放 hover 无意义，去掉以免误触错位 */
+  .card:hover .thumb img { transform: none; }
 }

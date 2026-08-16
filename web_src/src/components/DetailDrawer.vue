@@ -4,9 +4,10 @@ import { state } from '../state.js'
 import {
   getMovie, updateMovie, deleteMovie, toggleFlag, playMovie,
   exportNfo, getPreviews, getSimilar, coverUrl, coverThumbUrl, uploadCover, clearCover,
-  listCollections, addToCollection, createCollection, listTags, renameTag, deleteTag,
+  listTags, renameTag, deleteTag,
   aiGenerateSynopsis, aiSuggestTags, aiStatus,
 } from '../api.js'
+import AddToCollectionBtn from './AddToCollectionBtn.vue'
 import {
   toast, confirmDialog, copyText, coverFallback, fmtSize, fmtDuration,
   fmtDate, fmtAgo, qualityTag,
@@ -25,11 +26,10 @@ const previews = ref([])
 const pvLoading = ref(false)
 const similar = ref([])
 const pendingAutoplay = ref(false)
+const hasPlayable = computed(() => !!(mv.value && mv.value.files && mv.value.files.some(f => !f.missing)))
 const editing = ref(false)
 const draft = ref({})
 const lightbox = ref('')
-const collList = ref([])
-const showColl = ref(false)
 const aiReady = ref(false)
 const aiBusy = ref(false)
 
@@ -100,7 +100,6 @@ function close() {
   state.currentId = null
   playing.value = false
   lightbox.value = ''
-  showColl.value = false
 }
 
 /* ---------- 操作 ---------- */
@@ -126,6 +125,11 @@ async function setRating(v) {
 async function play() {
   try { await playMovie(id.value); toast(t('player.launchedExternal'), 'ok') }
   catch (e) { toast(e.message, 'err') }
+}
+// 在文件管理器中定位影片所在文件夹（仅在运行软件的电脑上生效，本地优先专属）
+async function openFolder() {
+  try { await playMovie(id.value, { reveal: true }); toast(t('detail.revealFolder'), 'ok') }
+  catch (e) { toast(e.message || t('detail.revealFolderErr'), 'err') }
 }
 function playSimilar(s) {
   state.currentId = s.id
@@ -352,41 +356,6 @@ async function removeCover() {
   catch (e) { toast(e.message, 'err') }
 }
 
-/* ---------- 片单 ---------- */
-const newCollName = ref('')
-const creatingColl = ref(false)
-const collWrap = ref(null)
-async function openColl() {
-  showColl.value = !showColl.value
-  if (showColl.value && !collList.value.length) {
-    try { const r = await listCollections(); collList.value = (r && r.items) || [] } catch (e) { toast(e.message, 'err') }
-  }
-}
-function onDocClick(e) {
-  if (showColl.value && collWrap.value && !collWrap.value.contains(e.target)) showColl.value = false
-}
-function onCollBtn(e) {
-  e.stopPropagation()
-  openColl()
-}
-async function addColl(cid) {
-  try { await addToCollection(cid, id.value); toast(t('detail.joinedCollection'), 'ok'); showColl.value = false }
-  catch (e) { toast(e.message, 'err') }
-}
-async function createColl() {
-  const name = newCollName.value.trim()
-  if (!name || creatingColl.value) return
-  creatingColl.value = true
-  try {
-    const c = await createCollection({ name })
-    const item = c && c.collection ? c.collection : { id: c && c.id, name }
-    collList.value = [...collList.value, item]
-    newCollName.value = ''
-    toast(t('detail.collCreated'), 'ok')
-  } catch (e) { toast(e.message, 'err') }
-  finally { creatingColl.value = false }
-}
-
 /* ---------- 跳转筛选 ---------- */
 function filterBy(key, value) {
   state.returnFromFilter = { id: id.value, title: (mv.value && (mv.value.title || mv.value.code)) || '' }
@@ -444,8 +413,8 @@ function onKey(e) {
   if (!open.value) return
   if (e.key === 'Escape') { lightbox.value ? (lightbox.value = '') : close() }
 }
-onMounted(() => { window.addEventListener('keydown', onKey); document.addEventListener('click', onDocClick, true) })
-onBeforeUnmount(() => { window.removeEventListener('keydown', onKey); document.removeEventListener('click', onDocClick, true) })
+onMounted(() => { window.addEventListener('keydown', onKey) })
+onBeforeUnmount(() => { window.removeEventListener('keydown', onKey) })
 </script>
 
 <template>
@@ -488,30 +457,21 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', onKey); document.r
               <div class="dd-main">
                 <!-- 主操作 -->
                 <div class="dd-actions">
-                  <button class="btn primary" @click="playing = !playing">
+                  <button
+                    class="btn primary"
+                    :disabled="!hasPlayable"
+                    :title="hasPlayable ? '' : $t('detail.noSource')"
+                    @click="playing = !playing"
+                  >
                     {{ playing ? $t('detail.collapsePlayer') : (progressPct > 0 ? $t('detail.continue', { p: progressPct }) : $t('detail.onlinePlay')) }}
                   </button>
-                  <button class="btn" @click="play">{{ $t('player.external') }}</button>
+                  <button class="btn" :disabled="!hasPlayable" @click="play">{{ $t('player.external') }}</button>
+                  <button class="btn" @click="openFolder" :data-tip="$t('detail.revealFolderTip')">{{ $t('detail.revealFolder') }}</button>
                   <button class="btn icon" :class="{ active: mv.favorite }" @click="flip('favorite')" :data-tip="$t('flag.favorite')">{{ mv.favorite ? '♥' : '♡' }}</button>
                   <button class="btn icon" :class="{ active: mv.watchlist }" @click="flip('watchlist')" :data-tip="$t('flag.watchlist')">⌚</button>
                   <button class="btn icon" :class="{ active: mv.watched }" @click="flip('watched')" :data-tip="$t('flag.watched')">{{ mv.watched ? '●' : '○' }}</button>
 
-                  <div class="coll-wrap" ref="collWrap">
-                    <button class="btn icon" @click="onCollBtn" :data-tip="$t('detail.addToCollection')">＋</button>
-                    <div v-if="showColl" class="coll-pop" @click.stop>
-                      <div v-if="!collList.length" class="cp-empty muted">{{ $t('detail.noCollYet') }}</div>
-                      <button v-for="c in collList" :key="c.id" class="cp-item" @click="addColl(c.id)">{{ c.name }}</button>
-                      <div class="cp-new">
-                        <input
-                          v-model="newCollName"
-                          class="tag-input"
-                          :placeholder="$t('detail.newCollName')"
-                          @keydown.enter.prevent="createColl"
-                        />
-                        <button class="btn tiny" :disabled="creatingColl || !newCollName.trim()" @click="createColl">{{ $t('detail.newColl') }}</button>
-                      </div>
-                    </div>
-                  </div>
+                  <AddToCollectionBtn :movie-id="id" variant="detail" />
                 </div>
 
                 <!-- 评分 -->

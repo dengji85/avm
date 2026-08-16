@@ -1,7 +1,7 @@
 <script setup>
 import { ref, computed } from 'vue'
 import { state } from '../state.js'
-import { batchMovies, startScrape, addToCollection, listCollections } from '../api.js'
+import { batchMovies, startScrape, addToCollection, listCollections, listTags, createCollection } from '../api.js'
 import { toast, confirmDialog } from '../utils.js'
 import { t } from '../i18n/index.js'
 
@@ -10,8 +10,11 @@ const busy = ref(false)
 const showTag = ref(false)
 const showColl = ref(false)
 const tagText = ref('')
+const picked = ref([])          // 勾选的已有标签
+const allTags = ref([])         // 全库已有标签（与详情页一致）
 const colls = ref([])
 const collId = ref('')
+const newCollName = ref('')
 
 const ids = computed(() => Array.from(state.selected))
 const n = computed(() => ids.value.length)
@@ -47,10 +50,13 @@ async function openTag() {
   showTag.value = true
   showColl.value = false
   tagText.value = ''
+  picked.value = []
+  try { allTags.value = await listTags() } catch (e) { /* 忽略 */ }
 }
 
 async function submitTags() {
-  const tags = tagText.value.split(/[,，\s]+/).map((s) => s.trim()).filter(Boolean)
+  const extra = tagText.value.split(/[,，\s]+/).map((s) => s.trim()).filter(Boolean)
+  const tags = [...new Set([...picked.value, ...extra])]
   if (!tags.length) { toast(t('bulk.tagEmpty'), 'err'); return }
   await apply({ tags }, 'bulk.setTags')
   showTag.value = false
@@ -59,17 +65,26 @@ async function submitTags() {
 async function openColl() {
   showColl.value = true
   showTag.value = false
+  newCollName.value = ''
   try {
-    colls.value = await listCollections() || []
+    const r = await listCollections()
+    colls.value = (r && r.items) || []
     if (colls.value.length) collId.value = colls.value[0].id
   } catch (e) { toast(e.message, 'err') }
 }
 
 async function submitColl() {
-  if (!collId.value) { toast(t('bulk.collEmpty'), 'err'); return }
+  let cid = collId.value
+  if (!cid && newCollName.value.trim()) {
+    try {
+      const created = await createCollection({ name: newCollName.value.trim() })
+      cid = created.id || (created.items && created.items[0] && created.items[0].id)
+    } catch (e) { toast(e.message, 'err'); return }
+  }
+  if (!cid) { toast(t('bulk.collEmpty'), 'err'); return }
   busy.value = true
   try {
-    for (const id of ids.value) await addToCollection(collId.value, id)
+    for (const id of ids.value) await addToCollection(cid, id)
     toast(t('bulk.joined', { n: n.value }), 'ok')
     showColl.value = false
     emit('done')
@@ -100,19 +115,29 @@ async function submitColl() {
     <div class="divider vert"></div>
     <button class="btn tiny ghost" @click="clear">{{ $t('common.cancel') }}</button>
 
-    <!-- 标签输入 -->
-    <div v-if="showTag" class="bb-pop">
-      <input v-model="tagText" :placeholder="$t('bulk.tagPlaceholder')" @keydown.enter="submitTags" autofocus />
-      <button class="btn tiny primary" @click="submitTags">应用</button>
-      <button class="btn tiny ghost" @click="showTag = false">✕</button>
+    <!-- 标签选择（加载已有标签，可勾选 / 手输新增） -->
+    <div v-if="showTag" class="bb-pop tag-pop">
+      <div class="tag-suggest-list" v-if="allTags.length">
+        <label v-for="tg in allTags" :key="tg.name" class="tag-chk">
+          <input type="checkbox" :value="tg.name" v-model="picked" />
+          <span>{{ tg.name }}</span>
+          <span class="dim small" v-if="tg.count">·{{ tg.count }}</span>
+        </label>
+      </div>
+      <div class="tag-input-row">
+        <input v-model="tagText" :placeholder="$t('bulk.tagPlaceholder')" @keydown.enter="submitTags" autofocus />
+        <button class="btn tiny primary" @click="submitTags">{{ $t('common.apply') }}</button>
+        <button class="btn tiny ghost" @click="showTag = false">✕</button>
+      </div>
     </div>
 
-    <!-- 片单选择 -->
+    <!-- 片单选择（加载已有片单） -->
     <div v-if="showColl" class="bb-pop">
-      <select v-model="collId">
+      <select v-model="collId" class="coll-sel">
         <option v-for="c in colls" :key="c.id" :value="c.id">{{ c.name }}</option>
       </select>
-      <button class="btn tiny primary" :disabled="busy" @click="submitColl">加入</button>
+      <input v-model="newCollName" :placeholder="$t('bulk.newCollPlaceholder')" class="coll-new" />
+      <button class="btn tiny primary" :disabled="busy" @click="submitColl">{{ $t('bulk.join') }}</button>
       <button class="btn tiny ghost" @click="showColl = false">✕</button>
     </div>
   </div>
@@ -144,4 +169,17 @@ async function submitColl() {
   animation: rise-in var(--t-slow);
 }
 .bb-pop input, .bb-pop select { width: 220px; height: 28px; }
+.tag-pop { flex-direction: column; align-items: stretch; width: 280px; }
+.tag-suggest-list {
+  display: flex; flex-wrap: wrap; gap: var(--sp-1) var(--sp-2);
+  max-height: 160px; overflow-y: auto; padding: var(--sp-1) 0;
+  border-bottom: 1px solid var(--c-line);
+  margin-bottom: var(--sp-2);
+}
+.tag-chk { display: inline-flex; align-items: center; gap: 4px; font-size: 13px; cursor: pointer; }
+.tag-chk input { width: auto; height: auto; }
+.tag-input-row { display: flex; align-items: center; gap: var(--sp-2); }
+.tag-input-row input { width: 100%; height: 28px; }
+.coll-sel { width: 160px; height: 28px; }
+.coll-new { width: 130px; height: 28px; }
 </style>

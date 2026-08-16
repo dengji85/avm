@@ -67,6 +67,9 @@ export const state = reactive({
   sidebarCollapsed: !!saved.sidebarCollapsed,
   mobileNavOpen: false,
 
+  // ---- 上次加入的片单（快速加片单/队列用）----
+  lastCollection: saved.lastCollection || 0,
+
   // ---- 后台任务 ----
   // task.* 保留「当前/最近一次」任务的实时快照（完成后不清空，供即时查看）
   task: {
@@ -83,7 +86,7 @@ watch(
   () => ({
     theme: state.theme, density: state.density, cardSize: state.cardSize,
     sidebarCollapsed: state.sidebarCollapsed, sort: state.sort,
-    page_size: state.page_size, multiOp: state.multiOp,
+    page_size: state.page_size, multiOp: state.multiOp, lastCollection: state.lastCollection,
   }),
   (v) => { try { localStorage.setItem(PREF_KEY, JSON.stringify(v)) } catch (e) {} },
   { deep: true },
@@ -213,6 +216,7 @@ export const NAV_ICONS = {
 export const NAV_TABS = [
   { id: 'home', label: 'nav.home', icon: 'home' },
   { id: 'gallery', label: 'nav.gallery', icon: 'gallery' },
+  { id: 'collections', label: 'nav.collections', icon: 'collections' },
   { id: 'stats', label: 'nav.stats', icon: 'stats' },
   { id: 'maintenance', label: 'nav.maintenance', icon: 'maintenance' },
 ]

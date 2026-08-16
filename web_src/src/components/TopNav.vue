@@ -98,7 +98,7 @@ function onResize() { isNarrow.value = window.innerWidth <= 640 }
 onMounted(() => window.addEventListener('resize', onResize))
 onBeforeUnmount(() => window.removeEventListener('resize', onResize))
 // 手机上保留：首页、影片库；统计等可隐藏（用户确认手机上非必需）
-const NAV_TABS_CORE = ['home', 'gallery']
+const NAV_TABS_CORE = ['home', 'gallery', 'collections']
 const navTabsVisible = computed(() => NAV_TABS.filter(t => !isNarrow.value || NAV_TABS_CORE.includes(t.id)))
 
 // 进度环：用 conic-gradient 模拟（indeterminate 时走 CSS 旋转动画）

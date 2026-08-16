@@ -120,7 +120,7 @@ _CODE_RULES: list[tuple[str, re.Pattern, Any]] = [
             r"(?<![a-z0-9])"
             r"([a-z]{2,6})"                                              # 厂牌前缀
             r"[\s\-_.]?"                                                 # 可选分隔符
-            r"(\d{2,5})"                                                 # 编号
+            r"(\d{1,5})"                                                 # 编号（含 1 位，兼容 JUY-1 等低编号厂牌）
             r"(?:[\s._\-]?(?:ch|chs|cht|chn|chi|chinese|unc|uc|c|u|cl|sub|multi))*"  # 尾随版本/字幕标记
             r"(?![a-z0-9])",
             re.I,
