@@ -13,6 +13,10 @@
 </p>
 
 <p align="center">
+  <b>AVM (Adult Video Manager)</b> — a local-first, privacy-safe media library for your AV collection. It scrapes metadata, deduplicates, analyzes your taste, and turns scattered files into a searchable personal archive you fully own.
+</p>
+
+<p align="center">
   <img src="https://img.shields.io/badge/version-1.11.0-1f6feb.svg"/>
   <img src="https://img.shields.io/badge/backend-FastAPI-009688.svg"/>
   <img src="https://img.shields.io/badge/frontend-Vue%203%20%2F%20Vite-42b883.svg"/>
@@ -21,7 +25,7 @@
 </p>
 
 <p align="center">
-  <a href="#为什么需要片匣">为什么需要它</a> ·
+  <a href="#解决的问题">解决的问题</a> ·
   <a href="#产品理念">产品理念</a> ·
   <a href="#核心功能">核心功能</a> ·
   <a href="#为什么选片匣而不是别的工具">为什么选它</a> ·
