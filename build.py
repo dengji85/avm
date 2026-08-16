@@ -1,11 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-把「片匣」打包成 Windows 单文件夹可执行程序。
+把「片匣」打包成 Windows 单文件可执行程序（--onefile）。
 
 用法：
     python build.py
 
-产物： dist/AVM/AVM.exe
+产物： dist/AVM.exe
 - 双击即启动本地服务，打开一个控制台窗口，实时输出日志。
 - 启动后自动打开浏览器访问 Web UI。
 - 数据（library.db / covers / avatars / config.json）保存在 exe 同级的 data/ 目录，
@@ -52,7 +52,7 @@ try:
     PyInstaller.__main__.run([
     "run.py",
     "--name", "AVM",
-    "--onedir",
+    "--onefile",
     "--console",
     "--paths", ".",
     "--add-data", "web_dist;web_dist",

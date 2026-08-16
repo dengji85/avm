@@ -30,8 +30,8 @@ from .jobs import SCAN, SCRAPE
 
 router = APIRouter(prefix="/api")
 
-# 当前程序版本（与发布版本保持一致）。
-APP_VERSION = "1.11.0"
+# 当前程序版本（单一真源见 app/__init__.__version__，与发布版本保持一致）。
+from . import __version__ as APP_VERSION
 # 编译/构建日期，格式 YYYY-MM-DD。由 build.py 在打包时重写为实际构建日期；
 # 源码运行（python run.py）默认显示源码最近修改时间对应的日期。
 BUILD_DATE = "2026-08-16"
