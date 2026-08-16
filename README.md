@@ -25,14 +25,29 @@
 </p>
 
 <p align="center">
+  <a href="#下载与安装">下载</a> ·
   <a href="#解决的问题">解决的问题</a> ·
   <a href="#产品理念">产品理念</a> ·
   <a href="#核心功能">核心功能</a> ·
   <a href="#为什么选片匣而不是别的工具">为什么选它</a> ·
   <a href="#本次更新亮点1100">更新亮点</a> ·
-  <a href="#下载与安装">下载</a> ·
   <a href="#快速开始">快速开始</a>
 </p>
+
+---
+
+## 📦 下载与安装
+
+<p align="center">
+  <a href="https://github.com/dengji85/avm/releases/latest">
+    <img src="https://img.shields.io/github/v/release/dengji85/avm?label=下载%20最新版&color=1f6feb" alt="GitHub Release"/>
+  </a>
+</p>
+
+1. 到 **[Releases](https://github.com/dengji85/avm/releases)** 下载单个 `AVM.exe`。
+2. 放到任意目录（如 `D:\AVM\`），双击启动，自动打开浏览器进入 Web UI。
+3. 升级时**直接覆盖旧的 `AVM.exe` 即可**——数据（`data/` 库/封面/配置）在同目录自动保留，无需手动替换前端资源。
+4. 备份迁移：`AVM.exe` 与 `data/` 一起拷贝即可。
 
 ---
 
@@ -121,21 +136,6 @@
 - **📡 远程访问独立 Tab + ⏱ 定时自动扫描**。
 
 完整变更见 **[`CHANGELOG.md`](CHANGELOG.md)**。
-
----
-
-## 📦 下载与安装
-
-<p align="center">
-  <a href="https://github.com/dengji85/avm/releases/latest">
-    <img src="https://img.shields.io/github/v/release/dengji85/avm?label=下载%20最新版&color=1f6feb" alt="GitHub Release"/>
-  </a>
-</p>
-
-1. 到 **[Releases](https://github.com/dengji85/avm/releases)** 下载单个 `AVM.exe`。
-2. 放到任意目录（如 `D:\AVM\`），双击启动，自动打开浏览器进入 Web UI。
-3. 升级时**直接覆盖旧的 `AVM.exe` 即可**——数据（`data/` 库/封面/配置）在同目录自动保留，无需手动替换前端资源。
-4. 备份迁移：`AVM.exe` 与 `data/` 一起拷贝即可。
 
 ---
 
