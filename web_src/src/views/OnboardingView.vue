@@ -59,7 +59,7 @@ async function finish() {
     // 末步：触发首次扫描 + 刮削，让用户一键进入正轨
     starting.value = true
     await tasks.runScan({})
-    state.onboarded = false   // 关闭引导遮罩，任务中心会自动弹出
+    state.onboarded = true   // 关闭引导遮罩，任务中心会自动弹出
   } catch (e) {
     toast(e.message, 'err')
   } finally {
@@ -72,7 +72,7 @@ function skip() {
   // 跳过引导：立即关闭遮罩（本地优先），再尝试把 setup_done 写回后端
   state.config = state.config || {}
   state.config.server = Object.assign({}, state.config.server, { setup_done: true })
-  state.onboarded = false
+  state.onboarded = true
   setupDone().catch(() => { /* 后端不可达时忽略，下次启动会重新引导 */ })
 }
 </script>
