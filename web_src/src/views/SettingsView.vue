@@ -155,6 +155,22 @@ async function doSniff() {
   } catch (e) { toast(e.message, 'err') }
 }
 
+// 重新运行首次启动引导：重置 setup_done 并弹出遮罩
+async function rerunOnboarding() {
+  const ok = await confirmDialog(
+    t('settings.rerunOnboardingTitle'),
+    t('settings.rerunOnboardingDesc'),
+  )
+  if (!ok) return
+  try {
+    await putConfig({ server: { setup_done: false } })
+    state.config = state.config || {}
+    state.config.server = Object.assign({}, state.config.server, { setup_done: false })
+    state.onboarded = false   // 触发 App.vue 遮罩重新出现
+    toast(t('settings.rerunOnboardingDone'), 'ok')
+  } catch (e) { toast(e.message, 'err') }
+}
+
 // 把仍是远程 URL 的女优头像批量下载落盘到自定义 avatar_dir
 const cachingAvatars = ref(false)
 async function doCacheAvatars() {
@@ -318,7 +334,7 @@ async function copyTok() {
   catch (e) { toast(t('settings.copyFailed'), 'err') }
 }
 async function doResetToken() {
-  try { const r = await resetToken(); serverInfo.access_token = r.access_token; tokInput.value = r.access_token; toast(t('settings.tokenReset'), 'ok') }
+  try { const r = await resetToken(); serverInfo.access_token = r.access_token; tokInput.value = r.access_token; await loadServerInfo(); toast(t('settings.tokenReset'), 'ok') }
   catch (e) { toast(e.message, 'err') }
 }
 async function saveToken() {
@@ -328,6 +344,7 @@ async function saveToken() {
   try {
     await putConfig({ server: { access_token: v } })
     serverInfo.access_token = v || serverInfo.access_token
+    await loadServerInfo()
     toast(t('settings.tokenSaved'), 'ok')
   } catch (e) { toast(e.message, 'err') }
   finally { savingTok.value = false }
@@ -341,7 +358,7 @@ async function copyText(text) {
   catch (e) { toast(t('settings.copyFailed'), 'err') }
 }
 async function saveRequireToken() {
-  try { await putConfig({ server: { require_token_remote: requireToken.value } }); toast(t('settings.saved'), 'ok') }
+  try { await putConfig({ server: { require_token_remote: requireToken.value } }); await loadServerInfo(); toast(t('settings.saved'), 'ok') }
   catch (e) { toast(e.message, 'err') }
 }
 
@@ -497,6 +514,16 @@ onMounted(async () => { await load(); await loadServerInfo() })
           <div class="panel-foot">
             <button class="btn primary" :disabled="saving" @click="saveLibrary">{{ $t('common.save') }}</button>
             <button class="btn" @click="doSniff">{{ $t('settings.sniffNow') }}</button>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-head">{{ $t('settings.onboarding') }}</div>
+          <div class="panel-body">
+            <p class="muted">{{ $t('settings.onboardingHint') }}</p>
+          </div>
+          <div class="panel-foot">
+            <button class="btn" @click="rerunOnboarding">{{ $t('settings.rerunOnboarding') }}</button>
           </div>
         </div>
 
