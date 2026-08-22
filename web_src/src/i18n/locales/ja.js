@@ -136,6 +136,8 @@ export default {
     add: '追加',
     save: '保存',
     close: '閉じる',
+    select: '選択',
+    up: '上へ',
   },
   home: {
     subtitle: 'おかえりなさい。続きを観るか、コレクションを眺めよう',

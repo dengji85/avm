@@ -136,6 +136,8 @@ export default {
     add: 'Add',
     save: 'Save',
     close: 'Close',
+    select: 'Select',
+    up: 'Up',
   },
   home: {
     subtitle: 'Welcome back. Pick up where you left off, or browse your collection.',

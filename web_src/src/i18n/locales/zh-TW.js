@@ -136,6 +136,8 @@ export default {
     add: '新增',
     save: '儲存',
     close: '關閉',
+    select: '選擇',
+    up: '上級',
   },
   home: {
     subtitle: '歡迎回來，接著看，或者逛逛你的收藏',

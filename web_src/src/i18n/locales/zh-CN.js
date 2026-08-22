@@ -145,6 +145,8 @@ export default {
     save: '保存',
     close: '关闭',
     delete: '删除',
+    select: '选择',
+    up: '上级',
   },
   home: {
     subtitle: '欢迎回来，接着看，或者逛逛你的收藏',
