@@ -23,6 +23,7 @@ import SwipeView from './views/SwipeView.vue'
 import StatsView from './views/StatsView.vue'
 import MaintenanceView from './views/MaintenanceView.vue'
 import SettingsView from './views/SettingsView.vue'
+import YearReviewView from './views/YearReviewView.vue'
 import OnboardingView from './views/OnboardingView.vue'
 
 const VIEWS = {
@@ -36,6 +37,7 @@ const VIEWS = {
   stats: StatsView,
   maintenance: MaintenanceView,
   settings: SettingsView,
+  yearReview: YearReviewView,
 }
 
 const tasks = useTasks()

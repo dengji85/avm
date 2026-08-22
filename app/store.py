@@ -1875,3 +1875,159 @@ def set_previews(conn: sqlite3.Connection, movie_id: int, paths: List[str]) -> N
         "created_at=datetime('now','localtime')",
         (movie_id, _j(paths)),
     )
+
+
+def year_in_review(conn: sqlite3.Connection, year: int) -> Dict[str, Any]:
+    """返回某一年度的观影回顾数据，用于「年度回顾」页面。
+
+    聚合维度：
+      - 年度观看总览（时长、影片数、次数、天数）
+      - 最长连续观看天数（streak）
+      - 月度热力图（每月观看次数/时长）
+      - 最爱厂商 / 女优 / 类型（按当年观看计数）
+      - 年度新增到库的影片数（按 added_at 年份）
+      - 评分分布（当年观看影片的 rating 分桶）
+      - 状态分布（当年已看/未看/想看）
+    """
+    y = int(year)
+    start = f"{y}-01-01 00:00:00"
+    end = f"{y}-12-31 23:59:59"
+
+    # 年度观看总览
+    summ = query_one(conn, """
+        SELECT COALESCE(SUM(s.watched_sec),0) AS total_sec,
+               COUNT(DISTINCT s.movie_id) AS movies,
+               COUNT(*) AS sessions,
+               COUNT(DISTINCT DATE(s.started_at)) AS days
+        FROM watch_sessions s
+        WHERE s.started_at >= ? AND s.started_at <= ?
+    """, (start, end)) or {}
+    total_sec = float(summ.get("total_sec") or 0)
+    movies = int(summ.get("movies") or 0)
+    sessions = int(summ.get("sessions") or 0)
+    days = int(summ.get("days") or 0)
+
+    # 最长连续观看天数（按观看日期序列计算）
+    dates = [r["d"] for r in query_all(conn, """
+        SELECT DISTINCT DATE(s.started_at) AS d
+        FROM watch_sessions s
+        WHERE s.started_at >= ? AND s.started_at <= ?
+        ORDER BY d
+    """, (start, end))]
+    streak = 0
+    if dates:
+        streak = 1
+        cur = 1
+        from datetime import datetime as _dt
+        for i in range(1, len(dates)):
+            a = _dt.strptime(dates[i - 1], "%Y-%m-%d").date()
+            b = _dt.strptime(dates[i], "%Y-%m-%d").date()
+            if (b - a).days == 1:
+                cur += 1
+                streak = max(streak, cur)
+            else:
+                cur = 1
+    longest_streak = streak
+
+    # 月度热力图
+    months = []
+    for m in range(1, 13):
+        mm = f"{y}-{m:02d}"
+        r = query_one(conn, """
+            SELECT COUNT(*) AS cnt, COALESCE(SUM(s.watched_sec),0) AS sec
+            FROM watch_sessions s
+            WHERE s.started_at >= ? AND s.started_at < ?
+        """, (f"{mm}-01 00:00:00", f"{y}-{m+1:02d}-01 00:00:00" if m < 12 else f"{y+1}-01-01 00:00:00"))
+        months.append({
+            "month": m,
+            "count": int(r.get("cnt") or 0),
+            "sec": float(r.get("sec") or 0),
+        })
+
+    # 最爱厂商 / 女优 / 类型（当年观看计数 top5）
+    def top_by(sql, args):
+        return [{"name": r["name"], "count": int(r["cnt"])} for r in query_all(conn, sql, args)]
+
+    top_studios = top_by("""
+        SELECT st.name AS name, COUNT(DISTINCT s.movie_id) AS cnt
+        FROM watch_sessions s JOIN movies m ON m.id = s.movie_id
+        LEFT JOIN studios st ON st.id = m.studio_id
+        WHERE s.started_at >= ? AND s.started_at <= ? AND st.name IS NOT NULL
+        GROUP BY st.id ORDER BY cnt DESC LIMIT 5
+    """, (start, end))
+    top_actresses = top_by("""
+        SELECT a.name AS name, COUNT(DISTINCT s.movie_id) AS cnt
+        FROM watch_sessions s JOIN movie_actress ma ON ma.movie_id = s.movie_id
+        JOIN actresses a ON a.id = ma.actress_id
+        WHERE s.started_at >= ? AND s.started_at <= ?
+        GROUP BY a.id ORDER BY cnt DESC LIMIT 5
+    """, (start, end))
+    top_genres = top_by("""
+        SELECT g.name AS name, COUNT(DISTINCT s.movie_id) AS cnt
+        FROM watch_sessions s JOIN movie_genre mg ON mg.movie_id = s.movie_id
+        JOIN genres g ON g.id = mg.genre_id
+        WHERE s.started_at >= ? AND s.started_at <= ?
+        GROUP BY g.id ORDER BY cnt DESC LIMIT 5
+    """, (start, end))
+
+    # 年度新增到库的影片数（按 added_at 年份）
+    added = int(scalar(conn, """
+        SELECT COUNT(*) FROM movies
+        WHERE added_at >= ? AND added_at <= ?
+    """, (start, end)) or 0)
+
+    # 评分分布（当年观看影片的 rating 分桶 0/1/2/3/4/5）
+    rating_rows = query_all(conn, """
+        SELECT CAST(COALESCE(m.rating,0) AS INTEGER) AS bucket, COUNT(DISTINCT s.movie_id) AS cnt
+        FROM watch_sessions s JOIN movies m ON m.id = s.movie_id
+        WHERE s.started_at >= ? AND s.started_at <= ?
+        GROUP BY bucket
+    """, (start, end))
+    rating_dist = {str(i): 0 for i in range(6)}
+    for r in rating_rows:
+        rating_dist[str(int(r["bucket"]))] = int(r["cnt"])
+
+    # 状态分布（当年已看/未看/想看）
+    status = query_one(conn, """
+        SELECT
+            SUM(CASE WHEN m.watched = 1 THEN 1 ELSE 0 END) AS watched,
+            SUM(CASE WHEN m.watched = 0 THEN 1 ELSE 0 END) AS unwatched,
+            SUM(CASE WHEN m.watchlist = 1 THEN 1 ELSE 0 END) AS watchlist
+        FROM watch_sessions s JOIN movies m ON m.id = s.movie_id
+        WHERE s.started_at >= ? AND s.started_at <= ?
+    """, (start, end)) or {}
+    status_dist = {
+        "watched": int(status.get("watched") or 0),
+        "unwatched": int(status.get("unwatched") or 0),
+        "watchlist": int(status.get("watchlist") or 0),
+    }
+
+    # 年度最佳（当年观看中评分最高的几部）
+    best = [{
+        "id": r["id"], "code": r["code"], "title": r["title"],
+        "cover": r["cover"], "rating": float(r["rating"] or 0),
+    } for r in query_all(conn, """
+        SELECT DISTINCT m.id, m.code, m.title, m.cover, m.rating
+        FROM watch_sessions s JOIN movies m ON m.id = s.movie_id
+        WHERE s.started_at >= ? AND s.started_at <= ? AND m.rating > 0
+        ORDER BY m.rating DESC LIMIT 6
+    """, (start, end))]
+
+    return {
+        "year": y,
+        "summary": {
+            "total_sec": total_sec,
+            "movies": movies,
+            "sessions": sessions,
+            "days": days,
+            "longest_streak": longest_streak,
+            "added": added,
+        },
+        "months": months,
+        "top_studios": top_studios,
+        "top_actresses": top_actresses,
+        "top_genres": top_genres,
+        "rating_dist": rating_dist,
+        "status_dist": status_dist,
+        "best": best,
+    }

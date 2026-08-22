@@ -18,6 +18,7 @@ import tempfile
 import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from datetime import datetime
 
 from fastapi import APIRouter, Body, File, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, PlainTextResponse, Response, StreamingResponse
@@ -452,6 +453,21 @@ def get_watch_history(
 def get_stats_enhanced() -> Dict[str, Any]:
     with db() as conn:
         return store.stats_enhanced(conn)
+
+
+# ------------------------------------------------------------------ 年度回顾
+
+
+@router.get("/year-in-review")
+def get_year_in_review(year: int = None) -> Dict[str, Any]:
+    if not year:
+        year = datetime.now().year
+    try:
+        year = int(year)
+    except (TypeError, ValueError):
+        year = datetime.now().year
+    with db() as conn:
+        return store.year_in_review(conn, year)
 
 
 # ------------------------------------------------------------------ 扫描

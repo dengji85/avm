@@ -231,6 +231,7 @@ export const NAV_SECONDARY = [
   { id: 'rankings', label: 'nav.rankings' },
   { id: 'swipe', label: 'nav.swipe' },
   { id: 'settings', label: 'nav.settings' },
+  { id: 'yearReview', label: 'nav.yearReview' },
 ]
 
 /* 侧边栏分组导航（Sidebar.vue 使用，注意字段为 id/label/icon） */
