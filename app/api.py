@@ -848,13 +848,15 @@ def retry_neterr_failures(payload: Dict[str, Any] = Body(default={})) -> Dict[st
             conn.execute(
                 f"DELETE FROM scrape_skip WHERE UPPER(code) IN ({placeholders}) "
                 f"AND kind IN ('net','neterr','blocked')", tuple(c.upper() for c in codes))
-        cfg = load_config(refresh=True)
-        plist = providers.build_providers(cfg)
-        if not plist:
-            raise HTTPException(400, "未启用任何数据源")
-        run_scrape(conn, plist, cfg, pages=1, pattern="|".join(sorted(codes)) or None, force=True)
-        result = query_one(conn, "SELECT COUNT(*) c FROM movies WHERE code IN "
-                                 "(SELECT code FROM scrape_logs WHERE status<>'ok')")
+        # codes -> movie ids，交给 run_scrape 强制重抓（run_scrape 内部自行连接、按 ids 直接命中）
+        ids = [r["id"] for r in query_all(
+            conn, f"SELECT id FROM movies WHERE UPPER(code) IN ({placeholders})",
+            tuple(c.upper() for c in codes))] if codes else []
+        if not ids:
+            return {"ok": True, "retried_codes": sorted(codes), "matched": 0}
+        scraper.run_scrape(ids=ids, force=True)
+        result = query_one(conn, "SELECT COUNT(*) c FROM movies WHERE id IN "
+                                 "(SELECT movie_id FROM scrape_logs WHERE status<>'ok')")
     return {"ok": True, "retried_codes": sorted(codes), "matched": result["c"] if result else 0}
 
 
@@ -863,28 +865,56 @@ def retry_with_provider(payload: Dict[str, Any] = Body(default={})) -> Dict[str,
     """带指定数据源重试：仅对已失败影片用指定 provider 重抓（换源）。
 
     body: { "provider": "av-wiki", "codes": ["ABC-123", ...] 可选 }
+
+    换源重抓为耗时操作（需联网），放到后台线程执行，立即返回「已触发」，
+    前端可轮询 /api/scrape/status 查看进度。
     """
     provider_name = str(payload.get("provider", "")).strip()
     codes = payload.get("codes") or []
     if not provider_name:
         raise HTTPException(400, "provider 不能为空")
+    cfg = load_config(refresh=True)
+    all_plist = providers.build_providers(cfg)
+    plist = [p for p in all_plist if p.name == provider_name]
+    if not plist:
+        raise HTTPException(400, f"未启用数据源：{provider_name}")
     with db() as conn:
-        cfg = load_config(refresh=True)
-        all_plist = providers.build_providers(cfg)
-        plist = [p for p in all_plist if p.name == provider_name]
-        if not plist:
-            raise HTTPException(400, f"未启用数据源：{provider_name}")
-        if codes:
-            ph = ",".join("?" for _ in codes)
+        # 目标 code：显式指定则用之，否则取所有刮削失败的影片
+        target_codes = [str(c).upper() for c in codes] if codes else \
+            [r["code"].upper() for r in query_all(conn,
+                "SELECT DISTINCT code FROM scrape_logs WHERE status<>'ok' AND code<>''")]
+        if target_codes:
+            ph = ",".join("?" for _ in target_codes)
             conn.execute(f"DELETE FROM scrape_skip WHERE UPPER(code) IN ({ph})",
-                         tuple(str(c).upper() for c in codes))
-            pattern = "|".join(str(c) for c in codes)
+                         tuple(target_codes))
+            rows = query_all(conn, f"SELECT id FROM movies WHERE UPPER(code) IN ({ph})",
+                             tuple(target_codes))
+            ids = [r["id"] for r in rows]
         else:
-            pattern = None
-        run_scrape(conn, plist, cfg, pages=1, pattern=pattern, force=True)
-        matched = query_one(conn, "SELECT COUNT(*) c FROM movies WHERE code IN "
-                                  "(SELECT code FROM scrape_logs WHERE status<>'ok')")
-    return {"ok": True, "provider": provider_name, "matched": matched["c"] if matched else 0}
+            ids = []
+
+    def _task(mids: List[int], pl: list, pcfg, pname: str) -> None:
+        try:
+            c = connect()
+            try:
+                for mid in mids:
+                    try:
+                        scraper.scrape_one(c, mid, pl, pcfg, overwrite=True)
+                    except Exception as exc:
+                        c.execute(
+                            "INSERT INTO scrape_logs (task_id, code, provider, status, reason, movie_id) "
+                            "VALUES ('retry-provider', '', ?, 'error', ?, ?)",
+                            (pname, f"重试失败：{exc}", mid))
+                        c.commit()
+            finally:
+                c.close()
+        except Exception as exc:
+            SCRAPE.error(f"换源重抓线程异常：{exc}")
+
+    if ids:
+        threading.Thread(target=_task, args=(ids, plist, cfg, provider_name), daemon=True).start()
+    return {"ok": True, "provider": provider_name, "triggered": len(ids),
+            "message": "已在后台用该数据源重抓，可到刮削状态页查看进度"}
 
 
 @router.delete("/scrape/skips")
