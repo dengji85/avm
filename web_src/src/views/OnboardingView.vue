@@ -69,12 +69,11 @@ async function finish() {
 }
 
 function skip() {
-  // 跳过引导：仍写 setup_done，避免下次再弹；目录为空则仅标记完成
-  setupDone().then(() => {
-    state.config = state.config || {}
-    state.config.server = Object.assign({}, state.config.server, { setup_done: true })
-    state.onboarded = false
-  }).catch((e) => toast(e.message, 'err'))
+  // 跳过引导：立即关闭遮罩（本地优先），再尝试把 setup_done 写回后端
+  state.config = state.config || {}
+  state.config.server = Object.assign({}, state.config.server, { setup_done: true })
+  state.onboarded = false
+  setupDone().catch(() => { /* 后端不可达时忽略，下次启动会重新引导 */ })
 }
 </script>
 
@@ -110,24 +109,24 @@ function skip() {
           <li v-for="(p, i) in paths" :key="i">
             <span class="pi">📁</span>
             <span class="pp ellipsis" :title="p">{{ p }}</span>
-            <button class="btn tiny ghost" @click="removePath(i)">{{ $t('settings.remove') }}</button>
+            <button class="btn tiny ghost" @click="removePath(i)">{{ t('settings.remove') }}</button>
           </li>
         </ul>
         <p v-else class="muted">{{ t('onboarding.noDirYet') }}</p>
 
         <div class="hstack">
           <input v-model="newPath" :placeholder="t('settings.scanDirPh')" @keydown.enter="addPath" />
-          <button class="btn" @click="browse('')" :disabled="browser.loading">{{ $t('settings.browseDir') }}</button>
-          <button class="btn primary" @click="addPath">{{ $t('common.add') }}</button>
+          <button class="btn" @click="browse('')" :disabled="browser.loading">{{ t('settings.browseDir') }}</button>
+          <button class="btn primary" @click="addPath">{{ t('common.add') }}</button>
         </div>
       </div>
 
       <!-- 底部操作 -->
       <div class="ob-foot">
-        <button v-if="step > 1" class="btn ghost" @click="step--">{{ $t('common.back') }}</button>
+        <button v-if="step > 1" class="btn ghost" @click="step--">{{ t('common.back') }}</button>
         <span class="grow"></span>
         <button class="btn ghost" @click="skip">{{ t('onboarding.skip') }}</button>
-        <button v-if="step < 2" class="btn primary" :disabled="!canNext" @click="step++">{{ $t('common.next') }}</button>
+        <button v-if="step < 2" class="btn primary" :disabled="!canNext" @click="step++">{{ t('common.next') }}</button>
         <button v-else class="btn primary" :disabled="!canNext || saving || starting" @click="finish">
           {{ starting ? t('onboarding.scanning') : t('onboarding.startScan') }}
         </button>
@@ -139,7 +138,7 @@ function skip() {
       <div class="ob-browse">
         <div class="ob-browse-head">
           <span class="ellipsis">{{ browser.path || t('onboarding.rootDir') }}</span>
-          <button class="btn tiny ghost" @click="browse(browser.path ? browser.path.replace(/[\\\/][^\\\/]+$/, '') : '')">{{ $t('common.up') }}</button>
+          <button class="btn tiny ghost" @click="browse(browser.path ? browser.path.replace(/[\\\/][^\\\/]+$/, '') : '')">{{ t('common.up') }}</button>
           <button class="btn tiny ghost" @click="browser.open = false">✕</button>
         </div>
         <div class="ob-browse-body">
@@ -155,7 +154,7 @@ function skip() {
           </div>
         </div>
         <div class="ob-browse-foot">
-          <button class="btn" @click="pickDir" :disabled="!browser.path">{{ $t('common.select') }}</button>
+          <button class="btn" @click="pickDir" :disabled="!browser.path">{{ t('common.select') }}</button>
         </div>
       </div>
     </div>
