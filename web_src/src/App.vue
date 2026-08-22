@@ -23,6 +23,7 @@ import SwipeView from './views/SwipeView.vue'
 import StatsView from './views/StatsView.vue'
 import MaintenanceView from './views/MaintenanceView.vue'
 import SettingsView from './views/SettingsView.vue'
+import OnboardingView from './views/OnboardingView.vue'
 
 const VIEWS = {
   home: HomeView,
@@ -44,7 +45,12 @@ async function loadFacets() {
 }
 
 async function loadConfig() {
-  try { state.config = await getConfig() } catch (e) { /* 非致命 */ }
+  try {
+    state.config = await getConfig()
+    // 首次启动引导：config.server.setup_done 未置真则弹出引导遮罩
+    const done = !!(state.config && state.config.server && state.config.server.setup_done)
+    state.onboarded = done
+  } catch (e) { /* 非致命 */ }
 }
 
 function onGlobalRefresh() {
@@ -87,5 +93,7 @@ function onFilterChange() { /* 由各视图自行响应 state 变化 */ }
     <ToastLayer />
     <ConfirmDialog />
     <TokenGate ref="tokenGate" />
+
+    <OnboardingView v-if="state.config && !state.onboarded" />
   </div>
 </template>

@@ -60,6 +60,9 @@ export const state = reactive({
   config: null,
   browsePath: '',
 
+  // ---- 首次启动引导 ----
+  onboarded: false,   // true 表示引导已结束（遮罩关闭）
+
   // ---- 界面偏好（持久化） ----
   theme: saved.theme || 'dark',
   density: saved.density || 'cozy',

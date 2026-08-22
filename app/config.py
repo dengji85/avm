@@ -183,6 +183,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         # 后端会按 GitHub 结构解析 tag_name(版本)/html_url(下载页)/body(更新说明)/published_at(日期)。
         # 也可改为自建的版本清单 JSON（含 version/download_url/released/notes）。
         "update_feed": "https://api.github.com/repos/dengji85/avm/releases/latest",
+        # 首次启动引导是否已完成（引导结束后置为 True，换浏览器也不会重复弹）
+        "setup_done": False,
     },
     "ui": {
         "page_size": 60,

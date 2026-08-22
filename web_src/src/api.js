@@ -178,6 +178,7 @@ export const aiSearchIntent = (query) => post('/ai/search-intent', { query })
 /* ---------------- 配置 ---------------- */
 export const getConfig = () => get('/config')
 export const putConfig = (patch) => put('/config', patch)
+export const setupDone = () => put('/config', { server: { setup_done: true } })
 export const listProviders = () => get('/providers')
 export const testScraper = (body) => post('/scraper/test', body)
 export const parsePreview = (names) => post('/parse-preview', { names })
