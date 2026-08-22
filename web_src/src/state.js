@@ -213,6 +213,7 @@ export const NAV_ICONS = {
   scrapelogs: 'M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8l-6-6zm2 16H8v-2h8v2zm0-4H8v-2h8v2zm-3-5V3.5L18.5 9H13z',
   maintenance: 'M22.7 19l-9.1-9.1c.9-2.3.4-5-1.5-6.9-2-2-5-2.4-7.4-1.3L9 6 6 9 1.6 4.7C.4 7.1.9 10.1 2.9 12.1c1.9 1.9 4.6 2.4 6.9 1.5l9.1 9.1c.4.4 1 .4 1.4 0l2.9-2.9c.4-.4.4-1 0-1.4z',
   settings: 'M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58a.49.49 0 0 0 .12-.61l-1.92-3.32a.488.488 0 0 0-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54a.484.484 0 0 0-.48-.41h-3.84a.484.484 0 0 0-.48.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96a.488.488 0 0 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58a.49.49 0 0 0-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.27.41.48.41h3.84c.24 0 .44-.17.48-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z',
+  yearReview: 'M19 4h-1V2h-2v2H8V2H6v2H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm0 16H5V10h14v10zM5 8V6h14v2H5z',
 }
 
 /* 顶部主导航（Tab）：首页 / 影片库 / 统计 / 维护中心 */
@@ -231,7 +232,6 @@ export const NAV_SECONDARY = [
   { id: 'rankings', label: 'nav.rankings' },
   { id: 'swipe', label: 'nav.swipe' },
   { id: 'settings', label: 'nav.settings' },
-  { id: 'yearReview', label: 'nav.yearReview' },
 ]
 
 /* 侧边栏分组导航（Sidebar.vue 使用，注意字段为 id/label/icon） */
@@ -242,6 +242,7 @@ export const NAV_GROUPS = [
     { id: 'actress', label: 'nav.actress', icon: 'actress' },
     { id: 'collections', label: 'nav.collections', icon: 'collections' },
     { id: 'rankings', label: 'nav.rankings', icon: 'rankings' },
+    { id: 'yearReview', label: 'nav.yearReview', icon: 'yearReview' },
     { id: 'swipe', label: 'nav.swipe', icon: 'swipe' },
   ] },
   { title: 'navGroup.maintenance', items: [
