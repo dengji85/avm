@@ -17,6 +17,7 @@ import { useTasks } from '../composables/useTasks.js'
 
 const { runScrape } = useTasks()
 import VideoPlayer from './VideoPlayer.vue'
+import ActressModal from './ActressModal.vue'
 
 const mv = ref(null)
 const loading = ref(false)
@@ -373,11 +374,10 @@ function filterBy(key, value) {
   close()
 }
 
+/** 在影片详情页内以弹框形式打开女优介绍，不切换视图、不关闭当前详情。 */
+const actressModal = ref('')
 function openActress(name) {
-  state.actressCurrent = name
-  state.actressReturnView = 'gallery'
-  state.view = 'actressDetail'
-  close()
+  actressModal.value = name
 }
 
 /* ---------- 跳转筛选（按自定义标签） ---------- */
@@ -411,7 +411,10 @@ watch(tab, (t) => {
 
 function onKey(e) {
   if (!open.value) return
-  if (e.key === 'Escape') { lightbox.value ? (lightbox.value = '') : close() }
+  if (e.key === 'Escape') {
+    if (actressModal.value) { actressModal.value = ''; return }
+    lightbox.value ? (lightbox.value = '') : close()
+  }
 }
 onMounted(() => { window.addEventListener('keydown', onKey) })
 onBeforeUnmount(() => { window.removeEventListener('keydown', onKey) })
@@ -701,6 +704,9 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', onKey) })
     <div v-if="lightbox" class="lightbox" @click="lightbox = ''">
       <img :src="lightbox" alt="" />
     </div>
+
+    <!-- 女优弹框：在详情页内查看女优介绍，不关闭当前详情 -->
+    <ActressModal v-if="actressModal" :ident="actressModal" @close="actressModal = ''" />
   </Teleport>
 </template>
 

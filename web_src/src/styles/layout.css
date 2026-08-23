@@ -290,6 +290,23 @@
 .card-grid.dense { --card-min: 132px; gap: var(--sp-3); }
 .card-grid.large { --card-min: 220px; }
 
+/* 瀑布流（CSS 多列） */
+.waterfall {
+  column-gap: var(--sp-4);
+  column-count: 5;
+}
+.waterfall.dense { column-count: 7; column-gap: var(--sp-3); }
+.waterfall.large { column-count: 3; }
+.waterfall.busy { opacity: .55; pointer-events: none; transition: opacity var(--t-base); }
+/* 卡片在瀑布流中按原始比例排布，避免被固定 2:3 裁切 */
+.waterfall .card { width: 100%; break-inside: avoid; margin-bottom: var(--sp-4); }
+.waterfall .card .thumb { aspect-ratio: auto; }
+.waterfall .card .thumb img { height: auto; }
+@media (max-width: 1600px) { .waterfall { column-count: 4; } .waterfall.dense { column-count: 6; } .waterfall.large { column-count: 3; } }
+@media (max-width: 1280px) { .waterfall { column-count: 3; } .waterfall.dense { column-count: 5; } }
+@media (max-width: 980px)  { .waterfall { column-count: 2; } .waterfall.dense { column-count: 3; } .waterfall.large { column-count: 2; } }
+@media (max-width: 600px)  { .waterfall { column-count: 2; column-gap: var(--sp-2); } .waterfall.dense { column-count: 3; } .waterfall .card { margin-bottom: var(--sp-2); } }
+
 /* 横向滑动行 */
 .rail {
   display: grid;

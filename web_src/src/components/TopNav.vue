@@ -1,10 +1,11 @@
 <script setup>
 import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
-import { state, NAV_TABS } from '../state.js'
+import { state, NAV_TABS, NAV_MORE, NAV_ICONS } from '../state.js'
 import { useTasks, pct, etaSec, phaseLabel, fmtDur, fetchScrapeLogs } from '../composables/useTasks.js'
 import { aiStatus, aiSearchIntent } from '../api.js'
 import { toast, fmtAgo } from '../utils.js'
 import { t } from '../i18n/index.js'
+import NavMenu from './NavMenu.vue'
 
 const emit = defineEmits(['search'])
 const { anyRunning, activeTasks, lastFinished, taskHistory, overallPct, abort, clearHistory } = useTasks()
@@ -92,14 +93,8 @@ function goMaintenance() {
 }
 const themeIcon = computed(() => (state.theme === 'dark' ? '☾' : '☀'))
 
-// 窄屏下隐藏非核心 Tab（如统计/赏析），保留影片库等核心入口；窗口宽度响应式
-const isNarrow = ref(typeof window !== 'undefined' && window.innerWidth <= 640)
-function onResize() { isNarrow.value = window.innerWidth <= 640 }
-onMounted(() => window.addEventListener('resize', onResize))
-onBeforeUnmount(() => window.removeEventListener('resize', onResize))
-// 手机上保留：首页、影片库；统计等可隐藏（用户确认手机上非必需）
-const NAV_TABS_CORE = ['home', 'gallery', 'collections']
-const navTabsVisible = computed(() => NAV_TABS.filter(t => !isNarrow.value || NAV_TABS_CORE.includes(t.id)))
+// 一级 Tab 仅含核心内容入口（3 个），窄屏亦常驻；所有次级功能收进「全部」下拉 + ☰ 抽屉
+const navTabsVisible = computed(() => NAV_TABS)
 
 // 进度环：用 conic-gradient 模拟（indeterminate 时走 CSS 旋转动画）
 function ringStyle(p) {
@@ -164,9 +159,17 @@ async function setScrapeFilter(taskId, f) {
         v-for="t in navTabsVisible"
         :key="t.id"
         class="tab"
-        :class="{ active: state.view === t.id }"
+        :class="{ active: state.view === t.id, 'pure-icon': !t.text }"
+        :title="t.text ? undefined : $t(t.label)"
         @click="state.view = t.id"
-      >{{ $t(t.label) }}</button>
+      >
+        <!-- 文字 Tab（首页 / 影片库 / 片单） -->
+        <template v-if="t.text">{{ $t(t.label) }}</template>
+        <!-- 图标 Tab（最近观看） -->
+        <svg v-else viewBox="0 0 24 24" fill="currentColor"><path :d="NAV_ICONS[t.icon]" /></svg>
+      </button>
+      <!-- 更多：系统 + 探索（含统计/维护），hover 显示 -->
+      <NavMenu :label="$t('nav.more')" :menus="NAV_MORE" hover />
     </nav>
 
     <div class="search">
@@ -440,6 +443,9 @@ async function setScrapeFilter(taskId, f) {
   background: linear-gradient(180deg, var(--c-primary, #4f8cff), var(--c-primary-2, #3a6fd8));
   box-shadow: 0 1px 6px rgba(79,140,255,.35);
 }
+/* 最近观看 / 统计 / 维护：纯图标 */
+.pure-icon { display: grid; place-items: center; width: 32px; padding: 0; }
+.pure-icon svg { width: 17px; height: 17px; display: block; }
 
 .search .clr {
   position: absolute; right: 10px; top: 50%;

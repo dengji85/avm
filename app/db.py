@@ -76,6 +76,8 @@ CREATE TABLE IF NOT EXISTS actresses (
     alias    TEXT DEFAULT '',
     avatar   TEXT DEFAULT '',
     birthday TEXT DEFAULT '',
+    birthplace TEXT DEFAULT '',
+    hobby    TEXT DEFAULT '',
     note     TEXT DEFAULT '',
     favorite INTEGER DEFAULT 0
 );
@@ -278,6 +280,22 @@ def _migrate(conn: sqlite3.Connection) -> None:
     actress_cols = {r[1] for r in conn.execute("PRAGMA table_info(actresses)").fetchall()}
     if "followed" not in actress_cols:
         conn.execute("ALTER TABLE actresses ADD COLUMN followed INTEGER DEFAULT 0")
+    if "height" not in actress_cols:
+        conn.execute("ALTER TABLE actresses ADD COLUMN height TEXT DEFAULT ''")
+    if "bust" not in actress_cols:
+        conn.execute("ALTER TABLE actresses ADD COLUMN bust TEXT DEFAULT ''")
+    if "waist" not in actress_cols:
+        conn.execute("ALTER TABLE actresses ADD COLUMN waist TEXT DEFAULT ''")
+    if "hip" not in actress_cols:
+        conn.execute("ALTER TABLE actresses ADD COLUMN hip TEXT DEFAULT ''")
+    if "cup" not in actress_cols:
+        conn.execute("ALTER TABLE actresses ADD COLUMN cup TEXT DEFAULT ''")
+    if "birthplace" not in actress_cols:
+        conn.execute("ALTER TABLE actresses ADD COLUMN birthplace TEXT DEFAULT ''")
+    if "hobby" not in actress_cols:
+        conn.execute("ALTER TABLE actresses ADD COLUMN hobby TEXT DEFAULT ''")
+    if "profile" not in actress_cols:
+        conn.execute("ALTER TABLE actresses ADD COLUMN profile TEXT DEFAULT ''")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_act_follow ON actresses(followed)")
     coll_cols = {r[1] for r in conn.execute("PRAGMA table_info(collections)").fetchall()}
     if "kind" not in coll_cols:

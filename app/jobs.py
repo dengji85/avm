@@ -21,6 +21,8 @@ class Job:
             self.phase = "idle"
             self.total = 0
             self.done = 0
+            self.ok = 0
+            self.fail = 0
             self.current = ""
             self.counters: Dict[str, int] = {}
             self.errors: List[str] = []
@@ -84,7 +86,7 @@ class Job:
         其余键视为计数器，按传入值（绝对累计）设置，便于调用方直接上报累计数。"""
         with self._lock:
             for k, v in kw.items():
-                if k in ("running", "cancelled", "phase", "total", "done", "current", "message"):
+                if k in ("running", "cancelled", "phase", "total", "done", "ok", "fail", "current", "message"):
                     setattr(self, k, v)
                 else:
                     self.counters[k] = v
@@ -106,6 +108,8 @@ class Job:
                 "phase": self.phase,
                 "total": self.total,
                 "done": self.done,
+                "ok": self.ok,
+                "fail": self.fail,
                 "percent": percent,
                 "current": self.current,
                 "counters": dict(self.counters),
@@ -123,3 +127,4 @@ class Job:
 
 SCAN = Job("scan")
 SCRAPE = Job("scrape")
+ACTRESS_FETCH = Job("actress_fetch")

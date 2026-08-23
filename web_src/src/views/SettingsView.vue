@@ -4,7 +4,8 @@ import { state } from '../state.js'
 import {
   getConfig, putConfig, listProviders, testScraper as apiTest,
   parsePreview as apiParse, fsList, sniffCovers, csvUrl, cacheAvatars,
-  fillActressAvatars, rescanLocalCovers,   getServerInfo, resetToken, checkUpdate,
+  fillActressAvatars, rescanLocalCovers, fetchActressProfile, getServerInfo, resetToken, checkUpdate,
+  listPlugins, togglePlugin,
 } from '../api.js'
 import { toast, confirmDialog } from '../utils.js'
 import { useTasks } from '../composables/useTasks.js'
@@ -39,6 +40,7 @@ const cfg = reactive({
   },
   ffmpeg_path: '',
   ai: { enabled: false, base_url: 'https://api.openai.com/v1', api_key: '', model: 'gpt-4o-mini', temperature: 0.4 },
+  wiki: { languages: ['ja', 'zh'] },
 })
 
 const providers = reactive({ available: [], active: [] })
@@ -72,6 +74,7 @@ async function load() {
     cfg.scraper.avwiki = Object.assign({ base_url: '', cookie: '' }, cfg.scraper.avwiki)
     cfg.scraper.javbus = Object.assign({ base_url: '', cookie: '' }, cfg.scraper.javbus)
     cfg.scraper.javdb = Object.assign({ base_url: '', cookie: '' }, cfg.scraper.javdb)
+    cfg.wiki = Object.assign({ languages: ['ja', 'zh'] }, c.wiki)
 
     ignoreText.value = (cfg.library.ignore_keywords || []).join(', ')
     extText.value = (cfg.library.video_extensions || []).join(', ')
@@ -202,9 +205,24 @@ async function doFillActressAvatars() {
   if (!ok) return
   fillingAvatars.value = true
   try {
-    const r = await fillActressAvatars()
-    toast(t('settings.avatarFilled', { n: r.filled || 0, bad: r.failed || 0 }), 'ok')
+    await fillActressAvatars()
+    toast('已加入任务中心：女优头像抓取中…', 'ok')
   } catch (e) { toast(e.message, 'err') } finally { fillingAvatars.value = false }
+}
+
+// 用已启用的资料插件（如 JavBus 女优资料）补全女优文字档案（身高/三围/生日/出生地等）
+const fetchingProfile = ref(false)
+async function doFetchProfile() {
+  const ok = await confirmDialog(
+    t('settings.profileFetchConfirmTitle'),
+    t('settings.profileFetchConfirmMsg'),
+  )
+  if (!ok) return
+  fetchingProfile.value = true
+  try {
+    await fetchActressProfile(0)
+    toast('已加入任务中心：女优资料抓取中…', 'ok')
+  } catch (e) { toast(e.message, 'err') } finally { fetchingProfile.value = false }
 }
 
 // 重新嗅探本地已有的封面图片，命中则落盘写回（无需全量重扫）
@@ -409,7 +427,23 @@ async function doCheckUpdate() {
   }
 }
 
-onMounted(async () => { await load(); await loadServerInfo() })
+/* 女优资料插件管理 */
+const pluginList = ref([])
+async function loadPlugins() {
+  try {
+    const r = await listPlugins()
+    pluginList.value = (r && r.plugins) || []
+  } catch (e) { /* 忽略 */ }
+}
+async function togglePluginOn(p) {
+  try {
+    const r = await togglePlugin(p.id)
+    p.enabled = !!r.enabled
+    toast(`已${p.enabled ? '启用' : '停用'}「${p.name}」`, 'ok')
+  } catch (e) { toast(e.message, 'err') }
+}
+
+onMounted(async () => { await load(); await loadServerInfo(); loadPlugins() })
 </script>
 
 <template>
@@ -561,6 +595,9 @@ onMounted(async () => { await load(); await loadServerInfo() })
             <button class="btn" :disabled="fillingAvatars" @click="doFillActressAvatars">
               {{ fillingAvatars ? $t('settings.filling') : $t('settings.fillAvatarsBtn') }}
             </button>
+            <button class="btn" :disabled="fetchingProfile" @click="doFetchProfile">
+              {{ fetchingProfile ? $t('settings.fetching') : $t('settings.fetchProfileBtn') }}
+            </button>
             <button class="btn" :disabled="rescanningCovers" @click="doRescanLocalCovers">
               {{ rescanningCovers ? $t('settings.sniffing') : $t('settings.rescanCoverBtn') }}
             </button>
@@ -662,6 +699,37 @@ onMounted(async () => { await load(); await loadServerInfo() })
               <button class="btn" :disabled="testing" @click="runTest">{{ testing ? $t('settings.testing') : $t('settings.startTest') }}</button>
             </div>
             <pre v-if="testOut.lines.length" class="test-out" :class="testOut.cls">{{ testOut.lines.join('\n') }}</pre>
+          </div>
+        </div>
+
+        <!-- ============ 女优资料插件（数据源） ============ -->
+        <div class="panel">
+          <div class="panel-head">
+            {{ $t('settings.wikiTitle') }}
+            <span class="sub">{{ $t('settings.wikiSub') }}</span>
+          </div>
+          <div class="panel-body">
+            <div class="field">
+              <label>{{ $t('settings.wikiLang') }}</label>
+              <input v-model="cfg.wiki.languages" placeholder="ja,zh" />
+              <span class="hint">{{ $t('settings.wikiLangHint') }}</span>
+            </div>
+            <div class="field">
+              <label>{{ $t('settings.plugins') }}</label>
+              <div class="plugin-list">
+                <div v-if="!pluginList.length" class="muted sm">没有可用插件</div>
+                <div v-for="p in pluginList" :key="p.id" class="field-row">
+                  <label>
+                    {{ p.name }}
+                    <span class="hint">{{ p.description }}</span>
+                  </label>
+                  <label class="toggle">
+                    <input type="checkbox" :checked="p.enabled" @change="togglePluginOn(p)" />
+                    <span class="track"></span>
+                  </label>
+                </div>
+              </div>
+            </div>
           </div>
         </div>
       </template>
@@ -783,6 +851,15 @@ onMounted(async () => { await load(); await loadServerInfo() })
                 <option :value="120">120</option>
                 <option :value="240">240</option>
               </select>
+            </div>
+            <div class="field-row">
+              <label>{{ $t('settings.playerMode') }}</label>
+              <div class="btn-group">
+                <button class="btn tiny" :class="{ active: state.playerMode === 'auto' }" @click="state.playerMode = 'auto'" :title="$t('settings.playerModeAutoHint')">{{ $t('settings.playerModeAuto') }}</button>
+                <button class="btn tiny" :class="{ active: state.playerMode === 'web' }" @click="state.playerMode = 'web'">{{ $t('settings.playerModeWeb') }}</button>
+                <button class="btn tiny" :class="{ active: state.playerMode === 'external' }" @click="state.playerMode = 'external'">{{ $t('settings.playerModeExternal') }}</button>
+              </div>
+              <span class="hint">{{ $t('settings.playerModeHint') }}</span>
             </div>
           </div>
         </div>

@@ -8,6 +8,7 @@ import { toast } from '../utils.js'
 import PageHead from '../components/PageHead.vue'
 import StatGrid from '../components/StatGrid.vue'
 import EmptyState from '../components/EmptyState.vue'
+import YearReviewView from './YearReviewView.vue'
 
 const loading = ref(true)
 const error = ref('')
@@ -617,6 +618,7 @@ function insightText(it) {
         <button :class="{on: activeTab==='favorite'}" @click="activeTab='favorite'">{{ $t('stats.favTop') }}</button>
         <button :class="{on: activeTab==='trend'}" @click="activeTab='trend'">{{ $t('stats.yearTrend') }}</button>
         <button :class="{on: activeTab==='fun'}" @click="activeTab='fun'">{{ $t('stats.funTop') }}</button>
+        <button :class="{on: activeTab==='yearreview'}" @click="activeTab='yearreview'">{{ $t('yr.nav') }}</button>
         <button :class="{on: activeTab==='movies'}" @click="activeTab='movies'">{{ $t('stats.allMovies', { n: allMovies.length }) }}</button>
         <button :class="{on: activeTab==='wanalysis'}" @click="activeTab='wanalysis'">{{ $t('stats.watchAnalysis') }}</button>
         <button :class="{on: activeTab==='watchlog'}" @click="activeTab='watchlog'">{{ $t('stats.watchlog') }}</button>
@@ -1132,6 +1134,11 @@ function insightText(it) {
             </div>
           </div>
         </section>
+      </div>
+
+      <!-- 年度回顾 -->
+      <div v-show="activeTab==='yearreview'">
+        <YearReviewView />
       </div>
     </template>
     </div>

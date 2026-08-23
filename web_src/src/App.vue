@@ -1,15 +1,18 @@
 <script setup>
-import { onMounted, onBeforeUnmount, watch, ref } from 'vue'
+import { onMounted, onBeforeUnmount, watch, ref, computed } from 'vue'
 import { state, applyTheme } from './state.js'
 import { getFacets, getConfig, onNoToken } from './api.js'
 import { toast } from './utils.js'
 import { useTasks } from './composables/useTasks.js'
 
 import TopNav from './components/TopNav.vue'
+import MobileNav from './components/MobileNav.vue'
 import ToastLayer from './components/ToastLayer.vue'
 import ConfirmDialog from './components/ConfirmDialog.vue'
 import DetailDrawer from './components/DetailDrawer.vue'
 import TokenGate from './components/TokenGate.vue'
+import PlaylistPlayer from './components/PlaylistPlayer.vue'
+import MiniPlayBar from './components/MiniPlayBar.vue'
 
 const tokenGate = ref(null)
 
@@ -18,6 +21,7 @@ import GalleryView from './views/GalleryView.vue'
 import ActressView from './views/ActressView.vue'
 import ActressDetailView from './views/ActressDetailView.vue'
 import CollectionsView from './views/CollectionsView.vue'
+import RecentView from './views/RecentView.vue'
 import RankingsView from './views/RankingsView.vue'
 import SwipeView from './views/SwipeView.vue'
 import StatsView from './views/StatsView.vue'
@@ -32,6 +36,7 @@ const VIEWS = {
   actress: ActressView,
   actressDetail: ActressDetailView,
   collections: CollectionsView,
+  recent: RecentView,
   rankings: RankingsView,
   swipe: SwipeView,
   stats: StatsView,
@@ -41,6 +46,12 @@ const VIEWS = {
 }
 
 const tasks = useTasks()
+
+/* 全局队列当前播放项（供迷你播放条显示） */
+const currentQueueItem = computed(() => {
+  const q = state.playQueue.queue || []
+  return q[Math.min(state.playQueue.idx, q.length - 1)] || null
+})
 
 async function loadFacets() {
   try { state.facets = await getFacets() } catch (e) { /* 非致命 */ }
@@ -86,6 +97,7 @@ function onFilterChange() { /* 由各视图自行响应 state 变化 */ }
 <template>
   <div class="app">
     <TopNav />
+    <MobileNav />
 
     <div class="app-main">
       <component :is="VIEWS[state.view] || VIEWS.home" />
@@ -95,6 +107,13 @@ function onFilterChange() { /* 由各视图自行响应 state 变化 */ }
     <ToastLayer />
     <ConfirmDialog />
     <TokenGate ref="tokenGate" />
+
+    <!-- 全局播放队列：全屏播放器（打开时）+ 迷你播放条（关闭但队列存在时） -->
+    <PlaylistPlayer v-if="state.playQueue.open" />
+    <MiniPlayBar
+      v-if="!state.playQueue.open && state.playQueue.queue.length && currentQueueItem"
+      :item="currentQueueItem"
+    />
 
     <OnboardingView v-if="state.config && !state.onboarded" />
   </div>

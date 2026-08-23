@@ -1,7 +1,7 @@
 <script setup>
 import { computed, ref } from 'vue'
-import { state } from '../state.js'
-import { coverThumbUrl, toggleFlag, playMovie } from '../api.js'
+import { state, openMoviePlayer } from '../state.js'
+import { coverThumbUrl, toggleFlag } from '../api.js'
 import { coverFallback, fmtMin, fmtSize, toast, qualityTag } from '../utils.js'
 import { t } from '../i18n/index.js'
 import AddToCollectionBtn from './AddToCollectionBtn.vue'
@@ -9,6 +9,7 @@ import AddToCollectionBtn from './AddToCollectionBtn.vue'
 const props = defineProps({
   movie: { type: Object, required: true },
   selectable: { type: Boolean, default: true },
+  mode: { type: String, default: 'grid' }, // 'grid' | 'waterfall'
 })
 const emit = defineEmits(['open', 'changed'])
 
@@ -62,8 +63,9 @@ async function fav(e) {
 async function play(e) {
   e.stopPropagation()
   try {
-    await playMovie(m.value.id)
-    toast(t('player.launchedExternal'), 'ok')
+    const used = await openMoviePlayer(m.value)
+    if (used === 'external') toast(t('player.launchedExternal'), 'ok')
+    // web：打开全局网络播放器，无需 toast
   } catch (err) { toast(err.message, 'err') }
 }
 </script>
@@ -71,7 +73,7 @@ async function play(e) {
 <template>
   <article
     class="card"
-    :class="{ selected }"
+    :class="{ selected, waterfall: mode === 'waterfall' }"
     @click="onCardClick"
     :title="m.title || m.code"
   >
@@ -114,8 +116,12 @@ async function play(e) {
         </button>
       </div>
 
-      <!-- 中央播放 -->
-      <button class="play-fab" @click="play" :data-tip="$t('player.external')">▶</button>
+      <!-- 中央播放（按播放偏好：网页播放或系统播放器） -->
+      <button
+        class="play-fab"
+        @click="play"
+        :data-tip="state.playerMode === 'external' ? $t('player.external') : $t('player.playBtn')"
+      >▶</button>
 
       <!-- 底部标记 -->
       <div class="bl-tags">

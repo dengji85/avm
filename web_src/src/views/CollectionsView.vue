@@ -1,6 +1,6 @@
 <script setup>
 import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
-import { state } from '../state.js'
+import { state, openPlayQueue } from '../state.js'
 import {
   listCollections, createCollection, updateCollection, deleteCollection,
   getCollection, removeFromCollection, getProfile,
@@ -11,7 +11,7 @@ import { toast, confirmDialog, coverFallback } from '../utils.js'
 import { t } from '../i18n/index.js'
 import MovieGrid from '../components/MovieGrid.vue'
 import Pager from '../components/Pager.vue'
-import PlaylistPlayer from '../components/PlaylistPlayer.vue'
+
 
 const list = ref([])
 const loading = ref(false)
@@ -73,47 +73,18 @@ async function open(c) {
 }
 
 /* 播放片单：分页拉取全量影片，构建连播队列 */
-const playing = ref(false)
-const playlist = ref([])
-const playStart = ref(0)
 async function playCollection() {
   if (!current.value) return
-  const all = []
-  let p = 1
-  const size = 100
-  try {
-    while (true) {
-      const r = await getCollection(current.value.id, { page: p, page_size: size })
-      const items = (r && r.items) || []
-      all.push(...items)
-      if (!items.length || all.length >= (Number(r.total) || all.length)) break
-      if (items.length < size) break
-      p += 1
-    }
-  } catch (e) { toast(e.message, 'err'); return }
+  const all = await fetchAll()
   if (!all.length) { toast(t('playlist.emptyNoMovies'), 'err'); return }
   // 从第一部未看完的可播影片开始（顺序模式更顺手）；没有则从 0
-  let start = 0
-  for (let i = 0; i < all.length; i++) {
-    if (all[i].playable && !(all[i].progress_finished)) { start = i; break }
-  }
-  if (!all[start] || !all[start].playable) {
-    const firstPlayable = all.findIndex((m) => m.playable)
-    start = firstPlayable >= 0 ? firstPlayable : 0
-  }
+  let start = -1
   // 优先沿用片单续播光标（上次看到第几部），前提它仍在队列且未看完
-  const ph = resPlayhead
-  if (ph) {
-    const hi = all.findIndex((m) => m.id === ph)
+  if (resPlayhead.value) {
+    const hi = all.findIndex((m) => m.id === resPlayhead.value)
     if (hi >= 0 && all[hi].playable && !all[hi].progress_finished) start = hi
   }
-  playlist.value = all.map((m) => ({
-    id: m.id, code: m.code || m.title, title: m.title, cover: m.cover,
-    playable: !!m.playable, progress_seconds: m.progress_seconds || 0,
-    duration_seconds: m.duration_seconds || 0,
-  }))
-  playStart.value = start
-  playing.value = true
+  openPlayQueue(all, current.value.title, start, current.value.id)
 }
 
 // 续播光标（详情接口返回），用于显示"继续播放"
@@ -121,6 +92,15 @@ const resPlayhead = ref(null)
 // 直接从上次位置继续（不自动跳到第一部未看完）
 async function resumeCollection() {
   if (!current.value) return
+  const all = await fetchAll()
+  if (!all.length) { toast(t('playlist.emptyNoMovies'), 'err'); return }
+  const hi = all.findIndex((m) => m.id === resPlayhead.value)
+  openPlayQueue(all, current.value.title, hi >= 0 ? hi : 0, current.value.id)
+}
+
+/** 拉取当前片单的全部影片（循环分页） */
+async function fetchAll() {
+  if (!current.value) return []
   const all = []
   let p = 1
   const size = 100
@@ -133,17 +113,8 @@ async function resumeCollection() {
       if (items.length < size) break
       p += 1
     }
-  } catch (e) { toast(e.message, 'err'); return }
-  if (!all.length) { toast(t('playlist.emptyNoMovies'), 'err'); return }
-  const hi = all.findIndex((m) => m.id === resPlayhead.value)
-  const start = hi >= 0 ? hi : 0
-  playlist.value = all.map((m) => ({
-    id: m.id, code: m.code || m.title, title: m.title, cover: m.cover,
-    playable: !!m.playable, progress_seconds: m.progress_seconds || 0,
-    duration_seconds: m.duration_seconds || 0,
-  }))
-  playStart.value = start
-  playing.value = true
+  } catch (e) { toast(e.message, 'err'); return [] }
+  return all
 }
 
 async function loadMovies() {
@@ -389,15 +360,6 @@ onBeforeUnmount(() => { window.removeEventListener('avm-toast', onPlaylistToast)
         <Pager :page="page" :page-count="pageCount" :total="total" @go="(p) => { page = p; loadMovies() }" />
       </div>
     </template>
-
-    <!-- 片单播放器 -->
-    <PlaylistPlayer
-      v-if="playing"
-      :cid="current ? current.id : 0"
-      :queue="playlist"
-      :start-index="playStart"
-      @close="playing = false"
-    />
 
     <!-- 手动片单排序 -->
     <Teleport to="body">

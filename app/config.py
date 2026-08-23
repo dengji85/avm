@@ -198,6 +198,19 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "avatar_download": False,
         "fanart_download": True,
     },
+    "plugins": {
+        # 女优资料插件开关：{插件id: true/false}
+        # 默认启用规则见 plugins/base.enabled_plugins（不联网插件默认开，联网插件默认关）
+        "enabled": {
+            "gfriends": False,
+            "wiki_actress": False,
+        },
+    },
+    # 女优资料插件（维基百科）配置
+    "wiki": {
+        # 抓取时尝试的语言版优先级（日文维基 {{AV女優}} 模板最全，回退中文维基）
+        "languages": ["ja", "zh"],
+    },
     "ai": {
         # AI 增强（可选）。兼容 OpenAI 协议的任意端点：
         #  - 云端：https://api.openai.com/v1

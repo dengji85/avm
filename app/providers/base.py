@@ -47,75 +47,85 @@ class BaseProvider:
         return int(self.scfg.get("timeout", 20))
 
     def http_get(self, url: str, headers: Optional[Dict[str, str]] = None) -> Optional[str]:
-        try:
-            import requests
-        except ImportError:
-            return None
-        import time
-        from urllib.parse import urlparse
-        proxy = self.scfg.get("proxy") or ""
-        # 完整浏览器请求头：JavBus 的 driver-verify 会检查 Accept/Referer 等，
-        # 只发 User-Agent 会被当成脚本而拦在验证页外。
-        origin = ""
-        try:
-            p = urlparse(url)
-            origin = f"{p.scheme}://{p.netloc}"
-        except Exception:
-            origin = ""
-        merged: Dict[str, str] = {
-            "User-Agent": self.scfg.get(
-                "user_agent",
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-            ),
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,"
-                      "image/avif,image/webp,*/*;q=0.8",
-            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-            "Accept-Encoding": "gzip, deflate",
-            "Connection": "keep-alive",
-            "Upgrade-Insecure-Requests": "1",
-            "Sec-Fetch-Dest": "document",
-            "Sec-Fetch-Mode": "navigate",
-            "Sec-Fetch-Site": "same-origin",
-            "Sec-Fetch-User": "?1",
-        }
-        if origin:
-            merged["Referer"] = origin + "/"
-        merged.update(self.options.get("headers") or {})
-        merged.update(headers or {})
-        # 数据源级 Cookie：用于绕过 av-wiki / JavBus 等站点的反爬验证页。
-        # 支持两种写法：直接的 "k=v; k2=v2" 字符串，或已解析好的 dict。
-        raw_cookie = self.options.get("cookie") or self.options.get("cookies") or ""
-        cookie_dict: Optional[Dict[str, str]] = None
-        if isinstance(raw_cookie, dict):
-            cookie_dict = raw_cookie
-        elif isinstance(raw_cookie, str) and raw_cookie.strip():
-            cookie_dict = {}
-            for part in raw_cookie.split(";"):
-                if "=" in part:
-                    k, v = part.split("=", 1)
-                    cookie_dict[k.strip()] = v.strip()
-        retries = int(self.scfg.get("retries", 3)) or 1
-        last_exc: Exception = None
-        for attempt in range(retries):
-            try:
-                resp = requests.get(
-                    url,
-                    timeout=self.timeout,
-                    headers=merged,
-                    cookies=cookie_dict,
-                    proxies={"http": proxy, "https": proxy} if proxy else None,
-                    verify=False,
-                )
-                resp.raise_for_status()
-                resp.encoding = resp.apparent_encoding or resp.encoding
-                return resp.text
-            except Exception as exc:  # 代理隧道抖动 / 超时 / 4xx，重试
-                last_exc = exc
-                if attempt < retries - 1:
-                    time.sleep(0.4 * (attempt + 1))
-        self.last_error = f"请求异常: {type(last_exc).__name__}: {last_exc}"
+        return http_get(url, self.scfg, self.options, headers)
+
+
+def http_get(url: str, scfg: Dict[str, Any], options: Dict[str, Any],
+             headers: Optional[Dict[str, str]] = None) -> Optional[str]:
+    """模块级 HTTP GET（供 BaseProvider 与女优资料插件等复用）。
+
+    处理代理 / 完整浏览器请求头 / 数据源级 Cookie / 重试，并复用 scfg 里的
+    timeout / proxy / user_agent / retries 配置。返回响应文本或 None（含重试耗尽）。
+    """
+    try:
+        import requests
+    except ImportError:
         return None
+    import time
+    from urllib.parse import urlparse
+    proxy = scfg.get("proxy") or ""
+    # 完整浏览器请求头：JavBus 的 driver-verify 会检查 Accept/Referer 等，
+    # 只发 User-Agent 会被当成脚本而拦在验证页外。
+    origin = ""
+    try:
+        p = urlparse(url)
+        origin = f"{p.scheme}://{p.netloc}"
+    except Exception:
+        origin = ""
+    merged: Dict[str, str] = {
+        "User-Agent": scfg.get(
+            "user_agent",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        ),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,"
+                  "image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+        "Accept-Encoding": "gzip, deflate",
+        "Connection": "keep-alive",
+        "Upgrade-Insecure-Requests": "1",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "same-origin",
+        "Sec-Fetch-User": "?1",
+    }
+    if origin:
+        merged["Referer"] = origin + "/"
+    merged.update(options.get("headers") or {})
+    merged.update(headers or {})
+    # 数据源级 Cookie：用于绕过 av-wiki / JavBus 等站点的反爬验证页。
+    # 支持两种写法：直接的 "k=v; k2=v2" 字符串，或已解析好的 dict。
+    raw_cookie = options.get("cookie") or options.get("cookies") or ""
+    cookie_dict: Optional[Dict[str, str]] = None
+    if isinstance(raw_cookie, dict):
+        cookie_dict = raw_cookie
+    elif isinstance(raw_cookie, str) and raw_cookie.strip():
+        cookie_dict = {}
+        for part in raw_cookie.split(";"):
+            if "=" in part:
+                k, v = part.split("=", 1)
+                cookie_dict[k.strip()] = v.strip()
+    timeout = int(scfg.get("timeout", 20))
+    retries = int(scfg.get("retries", 3)) or 1
+    last_exc: Exception = None
+    for attempt in range(retries):
+        try:
+            resp = requests.get(
+                url,
+                timeout=timeout,
+                headers=merged,
+                cookies=cookie_dict,
+                proxies={"http": proxy, "https": proxy} if proxy else None,
+                verify=False,
+            )
+            resp.raise_for_status()
+            resp.encoding = resp.apparent_encoding or resp.encoding
+            return resp.text
+        except Exception as exc:  # 代理隧道抖动 / 超时 / 4xx，重试
+            last_exc = exc
+            if attempt < retries - 1:
+                time.sleep(0.4 * (attempt + 1))
+    return None
 
     @staticmethod
     def normalize(meta: Dict[str, Any], source: str) -> MetaResult:

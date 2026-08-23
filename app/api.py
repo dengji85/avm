@@ -24,10 +24,10 @@ from fastapi import APIRouter, Body, File, HTTPException, Query, Request, Upload
 from fastapi.responses import FileResponse, PlainTextResponse, Response, StreamingResponse
 
 from . import ai as ai_mod
-from . import dedupe, images, nfo as nfo_mod, providers, scanner, scraper, scrape_diag, store, subtitles
+from . import dedupe, images, nfo as nfo_mod, plugins, providers, scanner, scraper, scrape_diag, store, subtitles
 from .config import COVER_DIR, DATA_DIR, avatar_dir, _deep_merge, load_config, update_config
 from .db import connect, db, query_all, query_one
-from .jobs import SCAN, SCRAPE
+from .jobs import SCAN, SCRAPE, ACTRESS_FETCH
 
 router = APIRouter(prefix="/api")
 
@@ -250,34 +250,323 @@ def cache_avatars() -> Dict[str, Any]:
 
 
 @router.post("/actresses/cache-avatars")
-def fill_actress_avatars() -> Dict[str, Any]:
-    """重新抓取已刮削影片的元数据，补全女优头像（落盘到本地 avatar_dir）。
+def fill_actress_avatars_api() -> Dict[str, Any]:
+    """（异步）重新刮削已刮削影片补全女优头像，进度见任务中心。
 
     走 scrape_one(overwrite=False)，仅填补仍为空的女优头像，不覆盖已有本地头像、
     不改动影片标题/封面等其它字段。需联网并建议配置代理。
     """
+    return _start_actress_fetch("cache")
+
+
+@router.get("/plugins")
+def list_plugins_api() -> Dict[str, Any]:
+    """列出全部女优资料插件及其启用状态。"""
     cfg = load_config()
-    providers_list = providers.build_providers(cfg)
-    if not providers_list:
-        raise HTTPException(400, "未启用任何数据源，无法补全女优头像")
+    enabled_map = (cfg.get("plugins", {}) or {}).get("enabled") or {}
+    plugs = []
+    for p in plugins.list_plugins():
+        plugs.append({
+            **p.describe(),
+            "enabled": enabled_map.get(p.id, not p.needs_network),
+        })
+    return {"plugins": plugs}
+
+
+@router.post("/plugins/{plugin_id}/toggle")
+def toggle_plugin(plugin_id: str) -> Dict[str, Any]:
+    """切换某个插件的启用状态。"""
+    p = plugins.get_plugin(plugin_id)
+    if not p:
+        raise HTTPException(404, "插件不存在")
+    cfg = load_config()
+    enabled_map = dict((cfg.get("plugins", {}) or {}).get("enabled") or {})
+    cur = enabled_map.get(plugin_id, not p.needs_network)
+    enabled_map[plugin_id] = not cur
+    update_config({"plugins": {"enabled": enabled_map}})
+    return {"ok": True, "plugin_id": plugin_id, "enabled": enabled_map[plugin_id]}
+
+
+@router.post("/actresses/{actress_id}/plugin-fetch")
+def actress_plugin_fetch(actress_id: int, payload: Dict[str, Any] = Body(default={})) -> Dict[str, Any]:
+    """调用女优资料插件为指定女优补充资料（头像等）。
+
+    payload: { plugin_id: str }。插件需在配置中启用。
+    """
+    plugin_id = (payload.get("plugin_id") or "").strip()
+    p = plugins.get_plugin(plugin_id)
+    if not p:
+        raise HTTPException(404, "插件不存在")
+    cfg = load_config()
+    enabled_map = (cfg.get("plugins", {}) or {}).get("enabled") or {}
+    if not enabled_map.get(plugin_id, not p.needs_network):
+        raise HTTPException(400, f"插件「{p.name}」未启用，请先在设置中开启")
     with db() as conn:
-        before = query_one(
-            conn, "SELECT COUNT(*) c FROM actresses WHERE avatar='' OR avatar IS NULL")["c"]
-        # 仅对有番号且已刮削过的影片重新抓，避免无谓请求
-        movie_ids = [r["id"] for r in query_all(
-            conn, "SELECT id FROM movies WHERE code<>'' AND scraped_at IS NOT NULL")]
-        filled = 0
-        for mid in movie_ids:
-            try:
-                scraper.scrape_one(conn, mid, providers_list, cfg, overwrite=False)
-            except Exception:
-                pass
-        after = query_one(
-            conn, "SELECT COUNT(*) c FROM actresses WHERE avatar='' OR avatar IS NULL")["c"]
-        filled = max(before - after, 0)
-    return {"ok": True, "actresses_before_empty": before,
-            "actresses_after_empty": after, "filled": filled,
-            "movies_scanned": len(movie_ids)}
+        row = conn.execute("SELECT * FROM actresses WHERE id=?", (actress_id,)).fetchone()
+        if not row:
+            raise HTTPException(404, "女优不存在")
+        actress_name = row["name"]
+        try:
+            result = p.fetch(actress_name, cfg)
+        except Exception as e:
+            raise HTTPException(400, f"插件获取失败：{e}")
+        updates: Dict[str, str] = {}
+        # 头像：有 avatar_url 则落盘为本地文件
+        avatar_url = result.get("avatar_url")
+        if avatar_url:
+            name_on_disk = images.save_avatar(actress_name, avatar_url, cfg)
+            if name_on_disk:
+                updates["avatar"] = name_on_disk
+        for f in ("height", "bust", "waist", "hip", "cup", "birthday"):
+            v = result.get(f)
+            if v and not row.get(f):
+                updates[f] = str(v)
+        if updates:
+            sets = ", ".join(f"{k}=?" for k in updates)
+            conn.execute(f"UPDATE actresses SET {sets} WHERE id=?", [*updates.values(), actress_id])
+        return {"ok": True, "plugin_id": plugin_id, "applied": updates}
+
+
+@router.post("/actresses/fill-avatars-gfriends")
+def fill_actress_avatars_gfriends_api(limit: int = Query(0)) -> Dict[str, Any]:
+    """（异步）从 gfriends 插件批量补全无头像女优，进度见任务中心。
+
+    需已启用 gfriends 插件；limit<=0 表示全部。仅处理 avatar 为空的女优，
+    已有头像的跳过。
+    """
+    return _start_actress_fetch("gfriends", limit)
+
+
+@router.post("/actresses/fetch-profile")
+def fetch_actress_profile_api(limit: int = Query(0)) -> Dict[str, Any]:
+    """（异步）用已启用的资料插件批量补全女优文字档案，进度见任务中心。
+
+    仅对缺失字段做补充（已有不覆盖）。limit<=0 表示全部。
+    """
+    return _start_actress_fetch("profile", limit)
+
+
+@router.post("/actresses/{actress_id}/fetch-profile")
+def fetch_one_actress_profile_api(actress_id: int) -> Dict[str, Any]:
+    """（同步）对单个女优立即用启用插件补全档案，返回变更结果。"""
+    cfg = load_config()
+    profile_plugins = [p for p in plugins.enabled_plugins(cfg)
+                       if set(p.capabilities) & {"height", "measurements", "birthday", "avatar"}]
+    if not profile_plugins:
+        raise HTTPException(400, "未启用任何女优资料插件（如 JavBus 女优资料、gfriends 头像）")
+    with db() as conn:
+        row = query_one(conn, "SELECT id, name FROM actresses WHERE id=?", (actress_id,))
+        if not row:
+            raise HTTPException(404, "女优不存在")
+        changed = _apply_actress_plugins(conn, row["id"], row["name"], profile_plugins, cfg)
+    return {"ok": True, "changed": changed, "actress_id": actress_id}
+
+
+def _apply_actress_plugins(conn, actress_id: int, name: str,
+                          plugin_list, cfg: Dict[str, Any]) -> bool:
+    """用一组资料插件拉取女优档案并合并落库（已有字段不覆盖）。
+
+    返回是否对数据库产生了实际变更。头像若插件返回 avatar_url 且本地无头像则落盘。
+    """
+    # 当前库中该女优已有字段
+    cur = query_one(conn,
+                    "SELECT height,bust,waist,hip,cup,birthday,birthplace,hobby,profile,avatar "
+                    "FROM actresses WHERE id=?", (actress_id,))
+    sets: Dict[str, Any] = {}
+    has_local_avatar = bool(cur and cur["avatar"])
+
+    for p in plugin_list:
+        try:
+            result = p.fetch(name, cfg)
+        except Exception:
+            continue
+        if not result:
+            continue
+        for fld in ("height", "bust", "waist", "hip", "cup", "birthday",
+                    "birthplace", "hobby", "profile"):
+            val = (result.get(fld) or "").strip() if isinstance(result.get(fld), str) \
+                else result.get(fld)
+            if val in (None, "", 0):
+                continue
+            # 已有非空不覆盖；但 profile（简介）允许用更完整的整篇替换旧的首段
+            existing = cur.get(fld) if cur else None
+            if fld == "profile":
+                if existing and len(val) <= len(existing):
+                    continue
+            elif existing not in (None, ""):
+                continue
+            sets[fld] = val
+        # 头像：仅当本地无头像且插件提供时落盘
+        if not has_local_avatar and result.get("avatar_url"):
+            disk = images.save_avatar(name, result["avatar_url"], cfg)
+            if disk:
+                sets["avatar"] = disk
+                has_local_avatar = True
+
+    if sets:
+        cols = ", ".join(f"{k}=?" for k in sets)
+        vals = list(sets.values()) + [actress_id]
+        conn.execute(f"UPDATE actresses SET {cols} WHERE id=?", vals)
+        return True
+    return False
+
+
+def _start_actress_fetch(mode: str, limit: int = 0) -> Dict[str, Any]:
+    """统一入口：校验后用共享线程池异步执行女优资料抓取，状态写入 ACTRESS_FETCH。"""
+    if not ACTRESS_FETCH.start():
+        raise HTTPException(409, "已有女优资料抓取任务在执行中")
+    cfg = load_config()
+    from .threadpool import submit_task
+    submit_task(_run_actress_fetch, mode, limit, cfg)
+    return {"ok": True, "mode": mode}
+
+
+def _run_actress_fetch(mode: str, limit: int, cfg: Dict[str, Any]) -> None:
+    """女优资料抓取后台执行体（共享线程池内运行）。
+
+    统一通过 ACTRESS_FETCH 上报进度/日志；支持取消。日志进入统一任务中心。
+    """
+    from .plugins.gfriends import _load_file_tree  # 局部导入，避免循环依赖
+
+    job = ACTRESS_FETCH
+
+    def log(msg, level="info"):
+        job.log(msg, level)
+
+    try:
+        if mode == "cache":
+            # 重新刮削已刮削影片，补全女优头像
+            providers_list = providers.build_providers(cfg)
+            if not providers_list:
+                job.error("未启用任何数据源，无法补全女优头像")
+                job.finish("未启用数据源")
+                return
+            with db() as conn:
+                before = query_one(
+                    conn, "SELECT COUNT(*) c FROM actresses WHERE avatar='' OR avatar IS NULL")["c"]
+                movie_ids = [r["id"] for r in query_all(
+                    conn, "SELECT id FROM movies WHERE code<>'' AND scraped_at IS NOT NULL")]
+                job.update(total=len(movie_ids), phase="fetching")
+                log(f"开始补全女优头像：扫描 {len(movie_ids)} 部影片")
+                for mid in movie_ids:
+                    if job.cancelled:
+                        break
+                    try:
+                        scraper.scrape_one(conn, mid, providers_list, cfg, overwrite=False)
+                    except Exception as e:
+                        job.fail += 1
+                        log(f"影片 {mid} 刮削失败：{e}", "warn")
+                    job.tick()
+                after = query_one(
+                    conn, "SELECT COUNT(*) c FROM actresses WHERE avatar='' OR avatar IS NULL")["c"]
+                filled = max(before - after, 0)
+                job.ok = filled
+                job.finish(f"已补全 {filled} 个女优头像（扫描 {len(movie_ids)} 部影片）")
+            return
+
+        if mode == "gfriends":
+            p = plugins.get_plugin("gfriends")
+            if not p:
+                job.error("gfriends 插件不存在")
+                job.finish("插件不存在")
+                return
+            enabled_map = (cfg.get("plugins", {}) or {}).get("enabled") or {}
+            if not enabled_map.get("gfriends", not p.needs_network):
+                job.error("gfriends 插件未启用，请先在设置中开启")
+                job.finish("gfriends 未启用")
+                return
+            with db() as conn:
+                rows = query_all(
+                    conn, "SELECT id, name FROM actresses WHERE avatar='' OR avatar IS NULL ORDER BY id")
+                if limit and limit > 0:
+                    rows = rows[:limit]
+                job.update(total=len(rows), phase="fetching")
+                log(f"待补全女优数：{len(rows)}；正在探测 gfriends 仓库连通性…")
+                # 预先探测 gfriends 仓库连通性：不可达则整体快速失败
+                try:
+                    _load_file_tree(timeout=8.0)
+                except Exception as e:
+                    job.error(f"gfriends 仓库不可达：{e}")
+                    job.finish("gfriends 仓库不可达")
+                    return
+                log(f"开始从 gfriends 补全 {len(rows)} 个女优头像")
+                filled = failed = skipped = 0
+                for r in rows:
+                    if job.cancelled:
+                        break
+                    try:
+                        result = p.fetch(r["name"], cfg)
+                        url = result.get("avatar_url")
+                        if not url:
+                            skipped += 1
+                            continue
+                        name_on_disk = images.save_avatar(r["name"], url, cfg)
+                        if name_on_disk:
+                            conn.execute("UPDATE actresses SET avatar=? WHERE id=?",
+                                         (name_on_disk, r["id"]))
+                            filled += 1
+                        else:
+                            failed += 1
+                    except Exception as e:
+                        failed += 1
+                        log(f"「{r['name']}」获取失败：{e}", "warn")
+                    job.tick(r["name"])
+                    job.update(ok=filled, fail=failed)
+                job.ok = filled
+                job.finish(f"gfriends 补全完成：成功 {filled} · 失败 {failed} · 跳过 {skipped}")
+            return
+
+        if mode == "profile":
+            # 用已启用的「资料类插件」补全女优档案（身高/三围/生日/出生地/爱好/头像等）
+            profile_plugins = [p for p in plugins.enabled_plugins(cfg)
+                               if set(p.capabilities) & {"height", "measurements", "birthday", "avatar"}]
+            if not profile_plugins:
+                job.error("未启用任何女优资料插件（如 JavBus 女优资料、gfriends 头像），请先在设置中开启")
+                job.finish("无可用资料插件")
+                return
+            with db() as conn:
+                rows = query_all(conn, "SELECT id, name FROM actresses ORDER BY id")
+                if limit and limit > 0:
+                    rows = rows[:limit]
+                job.update(total=len(rows), phase="fetching")
+                log(f"开始用 {len(profile_plugins)} 个资料插件补全 {len(rows)} 个女优档案")
+                updated = failed = skipped = 0
+                for r in rows:
+                    if job.cancelled:
+                        break
+                    try:
+                        changed = _apply_actress_plugins(conn, r["id"], r["name"], profile_plugins, cfg)
+                        if changed:
+                            updated += 1
+                        else:
+                            skipped += 1
+                    except Exception as e:
+                        failed += 1
+                        log(f"「{r['name']}」资料补全失败：{e}", "warn")
+                    job.tick(r["name"])
+                    job.update(ok=updated, fail=failed)
+                job.ok = updated
+                job.finish(f"女优资料补全完成：更新 {updated} · 失败 {failed} · 跳过 {skipped}")
+            return
+
+        job.error(f"未知模式：{mode}")
+        job.finish("未知模式")
+    except Exception as e:
+        job.error(str(e))
+        job.finish("女优资料抓取异常：" + str(e))
+
+
+@router.get("/actresses/fetch-status")
+def actress_fetch_status() -> Dict[str, Any]:
+    """女优资料抓取任务进度（任务中心轮询）。"""
+    return ACTRESS_FETCH.snapshot()
+
+
+@router.post("/actresses/fetch-cancel")
+def actress_fetch_cancel() -> Dict[str, Any]:
+    """取消正在进行的女优资料抓取任务。"""
+    ACTRESS_FETCH.cancel()
+    return {"ok": True}
 
 
 def _proxy_image(url: str) -> Response:
@@ -368,9 +657,10 @@ def get_actresses(q: str = "", sort: str = "count", limit: int = 500) -> Dict[st
 
 
 @router.get("/actresses/{actress_id}")
-def get_actress_detail(actress_id: str, page: int = 1, page_size: int = 24) -> Dict[str, Any]:
+def get_actress_detail(actress_id: str, page: int = 1, page_size: int = 24,
+                       sort: str = "date") -> Dict[str, Any]:
     with db() as conn:
-        d = store.actress_detail(conn, actress_id, page, page_size)
+        d = store.actress_detail(conn, actress_id, page, page_size, sort)
     if not d:
         raise HTTPException(status_code=404, detail="女优不存在")
     return d
@@ -378,13 +668,41 @@ def get_actress_detail(actress_id: str, page: int = 1, page_size: int = 24) -> D
 
 @router.put("/actresses/{actress_id}")
 def edit_actress(actress_id: int, payload: Dict[str, Any] = Body(default={})) -> Dict[str, Any]:
-    fields = {k: v for k, v in payload.items() if k in {"alias", "avatar", "birthday", "note", "favorite"}}
+    allowed = {"alias", "avatar", "birthday", "note", "favorite",
+               "height", "bust", "waist", "hip", "cup", "birthplace", "hobby", "profile"}
+    fields = {k: str(v) for k, v in payload.items() if k in allowed}
     if not fields:
         raise HTTPException(400, "没有可更新的字段")
     sets = ", ".join(f"{k} = ?" for k in fields)
     with db() as conn:
         conn.execute(f"UPDATE actresses SET {sets} WHERE id = ?", [*fields.values(), actress_id])
         return {"ok": True}
+
+
+@router.post("/actresses/{actress_id}/rename")
+def rename_actress(actress_id: int, payload: Dict[str, Any] = Body(default={})) -> Dict[str, Any]:
+    """重命名女优（若新名已存在同名记录则自动合并）。"""
+    name = (payload.get("name") or "").strip()
+    if not name:
+        raise HTTPException(400, "名字不能为空")
+    try:
+        with db() as conn:
+            return store.rename_actress(conn, actress_id, name)
+    except ValueError as e:
+        raise HTTPException(404, str(e))
+
+
+@router.post("/actresses/{target_id}/merge")
+def merge_actress(target_id: int, payload: Dict[str, Any] = Body(default={})) -> Dict[str, Any]:
+    """把 source 女优合并到 target 女优。payload: { source_id }"""
+    source_id = int(payload.get("source_id") or 0)
+    if not source_id:
+        raise HTTPException(400, "缺少 source_id")
+    try:
+        with db() as conn:
+            return store.merge_actresses(conn, source_id, target_id, delete_source=True)
+    except ValueError as e:
+        raise HTTPException(404, str(e))
 
 
 @router.post("/actresses/{ident}/favorite")
@@ -1462,6 +1780,12 @@ def put_progress(movie_id: int, payload: Dict[str, Any] = Body(default={})) -> D
 def get_continue_watching(limit: int = 20) -> Dict[str, Any]:
     with db() as conn:
         return store.continue_watching(conn, limit)
+
+
+@router.get("/recent-watch")
+def get_recent_watch(page: int = 1, size: int = 60) -> Dict[str, Any]:
+    with db() as conn:
+        return store.recent_watch(conn, page, size)
 
 
 @router.delete("/continue-watching")

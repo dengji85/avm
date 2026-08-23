@@ -752,8 +752,12 @@ def actress_stats(conn: sqlite3.Connection, aid: int) -> Dict[str, Any]:
 
 
 def actress_detail(conn: sqlite3.Connection, ident: Any, page: int = 1,
-                    size: int = 24) -> Optional[Dict[str, Any]]:
-    """女优详情：基本信息 + 其出演的影片（分页卡片）。ident 可为 id 或名称。"""
+                    size: int = 24, sort: str = "date") -> Optional[Dict[str, Any]]:
+    """女优详情：基本信息 + 其出演的影片（分页卡片）。ident 可为 id 或名称。
+
+    sort: date=按上映时间倒序（默认）, rating=按评分倒序, favorite=按收藏,
+          watched=按最近观看, recent=按最近入库。
+    """
     if str(ident).isdigit():
         a = query_one(conn, "SELECT * FROM actresses WHERE id = ?", (int(ident),))
     else:
@@ -768,7 +772,9 @@ def actress_detail(conn: sqlite3.Connection, ident: Any, page: int = 1,
         "WHERE ma.actress_id = ? ORDER BY m.id LIMIT 1",
         (aid,),
     )
-    info = {k: a.get(k) for k in ("id", "name", "alias", "avatar", "birthday", "note", "favorite")}
+    info = {k: a.get(k) for k in ("id", "name", "alias", "avatar", "birthday", "note", "favorite",
+                                  "height", "bust", "waist", "hip", "cup",
+                                  "birthplace", "hobby", "profile")}
     info["count"] = count
     info["sample_id"] = sample["id"] if sample else None
     co = query_all(
@@ -787,10 +793,17 @@ def actress_detail(conn: sqlite3.Connection, ident: Any, page: int = 1,
     pages = max(1, (total + size - 1) // size)
     page = max(1, min(int(page), pages))
     offset = (page - 1) * size
+    order = {
+        "date": "m.release_date DESC, m.id DESC",
+        "rating": "COALESCE(m.rating, 0) DESC, m.release_date DESC, m.id DESC",
+        "favorite": "COALESCE(m.favorite, 0) DESC, m.release_date DESC, m.id DESC",
+        "watched": "COALESCE(m.last_played, '') DESC, m.id DESC",
+        "recent": "m.id DESC",
+    }.get(sort, "m.release_date DESC, m.id DESC")
     rows = query_all(
         conn,
-        "SELECT m.* FROM movie_actress ma JOIN movies m ON m.id = ma.movie_id "
-        "WHERE ma.actress_id = ? ORDER BY m.release_date DESC, m.id DESC LIMIT ? OFFSET ?",
+        f"SELECT m.* FROM movie_actress ma JOIN movies m ON m.id = ma.movie_id "
+        f"WHERE ma.actress_id = ? ORDER BY {order} LIMIT ? OFFSET ?",
         (aid, size, offset),
     )
     return {
@@ -800,6 +813,67 @@ def actress_detail(conn: sqlite3.Connection, ident: Any, page: int = 1,
         "pages": pages,
         "items": [_row_to_card(r) for r in rows],
     }
+
+
+def rename_actress(conn: sqlite3.Connection, actress_id: int, new_name: str) -> Dict[str, Any]:
+    """重命名女优：改名并同步更新该女优出演的所有影片的关联关系。
+
+    若新名称已存在同名的其他女优记录，则执行合并（避免唯一约束冲突）。
+    """
+    new_name = (new_name or "").strip()
+    if not new_name:
+        raise ValueError("名字不能为空")
+    old = conn.execute("SELECT * FROM actresses WHERE id=?", (actress_id,)).fetchone()
+    if not old:
+        raise ValueError("女优不存在")
+    if old["name"] == new_name:
+        return {"ok": True, "merged": False}
+    existing = conn.execute("SELECT id FROM actresses WHERE name=? AND id<>?", (new_name, actress_id)).fetchone()
+    if existing:
+        # 同名已存在 → 合并当前到 existing
+        return merge_actresses(conn, actress_id, existing["id"], delete_source=True)
+    conn.execute("UPDATE actresses SET name=? WHERE id=?", (new_name, actress_id))
+    return {"ok": True, "merged": False}
+
+
+def merge_actresses(conn: sqlite3.Connection, source_id: int, target_id: int,
+                    delete_source: bool = True) -> Dict[str, Any]:
+    """合并女优：把 source 的影片关联、收藏/关注/档案信息归并到 target，再删除 source。
+
+    - 影片关联：source 的 movie_actress 转移到 target（按 movie 去重）
+    - 档案：target 缺失的字段用 source 补全
+    - 收藏/关注：任一为 1 则保留
+    """
+    if source_id == target_id:
+        return {"ok": True, "merged": False}
+    for aid in (source_id, target_id):
+        if not conn.execute("SELECT id FROM actresses WHERE id=?", (aid,)).fetchone():
+            raise ValueError("女优不存在")
+
+    # 1) 转移影片关联（去重）
+    conn.execute(
+        "INSERT OR IGNORE INTO movie_actress (movie_id, actress_id) "
+        "SELECT movie_id, ? FROM movie_actress WHERE actress_id=?",
+        (target_id, source_id),
+    )
+    conn.execute("DELETE FROM movie_actress WHERE actress_id=?", (source_id,))
+    # 2) 补全档案字段
+    src = conn.execute("SELECT * FROM actresses WHERE id=?", (source_id,)).fetchone()
+    tgt = conn.execute("SELECT * FROM actresses WHERE id=?", (target_id,)).fetchone()
+    for f in ("alias", "avatar", "birthday", "note", "height", "bust", "waist", "hip", "cup",
+              "birthplace", "hobby", "profile"):
+        if not tgt.get(f) and src.get(f):
+            conn.execute(f"UPDATE actresses SET {f}=? WHERE id=?", (src[f], target_id))
+    # 3) 收藏/关注取并集
+    conn.execute(
+        "UPDATE actresses SET favorite = MAX(favorite, ?), followed = MAX(followed, ?) WHERE id=?",
+        (src["favorite"] or 0, src["followed"] or 0, target_id),
+    )
+    moved = int(scalar(conn,
+                       "SELECT COUNT(*) FROM movie_actress WHERE actress_id=?", (target_id,)) or 0)
+    if delete_source:
+        conn.execute("DELETE FROM actresses WHERE id=?", (source_id,))
+    return {"ok": True, "merged": True, "target_id": target_id, "total_movies": moved}
 
 
 def movie_detail(conn: sqlite3.Connection, movie_id: int) -> Optional[Dict[str, Any]]:
@@ -977,6 +1051,55 @@ def continue_watching(conn: sqlite3.Connection, limit: int = 20) -> Dict[str, An
         items.append(card)
     items.sort(key=lambda c: order.get(c["id"], 999))
     return {"items": items, "total": len(items)}
+
+
+def recent_watch(conn: sqlite3.Connection, page: int = 1, size: int = 60) -> Dict[str, Any]:
+    """返回「最近观看」的影片（按最近一次观看去重），含观看进度与最近观看时间。
+
+    与 continue_watching 不同：后者只含未看完；这里包含全部看过的影片（含看完的），
+    按 watch_sessions.started_at 最近一次倒序去重，供「最近观看」片单式预览与连播。
+    """
+    page = max(1, int(page or 1))
+    size = min(200, max(1, int(size or 60)))
+    offset = (page - 1) * size
+
+    # 每个影片取最近一次观看的 started_at
+    total = int(scalar(conn, "SELECT COUNT(DISTINCT movie_id) FROM watch_sessions") or 0)
+    ids = [r["movie_id"] for r in query_all(
+        conn,
+        """SELECT movie_id FROM watch_sessions
+           GROUP BY movie_id ORDER BY MAX(started_at) DESC, movie_id DESC
+           LIMIT ? OFFSET ?""", (size, offset))]
+
+    items: list = []
+    if ids:
+        placeholders = ",".join("?" * len(ids))
+        rows = query_all(conn, f"{_LIST_SELECT} WHERE m.id IN ({placeholders})", ids)
+        prog = {r["movie_id"]: r for r in query_all(
+            conn,
+            f"SELECT movie_id, position, duration FROM watch_progress WHERE movie_id IN ({placeholders})",
+            ids)}
+        last_seen = {r["movie_id"]: r["started_at"] for r in query_all(
+            conn,
+            f"""SELECT movie_id, MAX(started_at) AS started_at FROM watch_sessions
+                WHERE movie_id IN ({placeholders}) GROUP BY movie_id""", ids)}
+        order = {mid: i for i, mid in enumerate(ids)}
+        for r in rows:
+            card = _row_to_card(r)
+            p = prog.get(card["id"], {})
+            pos = p.get("position") or 0
+            dur = p.get("duration") or 0
+            card["progress"] = {
+                "position": pos,
+                "duration": dur,
+                "percent": round(pos / dur * 100, 1) if dur else 0,
+            }
+            card["last_played_at"] = last_seen.get(card["id"])
+            items.append(card)
+        items.sort(key=lambda c: order.get(c["id"], 999))
+
+    return {"items": items, "total": total, "page": page, "page_size": size,
+            "pages": max(1, (total + size - 1) // size)}
 
 
 def similar_movies(conn: sqlite3.Connection, movie_id: int, limit: int = 12) -> Dict[str, Any]:
@@ -1970,10 +2093,10 @@ def year_in_review(conn: sqlite3.Connection, year: int) -> Dict[str, Any]:
         GROUP BY g.id ORDER BY cnt DESC LIMIT 5
     """, (start, end))
 
-    # 年度新增到库的影片数（按 added_at 年份）
+    # 年度新增到库的影片数（按 created_at 年份）
     added = int(scalar(conn, """
         SELECT COUNT(*) FROM movies
-        WHERE added_at >= ? AND added_at <= ?
+        WHERE created_at >= ? AND created_at <= ?
     """, (start, end)) or 0)
 
     # 评分分布（当年观看影片的 rating 分桶 0/1/2/3/4/5）

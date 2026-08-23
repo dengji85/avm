@@ -135,33 +135,80 @@ def find_local_cover(video_path: str | Path, code: str = "") -> Optional[Path]:
 def download(url: str, cfg: Dict[str, Any], referer: str = "") -> Optional[bytes]:
     if not url or not url.lower().startswith(("http://", "https://")):
         return None
-    try:
-        import requests
-    except ImportError:
-        return None
     scraper = cfg.get("scraper", {})
     proxy = scraper.get("proxy") or ""
-    proxies = {"http": proxy, "https": proxy} if proxy else None
-    # 默认 Referer 用自身；部分图床（如 javbus cloudfront）需要来源站首页防盗链，
-    # 可由调用方显式传入 referer 覆盖。
+    timeout = cfg.get("cover", {}).get("timeout", 20)
     ref = referer or url
     low_url = url.lower()
     # javbus 搜索结果图床（cloudfront）需带 javbus referer 防盗链
     if "cloudfront.net" in low_url and not referer:
         ref = "https://www.javbus.com/"
+    headers = {
+        "User-Agent": scraper.get("user_agent", "Mozilla/5.0"),
+        "Referer": ref,
+        "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+        "Accept-Encoding": "gzip, deflate",
+    }
+
+    data = _download_urllib(url, headers, proxy, timeout)
+    if data is None:
+        data = _download_requests(url, headers, proxy, timeout)
+    if data is None:
+        return None
+    if not _looks_like_image(data):
+        # 下载到的不是真实图片（可能是错误页 / 占位 GIF / 挑战页），丢弃避免错封面
+        return None
+    return data
+
+
+def _download_requests(url: str, headers: Dict[str, str], proxy: str, timeout: int) -> Optional[bytes]:
+    """requests 方式下载（回退用）。"""
     try:
-        resp = requests.get(
-            url,
-            timeout=cfg.get("cover", {}).get("timeout", 20),
-            headers={"User-Agent": scraper.get("user_agent", "Mozilla/5.0"), "Referer": ref},
-            proxies=proxies,
-        )
+        import requests
+    except ImportError:
+        return None
+    proxies = {"http": proxy, "https": proxy} if proxy else None
+    try:
+        resp = requests.get(url, timeout=timeout, headers=headers, proxies=proxies)
         resp.raise_for_status()
-        data = resp.content
-        if not _looks_like_image(data):
-            # 下载到的不是真实图片（可能是错误页 / 占位 GIF / 挑战页），丢弃避免错封面
-            return None
-        return data
+        return resp.content
+    except Exception:
+        return None
+
+
+def _download_urllib(url: str, headers: Dict[str, str], proxy: str, timeout: int) -> Optional[bytes]:
+    """urllib（标准库）方式下载。
+
+    优先使用 urllib 是因为部分本地代理会对 requests/urllib3 的 TLS 指纹返回 403，
+    而 urllib 的标准 TLS 指纹可通过（与女优资料维基插件同理）。
+    """
+    import gzip
+    import io
+    import ssl
+    import urllib.parse
+    import urllib.request
+    try:
+        # 中文等非 ASCII 路径需百分号编码，否则 urllib 构造请求时报 UnicodeEncodeError。
+        # header（如 Referer）里的 URL 也须同步编码，否则 urllib 用 latin-1 编码 header 会崩。
+        if any(ord(c) > 127 for c in url):
+            enc_url = urllib.parse.quote(url, safe=":/?#[]@!$&'()*+,;=%")
+            for k, v in list(headers.items()):
+                if v == url:
+                    headers[k] = enc_url
+            url = enc_url
+        proxy_handler = urllib.request.ProxyHandler(
+            {"http": proxy, "https": proxy} if proxy else {})
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        opener = urllib.request.build_opener(
+            proxy_handler, urllib.request.HTTPSHandler(context=ctx))
+        req = urllib.request.Request(url, headers=headers)
+        with opener.open(req, timeout=timeout) as resp:
+            raw = resp.read()
+        if resp.headers.get("Content-Encoding", "").lower() == "gzip":
+            raw = gzip.GzipFile(fileobj=io.BytesIO(raw)).read()
+        return raw
     except Exception:
         return None
 

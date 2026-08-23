@@ -25,23 +25,27 @@ avm_web/node_modules/
 web_src/dist/
 *.tsbuildinfo
 
+# ----- npm 缓存 / PyInstaller 打包产物 -----
+.npmcache/
+dist_build/
+
 # ----- 日志与临时文件 -----
 *.log
 *.out
 *.err
 
 # ----- 根目录临时调试脚本（_ 前缀） -----
-_*.py
-_*.js
-_*.html
-_*.mjs
-_*.txt
-_*.png
-_*.log
-_*.out
-_*.err
-_c.txt
-_cdp_profile/
+/_*.py
+/_*.js
+/_*.html
+/_*.mjs
+/_*.txt
+/_*.png
+/_*.log
+/_*.out
+/_*.err
+/_c.txt
+/_cdp_profile/
 
 # ----- 运行时数据库（根目录 app.db 等同 data/ 库，不入库） -----
 app.db

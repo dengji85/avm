@@ -1,8 +1,8 @@
 <script setup>
 import { ref, reactive, computed, watch, onMounted, onUnmounted, nextTick } from 'vue'
-import { state, SORTS, FLAGS, resetFilters, hasActiveFilter } from '../state.js'
+import { state, SORTS, FLAGS, resetFilters, hasActiveFilter, openPlayQueue } from '../state.js'
 import { useLibrary } from '../composables/useLibrary.js'
-import { getContinueWatching, clearContinueWatching, deleteMovie, scrapeOne, addToCollection, coverThumbUrl } from '../api.js'
+import { getContinueWatching, clearContinueWatching, deleteMovie, scrapeOne, addToCollection, coverThumbUrl, listMovies } from '../api.js'
 import { toast, confirmDialog, coverFallback } from '../utils.js'
 import { t } from '../i18n'
 import { useTasks } from '../composables/useTasks.js'
@@ -20,8 +20,57 @@ const { runScan } = useTasks()
 const cont = ref([])
 const contLoading = ref(false)
 
-/* 视图模式：grid | list */
+/* 视图模式：grid | list | waterfall */
 const viewMode = ref('grid')
+
+/* 播放模式（迅雷式）：把当前筛选结果连播 */
+const playingAll = ref(false)
+
+/* 构造与 useLibrary 一致的当前筛选参数 */
+function filterParams(page, pageSize) {
+  return {
+    q: state.q || undefined,
+    actress: state.actress.length ? state.actress.join(',') : undefined,
+    genre: state.genre.length ? state.genre.join(',') : undefined,
+    tag: state.tag.length ? state.tag.join(',') : undefined,
+    studio: state.studio || undefined,
+    series: state.series || undefined,
+    prefix: state.prefix || undefined,
+    year: state.year || undefined,
+    flags: state.flags.length ? state.flags.join(',') : undefined,
+    sort: state.sort,
+    page, page_size: pageSize,
+    op: state.multiOp,
+    min_rating: state.minRating || undefined,
+  }
+}
+
+/* 拉取当前筛选下的全部影片（循环分页）并打开全局播放器连播 */
+async function playFiltered() {
+  if (playingAll.value) return
+  playingAll.value = true
+  const all = []
+  const size = 200
+  try {
+    let p = 1
+    let totalHits = 0
+    while (true) {
+      const r = await listMovies(filterParams(p, size))
+      const batch = (r && r.items) || []
+      totalHits = Number((r && r.total) || 0)
+      all.push(...batch)
+      if (!batch.length || all.length >= totalHits) break
+      if (batch.length < size) break
+      p += 1
+    }
+    if (!all.length) { toast(t('playlist.emptyNoMovies'), 'err'); return }
+    openPlayQueue(all, t('view.gallery'))
+  } catch (e) {
+    toast(e.message || '播放失败', 'err')
+  } finally {
+    playingAll.value = false
+  }
+}
 
 /* 手机端筛选栏折叠状态：默认收起，点击「筛选条件」以浮层弹出，不遮盖影片内容 */
 const showFilter = ref(false)
@@ -221,8 +270,13 @@ onMounted(() => {
 
         <div class="seg">
           <button :class="{ on: viewMode === 'grid' }" @click="viewMode = 'grid'" data-tip="网格">▦</button>
+          <button :class="{ on: viewMode === 'waterfall' }" @click="viewMode = 'waterfall'" :data-tip="$t('view.waterfall')">▤</button>
           <button :class="{ on: viewMode === 'list' }" @click="viewMode = 'list'" data-tip="列表">☰</button>
+          <button class="play-mode-btn" :class="{ on: state.playQueue.open }" @click="playFiltered" :title="$t('gallery.playFiltered')">▶</button>
         </div>
+        <button class="btn tiny" :disabled="playingAll" @click="playFiltered" :title="$t('gallery.playAllTip')">
+          {{ playingAll ? '…' : '▶ ' + $t('gallery.playAll') }}
+        </button>
 
         <select class="sort-sel" v-model="state.sort">
           <option v-for="[v, t] in SORTS" :key="v" :value="v">{{ $t(t) }}</option>
@@ -278,11 +332,12 @@ onMounted(() => {
             {{ $t('view.allMovies') }} <span class="count">{{ total }}</span>
           </div>
 
-          <!-- 网格 -->
+          <!-- 网格 / 瀑布流 -->
           <MovieGrid
-            v-if="viewMode === 'grid'"
+            v-if="viewMode !== 'list'"
             :items="items"
             :loading="loading"
+            :mode="viewMode === 'waterfall' ? 'waterfall' : 'grid'"
             @open="openDetail"
             @changed="() => {}"
           >
@@ -358,6 +413,7 @@ onMounted(() => {
 .seg { display: flex; gap: 2px; background: var(--c-surface-2); border-radius: 8px; padding: 3px; }
 .seg button { border: 0; background: none; color: var(--c-text-3); width: 30px; height: 26px; border-radius: 6px; cursor: pointer; font-size: 13px; }
 .seg button.on { background: var(--c-primary); color: #fff; }
+.play-mode-btn { color: var(--c-ok, #3fb950) !important; }
 
 .sort-sel { width: auto; min-width: 116px; height: 28px; font-size: var(--fs-sm); }
 .cw .rail { padding-bottom: var(--sp-3); }

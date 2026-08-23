@@ -1,11 +1,12 @@
 import { computed } from 'vue'
 import { state } from '../state.js'
-import { scanStatus, scrapeStatus, startScan, startScrape, cancelScan, cancelScrape, scrapeLogs } from '../api.js'
+import { scanStatus, scrapeStatus, startScan, startScrape, cancelScan, cancelScrape, scrapeLogs, actressFetchStatus, actressFetchCancel } from '../api.js'
 import { toast } from '../utils.js'
 
 let timer = null
 let wasScanning = false
 let wasScraping = false
+let wasActressFetching = false
 
 function normalize(raw) {
   const r = raw || {}
@@ -31,19 +32,22 @@ function normalize(raw) {
 
 async function poll() {
   try {
-    const [sc, sp] = await Promise.all([
+    const [sc, sp, af] = await Promise.all([
       scanStatus().catch(() => null),
       scrapeStatus().catch(() => null),
+      actressFetchStatus().catch(() => null),
     ])
     if (sc) Object.assign(state.task.scan, normalize(sc))
     if (sp) Object.assign(state.task.scrape, normalize(sp))
+    if (af) Object.assign(state.task.actress_fetch, normalize(af))
   } catch (e) { /* 静默 */ }
 
   const scanning = state.task.scan.running
   const scraping = state.task.scrape.running
+  const actressFetching = state.task.actress_fetch.running
 
   // 任务从「无 → 有」开始时自动展开任务中心（无论谁触发）
-  if ((!wasScanning && scanning) || (!wasScraping && scraping)) {
+  if ((!wasScanning && scanning) || (!wasScraping && scraping) || (!wasActressFetching && actressFetching)) {
     state.taskPanelOpen = true
   }
 
@@ -59,10 +63,17 @@ async function poll() {
     toast(`刮削完成${ok || fail ? `：成功 ${ok} · 失败 ${fail}` : ''}`, 'ok')
     window.dispatchEvent(new CustomEvent('avm-refresh'))
   }
+  if (wasActressFetching && !actressFetching) {
+    archiveTask('actress_fetch', '女优资料抓取')
+    const { ok, fail } = state.task.actress_fetch
+    toast(`女优资料抓取完成${ok || fail ? `：成功 ${ok} · 失败 ${fail}` : ''}`, 'ok')
+    window.dispatchEvent(new CustomEvent('avm-refresh'))
+  }
   wasScanning = scanning
   wasScraping = scraping
+  wasActressFetching = actressFetching
 
-  schedule(scanning || scraping ? 900 : 5000)
+  schedule(scanning || scraping || actressFetching ? 900 : 5000)
 }
 
 // 将刚结束的任务快照存入历史（最多保留 20 条，最新的在前）
@@ -103,12 +114,13 @@ function schedule(ms) {
 }
 
 export function useTasks() {
-  const anyRunning = computed(() => state.task.scan.running || state.task.scrape.running)
+  const anyRunning = computed(() => state.task.scan.running || state.task.scrape.running || state.task.actress_fetch.running)
 
   const activeTasks = computed(() => {
     const out = []
     if (state.task.scan.running) out.push(buildOne('scan', '扫描媒体库', state.task.scan))
     if (state.task.scrape.running) out.push(buildOne('scrape', '刮削元数据', state.task.scrape))
+    if (state.task.actress_fetch.running) out.push(buildOne('actress_fetch', '女优资料抓取', state.task.actress_fetch))
     return out
   })
 
@@ -152,7 +164,9 @@ export function useTasks() {
       t.message = '正在取消…'
     }
     try {
-      await (key === 'scan' ? cancelScan() : cancelScrape())
+      if (key === 'scan') await cancelScan()
+      else if (key === 'scrape') await cancelScrape()
+      else if (key === 'actress_fetch') await actressFetchCancel()
       toast('已请求取消', 'ok')
       schedule(200)
     } catch (e) { toast(e.message, 'err') }
@@ -161,10 +175,11 @@ export function useTasks() {
   // 最近一次完成/结束的任务（供面板即时展示，无需点开历史）
   const lastFinished = computed(() => {
     const list = []
-    for (const key of ['scan', 'scrape']) {
+    const labels = { scan: '扫描媒体库', scrape: '刮削元数据', actress_fetch: '女优资料抓取' }
+    for (const key of ['scan', 'scrape', 'actress_fetch']) {
       const t = state.task[key]
       if (t && !t.running && (t.total || t.done || t.logs?.length)) {
-        list.push(buildOne(key, key === 'scan' ? '扫描媒体库' : '刮削元数据', t))
+        list.push(buildOne(key, labels[key], t))
       }
     }
     return list

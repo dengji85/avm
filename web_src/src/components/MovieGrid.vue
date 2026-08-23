@@ -11,6 +11,7 @@ const props = defineProps({
   emptyDesc: { type: String, default: () => t('grid.emptyDesc') },
   skeletonCount: { type: Number, default: 18 },
   selectable: { type: Boolean, default: true },
+  mode: { type: String, default: 'grid' }, // 'grid' | 'waterfall'
 })
 const emit = defineEmits(['open', 'changed'])
 
@@ -36,12 +37,25 @@ const sizeClass = computed(() => (state.cardSize === 'normal' ? '' : state.cardS
   </div>
 
   <!-- 列表 -->
-  <div v-else class="card-grid" :class="[sizeClass, { 'pick-mode': state.selMode, busy: loading }]">
+  <div v-if="mode === 'grid'" class="card-grid" :class="[sizeClass, { 'pick-mode': state.selMode, busy: loading }]">
     <MovieCard
       v-for="m in items"
       :key="m.id"
       :movie="m"
       :selectable="selectable"
+      @open="(id) => emit('open', id)"
+      @changed="(id) => emit('changed', id)"
+    />
+  </div>
+
+  <!-- 瀑布流 -->
+  <div v-else class="waterfall" :class="[sizeClass, { 'pick-mode': state.selMode, busy: loading }]">
+    <MovieCard
+      v-for="m in items"
+      :key="m.id"
+      :movie="m"
+      :selectable="selectable"
+      mode="waterfall"
       @open="(id) => emit('open', id)"
       @changed="(id) => emit('changed', id)"
     />

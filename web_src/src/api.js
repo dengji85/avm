@@ -101,13 +101,22 @@ export function uploadCover(id, file) {
 export const getSessions = (id, limit = 60) => get(`/movies/${id}/sessions`, { limit })
 export const getWatchAnalytics = () => get('/watch-analytics')
 export const getContinueWatching = (limit = 20) => get('/continue-watching', { limit })
+export const getRecentWatched = (params = {}) => get('/recent-watch', params)
 export const clearContinueWatching = () => del('/continue-watching')
 
 /* ---------------- 分面 / 女优 ---------------- */
 export const getFacets = (limit = 300) => get('/facets', { limit })
 export const listActresses = (params) => get('/actresses', params)
-export const getActress = (id, page = 1, pageSize = 24) => get(`/actresses/${encodeURIComponent(id)}`, { page, page_size: pageSize })
+export const getActress = (id, page = 1, pageSize = 24, sort = 'date') => get(`/actresses/${encodeURIComponent(id)}`, { page, page_size: pageSize, sort })
 export const updateActress = (id, patch) => put(`/actresses/${id}`, patch)
+export const renameActress = (id, name) => post(`/actresses/${id}/rename`, { name })
+export const mergeActress = (targetId, sourceId) => post(`/actresses/${targetId}/merge`, { source_id: sourceId })
+export const pluginFetch = (actressId, pluginId) => post(`/actresses/${actressId}/plugin-fetch`, { plugin_id: pluginId })
+export const fillAvatarsGfriends = (limit = 0) => post(`/actresses/fill-avatars-gfriends?limit=${limit}`, {})
+export const actressFetchStatus = () => get('/actresses/fetch-status')
+export const actressFetchCancel = () => post('/actresses/fetch-cancel', {})
+export const listPlugins = () => get('/plugins')
+export const togglePlugin = (pluginId) => post(`/plugins/${pluginId}/toggle`, {})
 export const toggleActressFav = (ident) => post(`/actresses/${encodeURIComponent(ident)}/favorite`, {})
 export const toggleActressFollow = (ident) => post(`/actresses/${encodeURIComponent(ident)}/follow`, {})
 
@@ -145,6 +154,8 @@ export const resolveDedup = (body) => post('/dedup/resolve', body)
 export const getQuality = () => get('/quality')
 export const cacheAvatars = () => post('/media/cache-avatars', {})
 export const fillActressAvatars = () => post('/actresses/cache-avatars', {})
+export const fetchActressProfile = (limit = 0) => post(`/actresses/fetch-profile?limit=${limit}`, {})
+export const fetchOneActressProfile = (id) => post(`/actresses/${id}/fetch-profile`, {})
 export const rescanLocalCovers = () => post('/scan/local-covers', {})
 
 /* ---------------- 扫描 / 刮削任务 ---------------- */

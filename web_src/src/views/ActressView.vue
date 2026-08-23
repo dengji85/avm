@@ -1,7 +1,7 @@
 <script setup>
 import { ref, computed, onMounted, watch } from 'vue'
 import { state } from '../state.js'
-import { listActresses, toggleActressFav, toggleActressFollow, avatarUrl } from '../api.js'
+import { listActresses, toggleActressFav, toggleActressFollow, avatarUrl, fillAvatarsGfriends } from '../api.js'
 import { toast, avatarFallback, debounce, AVATAR_PLACEHOLDER } from '../utils.js'
 
 const all = ref([])          // 后端一次性返回，前端做过滤/分页
@@ -88,6 +88,21 @@ function browse(a, e) {
 
 const pageCount = computed(() => Math.max(1, Math.ceil(total.value / pageSize)))
 
+/* 批量从 gfriends 补全无头像女优 */
+const filling = ref(false)
+async function fillAvatars() {
+  if (filling.value) return
+  filling.value = true
+  try {
+    await fillAvatarsGfriends(0)
+    toast('已加入任务中心：女优头像抓取中…', 'ok')
+  } catch (e) {
+    toast(e.message, 'err')
+  } finally {
+    filling.value = false
+  }
+}
+
 onMounted(load)
 </script>
 
@@ -102,10 +117,13 @@ onMounted(load)
 
       <input class="kw" v-model="kw" type="search" :placeholder="$t('actress.searchPlaceholder')" />
       <select class="sel" v-model="sort">
-        <option v-for="[v, t] in SORTS" :key="v" :value="v">{{ t }}</option>
+        <option v-for="[v, t] in SORTS" :key="v" :value="v">{{ $t(t) }}</option>
       </select>
       <button class="btn tiny" :class="{ active: onlyFav }" @click="onlyFav = !onlyFav">♥ 收藏</button>
       <button class="btn tiny" :class="{ active: onlyFollow }" @click="onlyFollow = !onlyFollow">关注</button>
+      <button class="btn tiny primary" :disabled="filling" @click="fillAvatars" :title="$t('actress.fillAvatarsTip')">
+        {{ filling ? '…' : '批量补头像' }}
+      </button>
     </div>
 
     <div class="view-body">
