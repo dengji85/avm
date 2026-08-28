@@ -59,6 +59,8 @@ DEFAULT_UA = (
 )
 
 DEFAULT_CONFIG: Dict[str, Any] = {
+    # 预览图密度：smart=按时长自适应 / low=稀疏省空间 / high=精细（影响抽帧张数）
+    "previews_quality": "smart",
     "library": {
         # 需要扫描的根目录，例如 "D:/Media/Movies"
         "paths": [],

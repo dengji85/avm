@@ -307,7 +307,12 @@ def _migrate(conn: sqlite3.Connection) -> None:
     conn.execute(
         "CREATE TABLE IF NOT EXISTS movie_previews ("
         "movie_id INTEGER PRIMARY KEY REFERENCES movies(id) ON DELETE CASCADE, "
-        "paths TEXT DEFAULT '', created_at TEXT DEFAULT (datetime('now','localtime')))")
+        "paths TEXT DEFAULT '', quality TEXT DEFAULT 'smart', "
+        "created_at TEXT DEFAULT (datetime('now','localtime')))")
+    # 老库平滑升级：movie_previews 补 quality 列（记录生成时的密度档位，用于按需懒刷新）
+    pv_cols = {r[1] for r in conn.execute("PRAGMA table_info(movie_previews)").fetchall()}
+    if "quality" not in pv_cols:
+        conn.execute("ALTER TABLE movie_previews ADD COLUMN quality TEXT DEFAULT 'smart'")
     # 字幕文件登记：扫描发现或字幕包匹配对齐后写入，供前端展示与播放器自动加载
     conn.execute(
         "CREATE TABLE IF NOT EXISTS movie_subtitles ("

@@ -557,7 +557,18 @@
   .view-body { padding: var(--sp-2); }
   .toolbar { flex-wrap: wrap; gap: var(--sp-2); padding: var(--sp-2); }
   .topnav .search { min-width: 0; flex: 1 1 auto; }
-  .card-grid { gap: var(--sp-2); }
+  /* 极窄屏（竖屏手机）：卡片单列 + 横向布局（左封面右信息），
+     给女优/类型/标签可点条留足空间，避免窄卡信息拥挤 */
+  .card-grid { grid-template-columns: 1fr; gap: var(--sp-2); }
+  .waterfall { column-count: 1; column-gap: 0; }
+  .card { flex-direction: row; align-items: stretch; }
+  .card .thumb {
+    width: 118px; flex: none; height: auto;
+    aspect-ratio: 2 / 3;
+    border-radius: var(--r-md) 0 0 var(--r-md);
+  }
+  .card .meta { flex: 1; min-width: 0; padding: var(--sp-2); border-radius: 0 var(--r-md) var(--r-md) 0; }
+  .card .title { -webkit-line-clamp: 3; }
 
   /* 触屏无 hover：卡片操作常驻可见，避免加片单/收藏/播放点不到 */
   .card .fav,

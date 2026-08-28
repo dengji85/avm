@@ -5,7 +5,7 @@
 用法：
     python build.py
 
-产物： dist/AVM.exe
+产物： dist/AVM-<版本号>.exe（如 AVM-1.12.0.exe）
 - 双击即启动本地服务，打开一个控制台窗口，实时输出日志。
 - 启动后自动打开浏览器访问 Web UI。
 - 数据（library.db / covers / avatars / config.json）保存在 exe 同级的 data/ 目录，
@@ -22,6 +22,12 @@ import PyInstaller.__main__
 API_PY = os.path.join("app", "api.py")
 BUILD_DATE_RE = re.compile(r'(BUILD_DATE\s*=\s*)"[^"]*"')
 PLACEHOLDER = '"2026-08-16"'
+
+VERSION_RE = re.compile(r'__version__\s*=\s*"([^"]+)"')
+with open(os.path.join("app", "__init__.py"), "r", encoding="utf-8") as _f:
+    _ver = VERSION_RE.search(_f.read())
+APP_VERSION = _ver.group(1) if _ver else "dev"
+DIST_NAME = "AVM-%s" % APP_VERSION
 
 
 def _rewrite_build_date():
@@ -51,7 +57,7 @@ _original_api = _rewrite_build_date()
 try:
     PyInstaller.__main__.run([
     "run.py",
-    "--name", "AVM",
+    "--name", DIST_NAME,
     "--onefile",
     "--console",
     "--paths", ".",

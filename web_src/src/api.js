@@ -83,6 +83,8 @@ export const endSession = (id, sid, body = {}) => post(`/movies/${id}/session/${
 export const scrapeOne = (id, body = {}) => post(`/movies/${id}/scrape`, body)
 export const exportNfo = (id) => post(`/movies/${id}/nfo`, {})
 export const getPreviews = (id, generate = false) => get(`/movies/${id}/previews`, { generate: generate || undefined })
+export const genPreviews = (id, force = false) => post(`/movies/${id}/previews/generate`, { force: force || undefined })
+export const regenAllPreviews = () => post('/previews/regenerate-all', {})
 export const getSimilar = (id, limit = 12) => get(`/movies/${id}/similar`, { limit })
 export const setProgress = (id, body) => put(`/movies/${id}/progress`, body)
 export const batchMovies = (body) => post('/movies/batch', body)

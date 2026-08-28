@@ -1362,32 +1362,116 @@ def export_nfo(movie_id: int) -> Dict[str, Any]:
     return {"ok": True, "path": str(target)}
 
 
+def _gen_previews_sync(movie_id: int, target: str, quality: str = None):
+    """同步生成并落库预览图（可在共享线程池内异步运行），返回 (paths, error)。"""
+    cfg = load_config()
+    ffmpeg = (cfg.get("ffmpeg_path") or "ffmpeg").strip() or "ffmpeg"
+    q = (quality or cfg.get("previews_quality") or "smart").strip() or "smart"
+    out_dir = COVER_DIR / "preview" / str(movie_id)
+    try:
+        new_paths = store.generate_previews(target, str(out_dir), ffmpeg, 0, q)
+    except Exception as exc:
+        return None, str(exc)
+    if not new_paths:
+        return None, "ffmpeg 不可用或抽帧失败（请在设置中配置 ffmpeg 路径）"
+    with db() as conn:
+        store.set_previews(conn, movie_id, new_paths, q)
+    return new_paths, None
+
+
 @router.get("/movies/{movie_id}/previews")
 def movie_previews(movie_id: int, generate: bool = False) -> Dict[str, Any]:
     with db() as conn:
         mv = store.movie_detail(conn, movie_id)
         if not mv:
             raise HTTPException(404, "影片不存在")
+        paths, stored_q = store.get_previews_meta(conn, movie_id)
+    current_q = (load_config().get("previews_quality") or "smart").strip() or "smart"
+    regenerating = False
+    target = mv["files"][0]["path"] if mv.get("files") else None
+    if generate:
+        # 手动生成（详情页按钮）：强制按当前档位抽
+        if not target or not os.path.exists(target):
+            raise HTTPException(400, "找不到可播放的文件")
+        paths, err = _gen_previews_sync(movie_id, target, current_q)
+        if err:
+            return {"available": False, "error": err, "paths": []}
+    elif paths and stored_q != current_q:
+        # 懒加载：配置密度档位变了，下次观看（读预览）时按新档位后台重抽，
+        # 避免改配置后一次性全库重抽占用资源
+        if target and os.path.exists(target):
+            import shutil
+            old_dir = COVER_DIR / "preview" / str(movie_id)
+            if old_dir.exists():
+                shutil.rmtree(old_dir, ignore_errors=True)
+            with db() as conn:
+                store.set_previews(conn, movie_id, [], current_q)
+            from .threadpool import submit_task
+            submit_task(_gen_previews_sync, movie_id, target, current_q)
+            regenerating = True
+    urls = [f"/covers/preview/{movie_id}/{os.path.basename(p)}" for p in (paths or [])]
+    return {"available": True, "paths": paths or [], "urls": urls,
+            "regenerating": regenerating}
+
+
+@router.post("/movies/{movie_id}/previews/generate")
+def generate_previews_bg(movie_id: int, body: dict = Body(default={})) -> Dict[str, Any]:
+    """后台异步生成预览图（播放器打开时调用，不阻塞播放）。
+    已存在则直接返回；force=True 时按当前密度档位重新生成（用于改档后刷新）。"""
+    force = bool(body.get("force"))
+    current_q = (load_config().get("previews_quality") or "smart").strip() or "smart"
+    with db() as conn:
+        mv = store.movie_detail(conn, movie_id)
+        if not mv:
+            raise HTTPException(404, "影片不存在")
         paths = store.get_previews(conn, movie_id)
-        if generate:
-            target = mv["files"][0]["path"] if mv.get("files") else None
+        target = mv["files"][0]["path"] if mv.get("files") else None
+        if not target or not os.path.exists(target):
+            raise HTTPException(400, "找不到可播放的文件")
+    if paths and not force:
+        return {"started": False, "message": "预览图已存在"}
+    if force:
+        # 清空旧帧目录，避免新密度下旧文件残留
+        import shutil
+        old_dir = COVER_DIR / "preview" / str(movie_id)
+        if old_dir.exists():
+            shutil.rmtree(old_dir, ignore_errors=True)
+        with db() as conn:
+            store.set_previews(conn, movie_id, [], current_q)
+    from .threadpool import submit_task
+    submit_task(_gen_previews_sync, movie_id, target, current_q)
+    return {"started": True, "message": "已在后台生成预览图"}
+
+
+@router.post("/previews/regenerate-all")
+def regenerate_all_previews() -> Dict[str, Any]:
+    """按当前密度档位，后台重新生成全部影片的预览图（改档后刷新用）。"""
+
+    current_q = (load_config().get("previews_quality") or "smart").strip() or "smart"
+
+    def _run() -> None:
+        with db() as conn:
+            rows = conn.execute(
+                "SELECT DISTINCT movie_id FROM movie_files WHERE COALESCE(missing,0)=0"
+            ).fetchall()
+        for r in rows:
+            mid = int(r["movie_id"])
+            with db() as conn:
+                mv = store.movie_detail(conn, mid)
+                target = mv["files"][0]["path"] if mv.get("files") else None
             if not target or not os.path.exists(target):
-                raise HTTPException(400, "找不到可播放的文件")
-            cfg = load_config()
-            ffmpeg = (cfg.get("ffmpeg_path") or "ffmpeg").strip() or "ffmpeg"
-            out_dir = COVER_DIR / "preview" / str(movie_id)
-            try:
-                new_paths = store.generate_previews(target, str(out_dir), ffmpeg, 6)
-            except Exception as exc:
-                return {"available": False, "error": str(exc), "paths": []}
-            if not new_paths:
-                return {"available": False,
-                        "error": "ffmpeg 不可用或抽帧失败（请在设置中配置 ffmpeg 路径）",
-                        "paths": []}
-            store.set_previews(conn, movie_id, new_paths)
-            paths = new_paths
-        urls = [f"/covers/preview/{movie_id}/{os.path.basename(p)}" for p in paths]
-    return {"available": True, "paths": paths, "urls": urls}
+                continue
+            import shutil
+            old_dir = COVER_DIR / "preview" / str(mid)
+            if old_dir.exists():
+                shutil.rmtree(old_dir, ignore_errors=True)
+            with db() as conn:
+                store.set_previews(conn, mid, [], current_q)
+            _gen_previews_sync(mid, target, current_q)
+
+    from .threadpool import submit_task
+    submit_task(_run)
+    return {"started": True, "message": "已在后台重新生成全部预览图"}
 
 
 @router.get("/covers/preview/{movie_id}/{fname}")

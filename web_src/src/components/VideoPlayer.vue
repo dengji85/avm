@@ -2,7 +2,7 @@
 import { ref, onMounted, onBeforeUnmount, watch, nextTick } from 'vue'
 import videojs from 'video.js'
 import 'video.js/dist/video-js.css'
-import { streamUrl, setProgress, playMovie, markPlayed, startSession, updateSession, endSession } from '../api.js'
+import { streamUrl, setProgress, playMovie, markPlayed, startSession, updateSession, endSession, getPreviews, genPreviews } from '../api.js'
 import { toast, fmtClock } from '../utils.js'
 import { t } from '../i18n/index.js'
 
@@ -27,8 +27,22 @@ let lastTick = 0          // 上一次 timeupdate 的 currentTime
 let clickTimer = null     // 区分单击/双击的定时器
 let overlayEl = null      // 透明覆盖层，独占画面点击，隔离 video.js 内部 click 竞争
 
+// ---- 移动端横滑快进/快退 ----
+let swipeTipEl = null     // 滑动进度提示
+let swipe = { active: false, dir: 0, startX: 0, startY: 0, startTime: 0, targetTime: 0 }
+
+// ---- 进度条 hover 预览（视频进度条预览）----
+let progressCtrl = null   // video.js 进度条容器 (.vjs-progress-control)
+let tipEl = null          // 预览浮层
+let tipImgEl = null       // 预览缩略图 <img>
+let tipTimeEl = null      // 预览时间标签
+let previewUrls = []      // 预览图 URL 数组（与后端等距抽帧顺序一致）
+let hoverBound = false    // 是否已绑定进度条 hover 事件
+
 // 仅当访问地址为 localhost/127.0.0.1 时才提供"系统播放器"（远程设备点了也无效）
 const isRemote = !['localhost', '127.0.0.1'].includes(location.hostname)
+// 触摸设备检测（移动端/平板）：播放器交互策略与桌面不同
+const isTouch = typeof window !== 'undefined' && ('ontouchstart' in window || (navigator.maxTouchPoints || 0) > 0)
 
 function onLoaded() {
   ready.value = true
@@ -50,6 +64,8 @@ function onLoaded() {
   startSession(props.movieId, { start_pos: props.startAt || 0, method: 'web' })
     .then((r) => { sessionId = r.session_id ?? null })
     .catch(() => { sessionId = null })
+  // 进度条 hover 预览：读取已有预览图，没有则后台异步生成（不阻塞播放）
+  setupPreviewHover()
 }
 
 function onTime() {
@@ -156,7 +172,12 @@ function onKeydown(e) {
 // 覆盖层只覆盖画面区域（底部留出控制条），控制条按钮仍可正常点击。
 
 function onOverlayClick() {
-  // 用定时器区分单击与双击：双击时第二个 click 会被 dblclick 取消
+  // 触摸设备：点击画面仅唤起控制条/进度条，不直接暂停，避免移动端误触导致"一点就暂停"
+  if (isTouch) {
+    if (player) player.trigger('useractive')
+    return
+  }
+  // 桌面端：单击切换播放/暂停（双击全屏由 dblclick 处理）
   if (clickTimer) return
   clickTimer = setTimeout(() => {
     clickTimer = null
@@ -169,6 +190,77 @@ function onOverlayDblClick(e) {
   e.preventDefault()
   if (clickTimer) { clearTimeout(clickTimer); clickTimer = null }
   toggleNativeFullscreen()
+}
+
+// ---- 移动端横滑快进/快退（类似成熟视频站：拖动快进，松手定位）----
+/** 按时间反推预览图帧下标（与后端等距抽帧一致） */
+function frameIndexAt(time, total) {
+  if (!total || total <= 0) return -1
+  const ratio = Math.max(0, Math.min(1, time / total))
+  const idx = Math.round(ratio * (previewUrls.length + 1)) - 1
+  return Math.max(0, Math.min(previewUrls.length - 1, idx))
+}
+function buildSwipeTip() {
+  if (swipeTipEl || !player) return
+  swipeTipEl = document.createElement('div')
+  swipeTipEl.className = 'vjs-swipe-tip'
+  swipeTipEl.style.display = 'none'
+  swipeTipEl.innerHTML = '<img alt="" class="st-img"><div class="st-text"></div>'
+  player.el().appendChild(swipeTipEl)
+}
+function showSwipeTip(dir, time) {
+  if (!swipeTipEl) return
+  const img = swipeTipEl.querySelector('.st-img')
+  const txt = swipeTipEl.querySelector('.st-text')
+  if (img) {
+    if (previewUrls.length && videoEl && videoEl.duration) {
+      const ci = frameIndexAt(time, videoEl.duration)
+      img.src = previewUrls[ci]
+      img.style.display = 'block'
+    } else {
+      img.style.display = 'none'
+    }
+  }
+  if (txt) txt.textContent = (dir > 0 ? '快进 ▸ ' : '快退 ◂ ') + fmtClock(time)
+  swipeTipEl.style.display = 'block'
+}
+function hideSwipeTip() {
+  if (swipeTipEl) swipeTipEl.style.display = 'none'
+}
+function onTouchStart(e) {
+  const t = e.touches[0]
+  swipe.active = true
+  swipe.dir = 0
+  swipe.startX = t.clientX
+  swipe.startY = t.clientY
+  swipe.startTime = videoEl ? videoEl.currentTime : 0
+  swipe.targetTime = swipe.startTime
+}
+function onTouchMove(e) {
+  if (!swipe.active) return
+  const t = e.touches[0]
+  const dx = t.clientX - swipe.startX
+  const dy = t.clientY - swipe.startY
+  // 判定为横滑：水平位移明显大于竖直位移（避免与页面纵向滚动冲突）
+  if (Math.abs(dx) > 30 && Math.abs(dx) > Math.abs(dy)) {
+    if (e.cancelable) e.preventDefault()
+    if (!videoEl || !videoEl.duration) return
+    // 滑满整个屏宽 ≈ 跳 20% 时长（可调）
+    const rate = (videoEl.duration * 0.2) / window.innerWidth
+    swipe.dir = dx > 0 ? 1 : -1
+    swipe.targetTime = Math.max(0, Math.min(videoEl.duration, swipe.startTime + dx * rate))
+    showSwipeTip(swipe.dir, swipe.targetTime)
+  }
+}
+function onTouchEnd() {
+  if (!swipe.active) return
+  const moved = Math.abs(swipe.targetTime - swipe.startTime)
+  swipe.active = false
+  hideSwipeTip()
+  // 有实际位移才 seek，避免纯点击（tap）误触
+  if (moved > 0.5 && player) {
+    player.currentTime(swipe.targetTime)
+  }
 }
 
 function initPlayer() {
@@ -215,6 +307,11 @@ function initPlayer() {
     player.el().appendChild(overlayEl)
     overlayEl.addEventListener('click', onOverlayClick)
     overlayEl.addEventListener('dblclick', onOverlayDblClick)
+    // 移动端：画面横滑快进/快退（passive:false 以便横滑时阻止默认/页面横向滚动）
+    overlayEl.addEventListener('touchstart', onTouchStart, { passive: true })
+    overlayEl.addEventListener('touchmove', onTouchMove, { passive: false })
+    overlayEl.addEventListener('touchend', onTouchEnd)
+    buildSwipeTip()
     // 键盘方向键快进/快退（全局监听，全屏/非全屏均生效）
     document.addEventListener('keydown', onKeydown)
     // 初始化完成后再 resize 一次，确保按当前稳定尺寸渲染
@@ -232,14 +329,102 @@ function destroyPlayer() {
       if (overlayEl) {
         overlayEl.removeEventListener('click', onOverlayClick)
         overlayEl.removeEventListener('dblclick', onOverlayDblClick)
+        overlayEl.removeEventListener('touchstart', onTouchStart)
+        overlayEl.removeEventListener('touchmove', onTouchMove)
+        overlayEl.removeEventListener('touchend', onTouchEnd)
         overlayEl = null
       }
       document.removeEventListener('keydown', onKeydown)
+      if (progressCtrl && hoverBound) {
+        progressCtrl.removeEventListener('mousemove', onProgressMove)
+        progressCtrl.removeEventListener('mouseleave', onProgressLeave)
+      }
       player.dispose()
     } catch (e) { /* 静默 */ }
     player = null
     videoEl = null
+    progressCtrl = null
+    hoverBound = false
+    previewUrls = []
+    tipEl = null
+    tipImgEl = null
+    tipTimeEl = null
+    swipeTipEl = null
+    swipe = { active: false, dir: 0, startX: 0, startY: 0, startTime: 0, targetTime: 0 }
   }
+}
+
+// ---- 进度条 hover 预览 ----
+function buildTip() {
+  if (!progressCtrl || tipEl) return
+  // 让 absolute 定位的子浮层以进度条容器为基准
+  progressCtrl.style.position = 'relative'
+  tipEl = document.createElement('div')
+  tipEl.className = 'vjs-preview-tip'
+  tipEl.innerHTML = '<img alt=""><span class="pt-time"></span>'
+  tipImgEl = tipEl.querySelector('img')
+  tipTimeEl = tipEl.querySelector('.pt-time')
+  tipEl.style.display = 'none'
+  progressCtrl.appendChild(tipEl)
+}
+
+function onProgressMove(e) {
+  if (!progressCtrl || !tipEl || !previewUrls.length) return
+  const holder = progressCtrl.querySelector('.vjs-progress-holder')
+  if (!holder) return
+  const hRect = holder.getBoundingClientRect()
+  if (hRect.width <= 0) return
+  let ratio = (e.clientX - hRect.left) / hRect.width
+  ratio = Math.max(0, Math.min(1, ratio))
+  // 后端等距抽帧：t = dur*(i+1)/(count+1) -> index = round(ratio*(count+1))-1
+  const idx = Math.round(ratio * (previewUrls.length + 1)) - 1
+  const ci = Math.max(0, Math.min(previewUrls.length - 1, idx))
+  tipImgEl.src = previewUrls[ci]
+  tipTimeEl.textContent = fmtClock(ratio * (dur.value || 0))
+  // 浮层跟随鼠标横向居中（相对进度条容器）
+  const pRect = progressCtrl.getBoundingClientRect()
+  tipEl.style.left = (e.clientX - pRect.left) + 'px'
+  tipEl.style.display = 'block'
+}
+
+function onProgressLeave() {
+  if (tipEl) tipEl.style.display = 'none'
+}
+
+function enableHover() {
+  if (!progressCtrl || hoverBound) return
+  hoverBound = true
+  buildTip()
+  progressCtrl.addEventListener('mousemove', onProgressMove)
+  progressCtrl.addEventListener('mouseleave', onProgressLeave)
+}
+
+async function ensurePreviews() {
+  if (!props.movieId) return
+  try {
+    const r = await getPreviews(props.movieId)
+    if (r && r.available) {
+      if (r.regenerating) {
+        // 配置密度档位已变化：后台正在按新档位重抽，本次暂无预览
+        toast(t('player.previewRegen'), '', 2500)
+        return
+      }
+      if (r.urls && r.urls.length) {
+        previewUrls = r.urls.map((u) => '/api' + u)
+        enableHover()
+        return
+      }
+    }
+  } catch (e) { /* 忽略 */ }
+  // 无预览图：后台异步生成，本次播放暂无 hover 预览，下次打开即出
+  try { await genPreviews(props.movieId) } catch (e) { /* 忽略 */ }
+}
+
+function setupPreviewHover() {
+  if (!player) return
+  progressCtrl = player.el().querySelector('.vjs-progress-control')
+  if (!progressCtrl) return
+  ensurePreviews()
 }
 
 saveTimer = setInterval(() => saveProgress(false), 10000)
@@ -294,6 +479,68 @@ watch(() => props.movieId, () => {
   object-fit: contain !important;
   background: #000;
 }
+/* 进度条 hover 预览浮层：跟随鼠标横向居中显示在进度条上方 */
+.vjs-wrap :deep(.vjs-preview-tip) {
+  position: absolute;
+  bottom: 100%;
+  margin-bottom: 8px;
+  transform: translateX(-50%);
+  background: rgba(0, 0, 0, .88);
+  border: 1px solid rgba(255, 255, 255, .18);
+  border-radius: 6px;
+  overflow: hidden;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, .5);
+  z-index: 8;
+  pointer-events: none;
+}
+.vjs-wrap :deep(.vjs-preview-tip img) {
+  display: block;
+  width: 160px;
+  height: 90px;
+  object-fit: cover;
+  background: #000;
+}
+.vjs-wrap :deep(.vjs-preview-tip .pt-time) {
+  display: block;
+  text-align: center;
+  padding: 2px 0 4px;
+  font-size: 11px;
+  line-height: 1;
+  color: #fff;
+  background: rgba(0, 0, 0, .6);
+}
+/* 移动端横滑快进/快退：屏幕中央进度提示（含该时刻预览缩略图） */
+.vjs-wrap :deep(.vjs-swipe-tip) {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 10px;
+  border-radius: 12px;
+  background: rgba(0, 0, 0, .78);
+  border: 1px solid rgba(255, 255, 255, .2);
+  z-index: 9;
+  pointer-events: none;
+  user-select: none;
+}
+.vjs-wrap :deep(.vjs-swipe-tip .st-img) {
+  width: 180px;
+  height: 101px;
+  object-fit: cover;
+  border-radius: 8px;
+  background: #000;
+}
+.vjs-wrap :deep(.vjs-swipe-tip .st-text) {
+  color: #fff;
+  font-size: 16px;
+  font-weight: 500;
+  letter-spacing: .5px;
+  white-space: nowrap;
+}
 /* 透明覆盖层：独占画面点击（排除底部控制条），隔离 video.js 内部 click 处理；
    控制条 z-index 更高，因此按钮仍可正常点击。 */
 .vjs-wrap :deep(.vjs-click-overlay) {
@@ -312,9 +559,20 @@ watch(() => props.movieId, () => {
   bottom: 3.2em;
   z-index: 5;
 }
-/* 手机/平板：视频铺满可用高度 */
+/* 手机/平板：视频铺满可用高度；控制条（含进度条）常驻可见，便于拖动定位 */
 @media (max-width: 768px) {
   .vjs-wrap { height: 56vh; }
+  .vjs-wrap :deep(.video-js .vjs-control-bar),
+  .vjs-wrap :deep(.video-js.vjs-user-inactive .vjs-control-bar),
+  .vjs-wrap :deep(.video-js.vjs-user-inactive.vjs-playing .vjs-control-bar) {
+    display: flex !important;
+    opacity: 1 !important;
+    visibility: visible !important;
+    transform: translateY(0) !important;
+  }
+  /* 加大进度条可点区域，移动端好拖 */
+  .vjs-wrap :deep(.video-js .vjs-progress-control) { flex: 1 1 auto; }
+  .vjs-wrap :deep(.video-js .vjs-progress-holder) { height: 0.5em; }
 }
 .p-fail {
   display: flex; flex-direction: column; align-items: center; justify-content: center;

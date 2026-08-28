@@ -5,7 +5,7 @@ import {
   getConfig, putConfig, listProviders, testScraper as apiTest,
   parsePreview as apiParse, fsList, sniffCovers, csvUrl, cacheAvatars,
   fillActressAvatars, rescanLocalCovers, fetchActressProfile, getServerInfo, resetToken, checkUpdate,
-  listPlugins, togglePlugin,
+  listPlugins, togglePlugin, regenAllPreviews,
 } from '../api.js'
 import { toast, confirmDialog } from '../utils.js'
 import { useTasks } from '../composables/useTasks.js'
@@ -39,6 +39,7 @@ const cfg = reactive({
     http_json: {}, http_html: {},
   },
   ffmpeg_path: '',
+  previews_quality: 'smart',
   ai: { enabled: false, base_url: 'https://api.openai.com/v1', api_key: '', model: 'gpt-4o-mini', temperature: 0.4 },
   wiki: { languages: ['ja', 'zh'] },
 })
@@ -75,6 +76,7 @@ async function load() {
     cfg.scraper.javbus = Object.assign({ base_url: '', cookie: '' }, cfg.scraper.javbus)
     cfg.scraper.javdb = Object.assign({ base_url: '', cookie: '' }, cfg.scraper.javdb)
     cfg.wiki = Object.assign({ languages: ['ja', 'zh'] }, c.wiki)
+    cfg.previews_quality = c.previews_quality || 'smart'
 
     ignoreText.value = (cfg.library.ignore_keywords || []).join(', ')
     extText.value = (cfg.library.video_extensions || []).join(', ')
@@ -97,6 +99,7 @@ async function saveLibrary() {
   try {
     const patch = {
       ffmpeg_path: cfg.ffmpeg_path || '',
+      previews_quality: cfg.previews_quality || 'smart',
       library: {
         paths: cfg.library.paths || [],
         min_size_mb: Number(cfg.library.min_size_mb) || 0,
@@ -117,6 +120,22 @@ async function saveLibrary() {
     toast(t('settings.libSaved'), 'ok')
     await load()
   } catch (e) { toast(e.message, 'err') } finally { saving.value = false }
+}
+
+/* 按当前密度档位重新生成全部预览图（改档后刷新已生成影片） */
+const regenPv = ref(false)
+async function regeneratePreviews() {
+  if (!(await confirmDialog(
+    t('settings.regenPreviewTitle'),
+    t('settings.regenPreviewDesc'),
+    { danger: true, okText: t('settings.regenPreviewOk') },
+  ))) return
+  regenPv.value = true
+  try {
+    await regenAllPreviews()
+    toast(t('settings.regenPreviewStart'), 'ok')
+  } catch (e) { toast(e.message, 'err') }
+  finally { regenPv.value = false }
 }
 
 const newPath = ref('')
@@ -508,6 +527,19 @@ onMounted(async () => { await load(); await loadServerInfo(); loadPlugins() })
               <label>{{ $t('settings.ffmpegPath') }}</label>
               <input v-model="cfg.ffmpeg_path" :placeholder="$t('settings.ffmpegPh')" />
               <span class="hint">{{ $t('settings.ffmpegHint') }}</span>
+            </div>
+            <div class="field">
+              <label>{{ $t('settings.previewQuality') }}</label>
+              <select v-model="cfg.previews_quality" class="sel" @change="saveLibrary">
+                <option value="low">{{ $t('settings.pvLow') }}</option>
+                <option value="smart">{{ $t('settings.pvSmart') }}</option>
+                <option value="high">{{ $t('settings.pvHigh') }}</option>
+              </select>
+              <span class="hint">{{ $t('settings.previewQualityHint') }}</span>
+            </div>
+            <div class="field">
+              <button class="btn" :disabled="regenPv" @click="regeneratePreviews">{{ $t('settings.regenPreviewBtn') }}</button>
+              <span class="hint">{{ $t('settings.regenPreviewHint') }}</span>
             </div>
             <div class="field">
               <label class="switch">

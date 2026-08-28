@@ -1,6 +1,6 @@
 <script setup>
 import { computed, ref } from 'vue'
-import { state, openMoviePlayer } from '../state.js'
+import { state, openMoviePlayer, applyFacet } from '../state.js'
 import { coverThumbUrl, toggleFlag } from '../api.js'
 import { coverFallback, fmtMin, fmtSize, toast, qualityTag } from '../utils.js'
 import { t } from '../i18n/index.js'
@@ -36,6 +36,27 @@ const subtitle = computed(() => {
   if (m.value.code) parts.push(m.value.code)
   return parts
 })
+
+/** 卡片展示的类型/标签：genres 最多 3 个，tags（自定义标签）至多 4 个，超出的折叠 */
+const cardTags = computed(() => {
+  const genres = (m.value.genres || []).slice(0, 3)
+  const tags = (m.value.tags || []).slice(0, 4)
+  return { genres, tags }
+})
+const genreOverflow = computed(() => ((m.value.genres || []).length || 0) - cardTags.value.genres.length)
+const tagOverflow = computed(() => ((m.value.tags || []).length || 0) - cardTags.value.tags.length)
+const allTagsTitle = computed(() => {
+  const g = (m.value.genres || []).join(' / ')
+  const t = (m.value.tags || []).join(' / ')
+  return [g, t].filter(Boolean).join('；')
+})
+
+/** 点击标签快速筛选（.stop.prevent 已在模板处理，这里再兜底，抑制移动端点击穿透） */
+function onTagClick(e, kind, name) {
+  if (e && e.stopPropagation) e.stopPropagation()
+  if (e && e.preventDefault) e.preventDefault()
+  applyFacet(kind, name)
+}
 
 function onCardClick(e) {
   if (state.selMode) { pick(e); return }
@@ -137,10 +158,19 @@ async function play(e) {
 
     <div class="meta">
       <div class="title">{{ m.title || m.code || '未命名' }}</div>
+      <div v-if="m.actresses && m.actresses.length" class="meta-act" :title="m.actresses.join(' / ')">
+        <span v-for="a in m.actresses.slice(0, 3)" :key="a" class="act" @click.stop.prevent="onTagClick($event, 'actress', a)">{{ a }}</span>
+        <span v-if="m.actresses.length > 3" class="more">+{{ m.actresses.length - 3 }}</span>
+      </div>
+      <div v-if="cardTags.genres.length || cardTags.tags.length" class="meta-tags" :title="allTagsTitle">
+        <span v-for="g in cardTags.genres" :key="'g' + g" class="tag genre" @click.stop.prevent="onTagClick($event, 'genre', g)">{{ g }}</span>
+        <span v-if="genreOverflow > 0" class="tag more">+{{ genreOverflow }}</span>
+        <span v-for="t in cardTags.tags" :key="'t' + t" class="tag custom" @click.stop.prevent="onTagClick($event, 'tag', t)">{{ t }}</span>
+        <span v-if="tagOverflow > 0" class="tag more">+{{ tagOverflow }}</span>
+      </div>
       <div class="sub">
         <span v-if="m.rating" class="rate">★ {{ m.rating }}</span>
-        <span v-if="m.actresses" class="ellipsis">{{ m.actresses }}</span>
-        <span v-else-if="m.studio" class="ellipsis">{{ m.studio }}</span>
+        <span v-if="m.studio" class="ellipsis">{{ m.studio }}</span>
         <span v-else class="dim">{{ fmtSize(m.size_bytes) }}</span>
       </div>
     </div>
@@ -160,5 +190,75 @@ async function play(e) {
 }
 [data-theme='light'] .card .thumb img.placeholder {
   filter: grayscale(80%) opacity(.45) contrast(.92);
+}
+
+/* 卡片 meta 区：类型/标签快速筛选条 */
+.meta-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 4px;
+  max-height: 20px;
+  overflow: hidden;
+}
+.meta-tags .tag {
+  font-size: 10px;
+  line-height: 1;
+  padding: 2px 6px;
+  border-radius: 4px;
+  cursor: pointer;
+  white-space: nowrap;
+  touch-action: manipulation; /* 消除移动端点击延迟，抑制穿透 */
+}
+.meta-tags .tag.genre {
+  color: var(--c-text-3);
+  background: var(--c-bg-hover, rgba(255, 255, 255, .06));
+  border: 1px solid var(--c-border, rgba(255, 255, 255, .1));
+}
+.meta-tags .tag.custom {
+  color: var(--c-accent);
+  background: rgba(66, 133, 244, .12);
+  border: 1px solid rgba(66, 133, 244, .35);
+}
+.meta-tags .tag.more {
+  color: var(--c-text-4, #888);
+  cursor: default;
+}
+.meta-tags .tag.genre:hover,
+.meta-tags .tag.custom:hover {
+  filter: brightness(1.2);
+  opacity: 1;
+}
+
+/* 卡片 meta 区：女优可点击筛选 */
+.meta-act {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 4px;
+  max-height: 20px;
+  overflow: hidden;
+}
+.meta-act .act {
+  font-size: 11px;
+  line-height: 1;
+  padding: 2px 6px;
+  border-radius: 4px;
+  cursor: pointer;
+  white-space: nowrap;
+  touch-action: manipulation; /* 消除移动端点击延迟，抑制穿透 */
+  color: var(--c-accent);
+  background: color-mix(in srgb, var(--c-accent) 15%, transparent);
+  border: 1px solid color-mix(in srgb, var(--c-accent) 40%, transparent);
+}
+.meta-act .act:hover {
+  filter: brightness(1.2);
+}
+.meta-act .more {
+  font-size: 10px;
+  color: var(--c-text-4, #888);
+  padding: 2px 4px;
+  line-height: 1;
+  align-self: center;
 }
 </style>

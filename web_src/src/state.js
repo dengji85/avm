@@ -248,8 +248,31 @@ export function resetFilters() {
 
 /** 当前是否有任何激活筛选 */
 export function hasActiveFilter() {
-  return !!(state.q || state.actress.length || state.genre.length || state.studio ||
-            state.series || state.prefix || state.year || state.flags.length)
+  return !!(state.q || state.actress.length || state.genre.length || state.tag.length ||
+            state.studio || state.series || state.prefix || state.year || state.flags.length)
+}
+
+/**
+ * 从影片卡片 / 详情点击标签快速筛选：
+ * - kind: 'genre' | 'tag'
+ * - 该标签已在筛选条件中则移除（切换），否则加入
+ * - 跳到影片库视图展示筛选结果
+ */
+export function applyFacet(kind, name) {
+  // kind: 'genre' | 'tag' | 'actress'
+  let arr
+  if (kind === 'tag') arr = state.tag
+  else if (kind === 'actress') arr = state.actress
+  else arr = state.genre
+  const i = arr.indexOf(name)
+  if (i >= 0) arr.splice(i, 1)
+  else arr.push(name)
+  // 以新引用触发响应式（useLibrary 的 watch 依赖 .slice()）
+  if (kind === 'tag') state.tag = [...state.tag]
+  else if (kind === 'actress') state.actress = [...state.actress]
+  else state.genre = [...state.genre]
+  state.view = 'gallery'
+  state.page = 1
 }
 
 /* ---------------- 常量 ---------------- */

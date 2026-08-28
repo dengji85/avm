@@ -4,8 +4,10 @@ from __future__ import annotations
 
 from datetime import datetime
 import json
+import os
 import re
 import sqlite3
+import subprocess
 import unicodedata
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -225,6 +227,8 @@ SELECT m.id, m.key, m.code, m.has_code, m.title, m.original_title, m.release_dat
           JOIN actresses a ON a.id = ma.actress_id WHERE ma.movie_id = m.id) AS actress_str,
        (SELECT group_concat(g.name, '||') FROM movie_genre mg
           JOIN genres g ON g.id = mg.genre_id WHERE mg.movie_id = m.id) AS genre_str,
+       (SELECT group_concat(t.name, '||') FROM movie_tag mt
+          JOIN tags t ON t.id = mt.tag_id WHERE mt.movie_id = m.id) AS tag_str,
        COALESCE(wp.position, 0) AS progress_seconds,
        COALESCE(wp.duration, 0) AS duration_seconds,
        COALESCE(wp.finished, 0) AS progress_finished,
@@ -341,6 +345,7 @@ def _row_to_card(row: Dict[str, Any]) -> Dict[str, Any]:
     row = dict(row)
     row["actresses"] = [x for x in (row.pop("actress_str", None) or "").split("||") if x]
     row["genres"] = [x for x in (row.pop("genre_str", None) or "").split("||") if x]
+    row["tags"] = [x for x in (row.pop("tag_str", None) or "").split("||") if x]
     row["studio"] = row.get("studio") or ""
     row["series"] = row.get("series") or ""
     row["watchlist"] = int(row.get("watchlist") or 0)
@@ -1963,12 +1968,37 @@ def _ffprobe_duration(path: str, ffprobe: str) -> Optional[float]:
 
 
 def generate_previews(media_path: str, out_dir: str, ffmpeg: str = "ffmpeg",
-                      count: int = 6) -> Optional[List[str]]:
-    """用 ffmpeg 在影片中等距抽 count 帧。ffmpeg 不存在 / 探测失败返回 None。"""
-    ffprobe = ffmpeg.replace("ffmpeg", "ffprobe")
+                      count: int = 0, quality: str = "smart") -> Optional[List[str]]:
+    """用 ffmpeg 在影片中等距抽 count 帧。ffmpeg 不存在 / 探测失败返回 None。
+
+    抽帧为等距（t = dur*(i+1)/(count+1)），前端可按比例反推帧下标：
+    index = round(ratio*(count+1)) - 1。
+
+    count 为 0 时按 quality 档位 + 时长自适应：
+      smart：每 ~5 分钟一帧，8~24 张（均衡，默认）
+      low  ：每 ~8 分钟一帧，6~12 张（省空间、生成快）
+      high ：每 ~3 分钟一帧，12~40 张（精细预览）
+
+    注：ffmpeg 可能是 PATH 名（"ffmpeg"）或绝对路径（.../bin/ffmpeg.exe），
+    不能用字符串 replace 拼 ffprobe（会误伤路径目录名里的 "ffmpeg"），
+    应基于目录 + 文件名替换。"""
+    # 由 ffmpeg 路径推导 ffprobe：绝对路径则同名替换文件名，PATH 名则保持 PATH 查找
+    if os.path.dirname(ffmpeg):
+        base = os.path.basename(ffmpeg)
+        ext = os.path.splitext(base)[1] or ".exe"
+        ffprobe = os.path.join(os.path.dirname(ffmpeg), "ffprobe" + ext)
+    else:
+        ffprobe = "ffprobe"
     dur = _ffprobe_duration(media_path, ffprobe)
     if not dur or dur <= 0:
         return None
+    if count <= 0:
+        if quality == "low":
+            count = max(6, min(12, int(dur / 480) + 1))
+        elif quality == "high":
+            count = max(12, min(40, int(dur / 180) + 1))
+        else:  # smart
+            count = max(8, min(24, int(dur / 300) + 1))
     os.makedirs(out_dir, exist_ok=True)
     paths: List[str] = []
     for i in range(count):
@@ -1991,12 +2021,22 @@ def get_previews(conn: sqlite3.Connection, movie_id: int) -> List[str]:
     return _parsej(row["paths"]) if row and row["paths"] else []
 
 
-def set_previews(conn: sqlite3.Connection, movie_id: int, paths: List[str]) -> None:
+def get_previews_meta(conn: sqlite3.Connection, movie_id: int) -> Tuple[List[str], str]:
+    """返回 (路径列表, 生成时的密度档位 quality)。无记录时 quality 返回 'smart'。"""
+    row = conn.execute(
+        "SELECT paths, quality FROM movie_previews WHERE movie_id=?", (movie_id,)).fetchone()
+    if not row or not row["paths"]:
+        return [], (row["quality"] if row else "smart")
+    return _parsej(row["paths"]), (row["quality"] or "smart")
+
+
+def set_previews(conn: sqlite3.Connection, movie_id: int, paths: List[str],
+                 quality: str = "smart") -> None:
     conn.execute(
-        "INSERT INTO movie_previews(movie_id, paths) VALUES(?, ?) "
-        "ON CONFLICT(movie_id) DO UPDATE SET paths=excluded.paths, "
+        "INSERT INTO movie_previews(movie_id, paths, quality) VALUES(?, ?, ?) "
+        "ON CONFLICT(movie_id) DO UPDATE SET paths=excluded.paths, quality=excluded.quality, "
         "created_at=datetime('now','localtime')",
-        (movie_id, _j(paths)),
+        (movie_id, _j(paths), quality),
     )
 
 

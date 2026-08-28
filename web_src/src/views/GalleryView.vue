@@ -75,14 +75,26 @@ async function playFiltered() {
 /* 手机端筛选栏折叠状态：默认收起，点击「筛选条件」以浮层弹出，不遮盖影片内容 */
 const showFilter = ref(false)
 
-/* 移动端沉浸式：向上浏览隐藏顶栏/工具栏，下拉到顶部恢复 */
+/* 移动端沉浸式：向下浏览隐藏顶栏/工具栏；向上滑（哪怕一点）即显示，滚到顶部强制显示 */
 const navHidden = ref(false)
 let vbEl = null
 let mqMobile = null
+let lastScrollTop = 0
 function onViewScroll() {
   if (!mqMobile || !mqMobile.matches) { navHidden.value = false; return }
   if (!vbEl) return
-  navHidden.value = vbEl.scrollTop > 80
+  const st = vbEl.scrollTop
+  if (st <= 80) {
+    // 接近顶部：始终显示
+    navHidden.value = false
+  } else if (st > lastScrollTop) {
+    // 向下滑：隐藏顶栏/工具栏
+    navHidden.value = true
+  } else {
+    // 向上滑：立即显示
+    navHidden.value = false
+  }
+  lastScrollTop = st
 }
 function syncBodyClass() {
   document.body.classList.toggle('nav-hidden', navHidden.value)
