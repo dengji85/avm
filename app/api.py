@@ -56,6 +56,20 @@ def list_movies(
         return store.search_movies(conn, params)
 
 
+# 注意：必须定义在 /movies/{movie_id} 之前，否则会被 int 路径参数抢先匹配（422）
+@router.get("/movies/recommend")
+def recommend_movies(limit: int = 30, seed: int = 0, exclude_watched: bool = True,
+                     explore: float = 1.0) -> Dict[str, Any]:
+    """口味加权推荐（猜你喜欢）：基于观看历史打分后加权随机，附带推荐理由。
+
+    - exclude_watched：默认排除已看过的影片
+    - explore：越大越偏向高分（越"准"），越小越随机（越"探索"），默认 1.0
+    - seed：固定种子可复现同一批结果；0 表示每次随机
+    """
+    with db() as conn:
+        return store.recommend_movies(conn, limit, seed or None, exclude_watched, explore)
+
+
 @router.get("/movies/{movie_id}")
 def get_movie(movie_id: int) -> Dict[str, Any]:
     with db() as conn:
@@ -641,6 +655,46 @@ def sniff_all_covers() -> Dict[str, Any]:
     return scraper.batch_local_covers()
 
 
+@router.post("/movies/{movie_id}/extract-cover")
+def extract_cover(movie_id: int) -> Dict[str, Any]:
+    """从影片视频中抽一帧作为封面（未刮削到封面的影片可用）。"""
+    cfg = load_config()
+    ffmpeg = (cfg.get("ffmpeg_path") or "ffmpeg").strip() or "ffmpeg"
+    with db() as conn:
+        mv = store.movie_detail(conn, movie_id)
+        if not mv:
+            raise HTTPException(404, "影片不存在")
+        name = store.extract_cover_from_video(conn, movie_id, ffmpeg)
+    if not name:
+        raise HTTPException(400, "抽帧失败：ffmpeg 不可用、视频无法读取或无有效帧")
+    if name == "skipped":
+        raise HTTPException(409, "该影片已有正式封面（刮削/上传），不会用视频抽帧覆盖")
+    return {"ok": True, "cover": name, "cover_source": "video"}
+
+
+@router.post("/covers/extract-all")
+def extract_all_covers() -> Dict[str, Any]:
+    """批量：为所有「没有封面」的影片从视频抽帧生成封面。"""
+    cfg = load_config()
+    ffmpeg = (cfg.get("ffmpeg_path") or "ffmpeg").strip() or "ffmpeg"
+    with db() as conn:
+        ids = [r["id"] for r in query_all(
+            conn, "SELECT id FROM movies WHERE cover = '' AND has_code = 1")]
+    ok = 0
+    failed = 0
+    for mid in ids:
+        try:
+            with db() as conn:
+                name = store.extract_cover_from_video(conn, mid, ffmpeg)
+            if name:
+                ok += 1
+            else:
+                failed += 1
+        except Exception:
+            failed += 1
+    return {"ok": True, "extracted": ok, "failed": failed, "total": len(ids)}
+
+
 # ------------------------------------------------------------------ 分类/统计
 
 
@@ -771,6 +825,13 @@ def get_watch_history(
 def get_stats_enhanced() -> Dict[str, Any]:
     with db() as conn:
         return store.stats_enhanced(conn)
+
+
+@router.get("/stats/taste-profile")
+def get_taste_profile(year: int = 0) -> Dict[str, Any]:
+    """观影口味画像：8 个维度（0~100），用于雷达图。year=0 表示全部时间。"""
+    with db() as conn:
+        return store.taste_profile(conn, year)
 
 
 # ------------------------------------------------------------------ 年度回顾
@@ -2021,6 +2082,27 @@ def quality_scan() -> Dict[str, Any]:
 def storage() -> Dict[str, Any]:
     with db() as conn:
         return store.storage_stats(conn)
+
+
+@router.get("/storage/software")
+def software_storage() -> Dict[str, Any]:
+    """软件自身数据目录占用（封面/预览/头像/背景/临时/数据库）+ 可清理项。"""
+    with db() as conn:
+        return store.software_storage_stats(conn)
+
+
+@router.post("/storage/software/clean")
+def clean_software_storage_api(payload: Dict[str, Any] = Body(default={})) -> Dict[str, Any]:
+    """清理软件数据：targets 可取 temp / preview_orphan / preview_all / db_vacuum。"""
+    targets = payload.get("targets") or []
+    if isinstance(targets, str):
+        targets = [targets]
+    valid = {"temp", "preview_orphan", "preview_all", "db_vacuum"}
+    targets = [t for t in targets if t in valid]
+    if not targets:
+        raise HTTPException(400, "没有可清理的目标")
+    with db() as conn:
+        return store.clean_software_storage(conn, targets)
 
 
 @router.get("/integrity")

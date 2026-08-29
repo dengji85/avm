@@ -3,7 +3,7 @@ import { ref, reactive, computed, onMounted } from 'vue'
 import { state } from '../state.js'
 import {
   getConfig, putConfig, listProviders, testScraper as apiTest,
-  parsePreview as apiParse, fsList, sniffCovers, csvUrl, cacheAvatars,
+  parsePreview as apiParse, fsList, sniffCovers, extractAllCovers, csvUrl, cacheAvatars,
   fillActressAvatars, rescanLocalCovers, fetchActressProfile, getServerInfo, resetToken, checkUpdate,
   listPlugins, togglePlugin, regenAllPreviews,
 } from '../api.js'
@@ -175,6 +175,21 @@ async function doSniff() {
     const r = await sniffCovers()
     toast(t('settings.coverCheck', { n: r.checked || 0, m: r.found || 0 }), 'ok')
   } catch (e) { toast(e.message, 'err') }
+}
+
+// 批量：为所有没有封面的影片从视频抽一帧作为封面
+const extractingAll = ref(false)
+async function doExtractAll() {
+  if (!(await confirmDialog(
+    t('settings.extractAllTitle'),
+    t('settings.extractAllDesc'),
+  ))) return
+  extractingAll.value = true
+  try {
+    const r = await extractAllCovers()
+    toast(t('settings.extractAllDone', { n: r.extracted || 0, f: r.failed || 0 }), 'ok')
+  } catch (e) { toast(e.message, 'err') }
+  finally { extractingAll.value = false }
 }
 
 // 重新运行首次启动引导：重置 setup_done 并弹出遮罩
@@ -420,6 +435,9 @@ const repoUrl = REPO_URL
 const appVersion = ref('')
 const buildDate = ref('')
 
+/* 品牌图标：public 目录资源（Vite 不处理，直接以根路径相对部署） */
+const logoUrl = `${import.meta.env.BASE_URL}logo.svg`
+
 /* 检查更新 */
 const checkingUpdate = ref(false)
 const updateState = ref('idle') // idle | upToDate | newVersion | error
@@ -460,6 +478,17 @@ async function togglePluginOn(p) {
     p.enabled = !!r.enabled
     toast(`已${p.enabled ? '启用' : '停用'}「${p.name}」`, 'ok')
   } catch (e) { toast(e.message, 'err') }
+}
+
+/* 保存女优资料插件设置（语言偏好） */
+const savingWiki = ref(false)
+async function saveWiki() {
+  savingWiki.value = true
+  try {
+    await putConfig({ wiki: { ...cfg.wiki } })
+    toast(t('settings.wikiSaved'), 'ok')
+  } catch (e) { toast(e.message, 'err') }
+  finally { savingWiki.value = false }
 }
 
 onMounted(async () => { await load(); await loadServerInfo(); loadPlugins() })
@@ -580,6 +609,7 @@ onMounted(async () => { await load(); await loadServerInfo(); loadPlugins() })
           <div class="panel-foot">
             <button class="btn primary" :disabled="saving" @click="saveLibrary">{{ $t('common.save') }}</button>
             <button class="btn" @click="doSniff">{{ $t('settings.sniffNow') }}</button>
+            <button class="btn" :disabled="extractingAll" @click="doExtractAll">{{ $t('settings.extractAll') }}</button>
           </div>
         </div>
 
@@ -741,27 +771,31 @@ onMounted(async () => { await load(); await loadServerInfo(); loadPlugins() })
             <span class="sub">{{ $t('settings.wikiSub') }}</span>
           </div>
           <div class="panel-body">
-            <div class="field">
+            <div class="field-row">
               <label>{{ $t('settings.wikiLang') }}</label>
-              <input v-model="cfg.wiki.languages" placeholder="ja,zh" />
-              <span class="hint">{{ $t('settings.wikiLangHint') }}</span>
-            </div>
-            <div class="field">
-              <label>{{ $t('settings.plugins') }}</label>
-              <div class="plugin-list">
-                <div v-if="!pluginList.length" class="muted sm">没有可用插件</div>
-                <div v-for="p in pluginList" :key="p.id" class="field-row">
-                  <label>
-                    {{ p.name }}
-                    <span class="hint">{{ p.description }}</span>
-                  </label>
-                  <label class="toggle">
-                    <input type="checkbox" :checked="p.enabled" @change="togglePluginOn(p)" />
-                    <span class="track"></span>
-                  </label>
-                </div>
+              <div class="hstack">
+                <input v-model="cfg.wiki.languages" placeholder="ja,zh" style="width:140px" />
+                <span class="muted sm">{{ $t('settings.wikiLangHint') }}</span>
               </div>
             </div>
+            <div class="prov" v-for="p in pluginList" :key="p.id">
+              <label class="toggle">
+                <input type="checkbox" :checked="p.enabled" @change="togglePluginOn(p)" />
+                <span class="track"></span>
+              </label>
+              <div class="prov-main">
+                <div class="prov-name">
+                  {{ p.name }}
+                  <code>{{ p.id }}</code>
+                  <span v-if="p.enabled" class="badge ok">{{ $t('settings.active') }}</span>
+                </div>
+                <div class="prov-desc">{{ p.description }}</div>
+              </div>
+            </div>
+            <p v-if="!pluginList.length" class="muted">{{ $t('settings.noPlugin') }}</p>
+          </div>
+          <div class="panel-foot">
+            <button class="btn primary" :disabled="savingWiki" @click="saveWiki">{{ $t('settings.wikiSave') }}</button>
           </div>
         </div>
       </template>
@@ -959,6 +993,7 @@ onMounted(async () => { await load(); await loadServerInfo(); loadPlugins() })
       <template v-else>
         <!-- 主视觉：品牌 + 版本 + 操作 -->
         <div class="about-hero">
+          <img class="about-logo" :src="logoUrl" :alt="$t('settings.brand')" />
           <div class="about-brand">{{ $t('settings.brand') }}</div>
           <div class="about-sub">{{ $t('settings.aboutSub') }}</div>
           <div class="about-ver">
@@ -1162,6 +1197,13 @@ kbd {
   background: var(--c-surface);
   border: 1px solid var(--c-line);
   margin-bottom: var(--sp-4);
+}
+.about-logo {
+  width: 112px; height: 112px;   /* 正方形 logo */
+  display: block;
+  margin-bottom: var(--sp-3);
+  border-radius: var(--r-lg);
+  box-shadow: 0 8px 22px rgba(224, 53, 90, .28);
 }
 .about-brand { font-size: 1.9rem; font-weight: 700; letter-spacing: .02em; }
 .about-sub { margin-top: var(--sp-1); color: var(--c-text-2); font-size: var(--fs-md); }

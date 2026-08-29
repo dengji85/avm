@@ -1,7 +1,7 @@
 <script setup>
 import { ref, reactive, computed, onMounted, watch } from 'vue'
 import { state } from '../state.js'
-import { getStats, getStatsEnhanced, getRankings, listMovies, getStorage, getWatchHistory, getWatchAnalytics } from '../api.js'
+import { getStats, getStatsEnhanced, getRankings, listMovies, getStorage, getWatchHistory, getWatchAnalytics, getTasteProfile } from '../api.js'
 import { fmtMin, fmtSize, fmtDuration, fmtDate } from '../utils.js'
 import { t } from '../i18n/index.js'
 import { toast } from '../utils.js'
@@ -12,7 +12,7 @@ import YearReviewView from './YearReviewView.vue'
 
 const loading = ref(true)
 const error = ref('')
-const activeTab = ref('storage')
+const activeTab = ref('overview')
 
 /* ===== 观看明细（watchlog） ===== */
 const wlQuery = reactive({ from: '', to: '', method: '', q: '' })
@@ -282,6 +282,7 @@ async function loadAll() {
     byYear.value = (s.by_year || []).map((x) => ({ year: x.year, count: x.count }))
     runtimeByYear.value = se.runtime_by_year || []
     tagCloud.value = se.tag_cloud || []
+    watchCal.value = se.watch_calendar || []
 
     // 播放最多：依赖 rankings play 的 play_count
     playTop.value = (rPlay.items || []).filter((m) => m && (m.play_count || 0) > 0).slice(0, 10)
@@ -308,6 +309,8 @@ async function loadAll() {
     watchedTop.value = (wa && wa.top_movies || [])
       .map((m) => ({ ...m, runtime: (Number(m.total_sec) || 0) / 60 }))
       .slice(0, 10)
+    // 口味画像（雷达图）
+    loadTaste()
   } catch (e) {
     error.value = e.message || t('stats.loadFail')
   } finally {
@@ -505,6 +508,123 @@ const insights = computed(() => {
 // 观看分析子页：overview / rhythm / preference
 const waSeg = ref('overview')
 
+/* ===== 观影日历热力图（GitHub 风格） ===== */
+const watchCal = ref([])            // [{day:'2026-08-25', sessions:N, sec:N}]
+const calYear = ref(new Date().getFullYear())
+// 有观影记录的年份（降序）
+const calYears = computed(() => {
+  const set = new Set((watchCal.value || []).map((d) => String(d.day || '').slice(0, 4)))
+  return [...set].filter(Boolean).sort((a, b) => Number(b) - Number(a))
+})
+// 当前年份按天映射：'2026-08-25' -> {sessions, sec}
+const calMap = computed(() => {
+  const m = {}
+  const y = String(calYear.value)
+  for (const d of (watchCal.value || [])) {
+    const day = String(d.day || '')
+    if (day.slice(0, 4) !== y) continue
+    m[day] = { sessions: Number(d.sessions) || 0, sec: Number(d.sec) || 0 }
+  }
+  return m
+})
+// 生成该年 53 周 × 7 天的格子（周日为一周起点）
+const calCells = computed(() => {
+  const y = Number(calYear.value)
+  const jan1 = new Date(y, 0, 1)
+  const start = new Date(y, 0, 1 - jan1.getDay())   // 该年第一周的周日
+  const cells = []
+  const map = calMap.value
+  let maxSec = 0
+  const today = new Date(); today.setHours(0, 0, 0, 0)
+  for (let i = 0; i < 371; i++) {
+    const cur = new Date(start.getFullYear(), start.getMonth(), start.getDate() + i)
+    if (cur.getFullYear() > y) break
+    const key = `${cur.getFullYear()}-${String(cur.getMonth() + 1).padStart(2, '0')}-${String(cur.getDate()).padStart(2, '0')}`
+    const rec = cur.getFullYear() === y ? (map[key] || null) : null
+    if (rec && rec.sec > maxSec) maxSec = rec.sec
+    cells.push({
+      key, date: cur, inYear: cur.getFullYear() === y, future: cur > today,
+      sessions: rec ? rec.sessions : 0, sec: rec ? rec.sec : 0,
+    })
+  }
+  // 按最大时长分 5 档（0 空，1-4 由浅到深）
+  for (const c of cells) {
+    if (!c.inYear || c.future || c.sec <= 0) { c.level = 0; continue }
+    const r = c.sec / Math.max(1, maxSec)
+    c.level = r > 0.66 ? 4 : r > 0.33 ? 3 : r > 0.12 ? 2 : 1
+  }
+  return cells
+})
+const calActiveDays = computed(() => calCells.value.filter((c) => c.sec > 0).length)
+const calTotalSec = computed(() =>
+  calCells.value.reduce((s, c) => s + (c.inYear ? c.sec : 0), 0))
+// 月份刻度标签（每 5 周一个，避免拥挤）
+const calMonths = computed(() => {
+  const out = []
+  let last = -1
+  calCells.value.forEach((c, i) => {
+    const wk = Math.floor(i / 7)
+    if (i % 7 === 0 && c.inYear) {
+      const mo = c.date.getMonth()
+      if (mo !== last) { out.push({ week: wk, label: `${mo + 1}月` }); last = mo }
+    }
+  })
+  return out
+})
+// 星期标签（日~六，走 i18n，逗号分隔）
+const calDows = computed(() => String(t('stats.calDows') || '日,一,二,三,四,五,六').split(','))
+function calTip(c) {
+  if (!c.inYear) return ''
+  if (!c.sec) return `${c.key} · ${t('stats.calNone')}`
+  return `${c.key} · ${wlFmtHours(c.sec)}${c.sessions > 1 ? ` · ${c.sessions}${t('stats.calSessions')}` : ''}`
+}
+
+/* ===== 口味画像雷达图 ===== */
+const taste = ref({ year: 0, dims: [], totals: {} })
+const tasteYear = ref(0)   // 0 = 全部时间
+const tasteLoading = ref(false)
+async function loadTaste() {
+  tasteLoading.value = true
+  try {
+    taste.value = await getTasteProfile(tasteYear.value) || { dims: [], totals: {} }
+  } catch (e) { taste.value = { dims: [], totals: {} } }
+  finally { tasteLoading.value = false }
+}
+watch(tasteYear, loadTaste)
+const tasteYears = computed(() => [0, ...calYears.value])
+// 雷达图几何：中心 + 8 轴
+const R = 92, CX = 130, CY = 122
+const radarAxes = computed(() => {
+  const n = (taste.value.dims || []).length || 1
+  return (taste.value.dims || []).map((d, i) => {
+    const ang = (Math.PI * 2 * i) / n - Math.PI / 2
+    const r = (Math.max(0, Math.min(100, Number(d.value) || 0)) / 100) * R
+    return {
+      ...d,
+      ax: CX + Math.cos(ang) * R, ay: CY + Math.sin(ang) * R,
+      px: CX + Math.cos(ang) * r, py: CY + Math.sin(ang) * r,
+      lx: CX + Math.cos(ang) * (R + 22), ly: CY + Math.sin(ang) * (R + 10),
+      anchor: Math.abs(Math.cos(ang)) < 0.2 ? 'middle' : (Math.cos(ang) > 0 ? 'start' : 'end'),
+    }
+  })
+})
+const radarPolygon = computed(() => radarAxes.value.map((a) => `${a.px.toFixed(1)},${a.py.toFixed(1)}`).join(' '))
+// 同心网格（4 圈）
+const radarRings = computed(() => [0.25, 0.5, 0.75, 1].map((f) => {
+  const n = radarAxes.value.length || 1
+  const pts = radarAxes.value.map((a, i) => {
+    const ang = (Math.PI * 2 * i) / n - Math.PI / 2
+    return `${(CX + Math.cos(ang) * R * f).toFixed(1)},${(CY + Math.sin(ang) * R * f).toFixed(1)}`
+  }).join(' ')
+  return { f, pts }
+}))
+function tasteLabel(key) { return t(`stats.taste_${key}`) }
+function tasteDesc(d) {
+  const v = Math.round(Number(d.value) || 0)
+  if (d.top && d.top.length) return `${v}% · ${d.top.join(' / ')}`
+  return `${v}%`
+}
+
 // 趋势对比条百分比（近期 vs 早期）
 function trendPct(which) {
   const a = Number(trend.value.recent_sec) || 0
@@ -611,21 +731,110 @@ function insightText(it) {
         </button>
       </div>
 
-      <!-- ===== Tab 分区 ===== -->
+      <!-- ===== Tab 分区：按"你想看什么"组织（总览 / 收藏 / 口味 / 观看 / 年度回顾） ===== -->
       <div class="tabs">
-        <button :class="{on: activeTab==='storage'}" @click="activeTab='storage'">{{ $t('stats.storageDist') }}</button>
-        <button :class="{on: activeTab==='collect'}" @click="activeTab='collect'">{{ $t('stats.collectHealth') }}</button>
-        <button :class="{on: activeTab==='favorite'}" @click="activeTab='favorite'">{{ $t('stats.favTop') }}</button>
-        <button :class="{on: activeTab==='trend'}" @click="activeTab='trend'">{{ $t('stats.yearTrend') }}</button>
-        <button :class="{on: activeTab==='fun'}" @click="activeTab='fun'">{{ $t('stats.funTop') }}</button>
+        <button :class="{on: activeTab==='overview'}" @click="activeTab='overview'">{{ $t('stats.tabOverview') }}</button>
+        <button :class="{on: activeTab==='library'}" @click="activeTab='library'">{{ $t('stats.tabLibrary') }}</button>
+        <button :class="{on: activeTab==='taste'}" @click="activeTab='taste'">{{ $t('stats.tabTaste') }}</button>
+        <button :class="{on: activeTab==='activity'}" @click="activeTab='activity'">{{ $t('stats.tabActivity') }}</button>
         <button :class="{on: activeTab==='yearreview'}" @click="activeTab='yearreview'">{{ $t('yr.nav') }}</button>
-        <button :class="{on: activeTab==='movies'}" @click="activeTab='movies'">{{ $t('stats.allMovies', { n: allMovies.length }) }}</button>
-        <button :class="{on: activeTab==='wanalysis'}" @click="activeTab='wanalysis'">{{ $t('stats.watchAnalysis') }}</button>
-        <button :class="{on: activeTab==='watchlog'}" @click="activeTab='watchlog'">{{ $t('stats.watchlog') }}</button>
       </div>
 
-      <!-- 存储分布 -->
-      <div v-show="activeTab==='storage'">
+      <!-- ===== 总览：口味画像 + 观影日历 + 关键洞察（一眼看懂） ===== -->
+      <div v-show="activeTab==='overview'">
+        <!-- 口味画像雷达图 -->
+        <section class="card panel">
+          <div class="panel-head">
+            <h2>{{ $t('stats.tasteTitle') }}</h2>
+            <div v-if="tasteYears.length > 1" class="cal-years">
+              <button class="cal-year" :class="{ on: tasteYear === 0 }" @click="tasteYear = 0">{{ $t('stats.tasteAll') }}</button>
+              <button v-for="y in calYears" :key="y" class="cal-year" :class="{ on: tasteYear === y }" @click="tasteYear = y">{{ y }}</button>
+            </div>
+          </div>
+          <div v-if="!radarAxes.length" class="muted small pad">{{ $t('stats.waNoData') }}</div>
+          <div v-else class="taste-wrap">
+            <svg class="taste-radar" viewBox="0 0 300 250" role="img" :aria-label="$t('stats.tasteTitle')">
+              <polygon v-for="(r, i) in radarRings" :key="'r' + i" class="radar-ring" :points="r.pts" />
+              <line v-for="(a, i) in radarAxes" :key="'a' + i" class="radar-axis" :x1="130" :y1="122" :x2="a.ax" :y2="a.ay" />
+              <polygon class="radar-area" :points="radarPolygon" />
+              <circle v-for="(a, i) in radarAxes" :key="'p' + i" class="radar-dot" :cx="a.px" :cy="a.py" r="3">
+                <title>{{ tasteLabel(a.key) }} · {{ tasteDesc(a) }}</title>
+              </circle>
+              <text v-for="(a, i) in radarAxes" :key="'l' + i" class="radar-label"
+                    :x="a.lx" :y="a.ly" :text-anchor="a.anchor">{{ tasteLabel(a.key) }}</text>
+            </svg>
+            <ul class="taste-dims">
+              <li v-for="a in radarAxes" :key="a.key">
+                <span class="td-name">{{ tasteLabel(a.key) }}</span>
+                <span class="td-bar"><i :style="{ width: Math.min(100, a.value) + '%' }"></i></span>
+                <span class="td-val tabular">{{ tasteDesc(a) }}</span>
+              </li>
+            </ul>
+          </div>
+        </section>
+
+        <!-- 观影日历热力图 -->
+        <section class="card panel">
+          <div class="panel-head">
+            <h2>{{ $t('stats.calTitle') }}</h2>
+            <div v-if="calYears.length" class="cal-years">
+              <button v-for="y in calYears" :key="y" class="cal-year" :class="{ on: calYear === y }" @click="calYear = y">{{ y }}</button>
+            </div>
+          </div>
+          <div v-if="!calCells.length" class="muted small pad">{{ $t('stats.waNoData') }}</div>
+          <div v-else class="cal-wrap">
+            <div class="cal-months">
+              <span v-for="m in calMonths" :key="m.week" class="cal-month" :style="{ gridColumn: m.week + 1 }">{{ m.label }}</span>
+            </div>
+            <div class="cal-body">
+              <div class="cal-dows">
+                <span v-for="d in calDows" :key="d" class="cal-dow">{{ d }}</span>
+              </div>
+              <div class="cal-grid">
+                <div v-for="c in calCells" :key="c.key" class="cal-cell"
+                     :class="'lv' + c.level + (c.inYear ? '' : ' out') + (c.future ? ' future' : '')"
+                     :title="calTip(c)"></div>
+              </div>
+            </div>
+          </div>
+          <div class="cal-foot">
+            <span class="muted small">{{ $t('stats.calSummary', { days: calActiveDays, hours: wlFmtHours(calTotalSec) }) }}</span>
+            <span class="cal-legend">
+              <span class="muted small">{{ $t('stats.calLess') }}</span>
+              <i class="cal-cell lv0"></i><i class="cal-cell lv1"></i><i class="cal-cell lv2"></i><i class="cal-cell lv3"></i><i class="cal-cell lv4"></i>
+              <span class="muted small">{{ $t('stats.calMore') }}</span>
+            </span>
+          </div>
+        </section>
+
+        <!-- 关键洞察 -->
+        <section class="card panel">
+          <div class="panel-head"><h2>{{ $t('stats.waInsights') }}</h2><span class="muted small">{{ $t('stats.waInsightsHint') }}</span></div>
+          <div v-if="!insights.length" class="muted small pad">{{ $t('stats.waNoData') }}</div>
+          <div v-else class="wa-insights">
+            <div v-for="(it,i) in insights" :key="i" class="wa-insight" :class="'tone-'+it.tone">
+              <span class="wa-insight-icon">{{ it.icon }}</span>
+              <span class="wa-insight-text">{{ insightText(it) }}</span>
+            </div>
+          </div>
+        </section>
+
+        <!-- 观看概览 KPI -->
+        <section class="card panel">
+          <div class="panel-head"><h2>{{ $t('stats.waOverview') }}</h2></div>
+          <div class="wa-kpis">
+            <div class="wa-kpi"><div class="wa-kpi-val tabular">{{ waTotal.sessions }}</div><div class="wa-kpi-label">{{ $t('stats.wlSessions') }}</div></div>
+            <div class="wa-kpi"><div class="wa-kpi-val tabular">{{ wlFmtHours(waTotal.total_sec) }}</div><div class="wa-kpi-label">{{ $t('stats.wlDuration') }}</div></div>
+            <div class="wa-kpi"><div class="wa-kpi-val tabular">{{ waTotal.movies }}</div><div class="wa-kpi-label">{{ $t('stats.wlMovies') }}</div></div>
+            <div class="wa-kpi"><div class="wa-kpi-val tabular">{{ waTotal.days }}</div><div class="wa-kpi-label">{{ $t('stats.wlDays') }}</div></div>
+            <div class="wa-kpi"><div class="wa-kpi-val tabular">{{ Math.round(completion.finish_rate*100) }}%</div><div class="wa-kpi-label">{{ $t('stats.waFinishRate') }}</div></div>
+            <div class="wa-kpi"><div class="wa-kpi-val tabular">{{ Math.round(rewatch.rewatch_rate*100) }}%</div><div class="wa-kpi-label">{{ $t('stats.waRewatchRate') }}</div></div>
+          </div>
+        </section>
+      </div>
+
+      <!-- 存储分布（归属：我的收藏） -->
+      <div v-show="activeTab==='library'">
         <section class="card panel">
           <div class="panel-head">
             <h2>{{ $t('stats.storageDist') }}</h2>
@@ -697,7 +906,7 @@ function insightText(it) {
       </div>
 
       <!-- 收藏健康 -->
-      <div v-show="activeTab==='collect'">
+      <div v-show="activeTab==='library'">
         <div class="row">
           <section class="card panel">
             <div class="panel-head"><h2>{{ $t('stats.collectQuality') }}</h2></div>
@@ -736,7 +945,7 @@ function insightText(it) {
       </div>
 
       <!-- 最爱榜单 -->
-      <div v-show="activeTab==='favorite'">
+      <div v-show="activeTab==='taste'">
         <section class="card panel">
           <div class="panel-head">
             <h2>{{ $t('stats.favTop') }}</h2>
@@ -767,7 +976,7 @@ function insightText(it) {
       </div>
 
       <!-- 年份双趋势 -->
-      <div v-show="activeTab==='trend'">
+      <div v-show="activeTab==='library'">
         <section class="card panel">
           <div class="panel-head">
             <h2>{{ $t('stats.yearTrend') }}</h2>
@@ -791,7 +1000,7 @@ function insightText(it) {
       </div>
 
       <!-- 趣味榜单 -->
-      <div v-show="activeTab==='fun'">
+      <div v-show="activeTab==='taste'">
         <section class="card panel">
           <div class="panel-head"><h2>{{ $t('stats.funTop') }}</h2></div>
           <div class="fun-grid">
@@ -845,7 +1054,7 @@ function insightText(it) {
       </div>
 
       <!-- 所有影片一览 -->
-      <div v-show="activeTab==='movies'">
+      <div v-show="activeTab==='library'">
         <section class="card panel">
           <div class="panel-head">
             <h2>{{ $t('stats.allMovies', { n: allMovies.length }) }}</h2>
@@ -889,39 +1098,16 @@ function insightText(it) {
         </section>
       </div>
 
-      <!-- 观看分析（多维） -->
-      <div v-show="activeTab==='wanalysis'">
+      <!-- 观看分析（多维）（归属：我的观看） -->
+      <div v-show="activeTab==='activity'">
         <div class="seg-tabs wa-seg">
-          <button :class="{on: waSeg==='overview'}" @click="waSeg='overview'">{{ $t('stats.waSegOverview') }}</button>
+          <button :class="{on: waSeg==='overview'}" @click="waSeg='overview'">{{ $t('stats.waSegMethod') }}</button>
           <button :class="{on: waSeg==='rhythm'}" @click="waSeg='rhythm'">{{ $t('stats.waSegRhythm') }}</button>
           <button :class="{on: waSeg==='preference'}" @click="waSeg='preference'">{{ $t('stats.waSegPref') }}</button>
         </div>
 
-        <!-- 子页：概览 -->
+        <!-- 子页：方式（播放方式 + 类型偏好；核心 KPI 已上移到「总览」） -->
         <template v-if="waSeg==='overview'">
-          <section class="card panel">
-            <div class="panel-head"><h2>{{ $t('stats.waOverview') }}</h2></div>
-            <div class="wa-kpis">
-              <div class="wa-kpi"><div class="wa-kpi-val tabular">{{ waTotal.sessions }}</div><div class="wa-kpi-label">{{ $t('stats.wlSessions') }}</div></div>
-              <div class="wa-kpi"><div class="wa-kpi-val tabular">{{ wlFmtHours(waTotal.total_sec) }}</div><div class="wa-kpi-label">{{ $t('stats.wlDuration') }}</div></div>
-              <div class="wa-kpi"><div class="wa-kpi-val tabular">{{ waTotal.movies }}</div><div class="wa-kpi-label">{{ $t('stats.wlMovies') }}</div></div>
-              <div class="wa-kpi"><div class="wa-kpi-val tabular">{{ waTotal.days }}</div><div class="wa-kpi-label">{{ $t('stats.wlDays') }}</div></div>
-              <div class="wa-kpi"><div class="wa-kpi-val tabular">{{ Math.round(completion.finish_rate*100) }}%</div><div class="wa-kpi-label">{{ $t('stats.waFinishRate') }}</div></div>
-              <div class="wa-kpi"><div class="wa-kpi-val tabular">{{ Math.round(rewatch.rewatch_rate*100) }}%</div><div class="wa-kpi-label">{{ $t('stats.waRewatchRate') }}</div></div>
-            </div>
-          </section>
-
-          <section class="card panel">
-            <div class="panel-head"><h2>{{ $t('stats.waInsights') }}</h2><span class="muted small">{{ $t('stats.waInsightsHint') }}</span></div>
-            <div v-if="!insights.length" class="muted small pad">{{ $t('stats.waNoData') }}</div>
-            <div v-else class="wa-insights">
-              <div v-for="(it,i) in insights" :key="i" class="wa-insight" :class="'tone-'+it.tone">
-                <span class="wa-insight-icon">{{ it.icon }}</span>
-                <span class="wa-insight-text">{{ insightText(it) }}</span>
-              </div>
-            </div>
-          </section>
-
           <div class="wa-grid">
             <section class="card panel">
               <div class="panel-head"><h2>{{ $t('stats.waByMethod') }}</h2></div>
@@ -1046,7 +1232,7 @@ function insightText(it) {
       </div>
 
       <!-- 观看明细 -->
-      <div v-show="activeTab==='watchlog'">
+      <div v-show="activeTab==='activity'">
         <div class="wh-filter">
           <div class="wh-fields">
             <label class="wh-field">
@@ -1285,6 +1471,9 @@ function insightText(it) {
 }
 .tabs button:hover { color: var(--c-text-1); }
 .tabs button.on { color: #fff; background: var(--c-primary); box-shadow: 0 4px 12px color-mix(in srgb, var(--c-primary) 40%, transparent); }
+/* 重组后一个 tab 内聚合多个板块：给 tab 容器的顶层面板统一垂直间距
+   （只作用于直接子面板，不影响 .wa-grid 等内部网格自身布局） */
+.tabs ~ div > .panel { margin-bottom: var(--sp-4); }
 .fcard {
   display: flex; flex-direction: row; align-items: center; gap: 14px;
   height: 84px;
@@ -1457,6 +1646,43 @@ function insightText(it) {
 .wa-kpi-label { font-size: var(--fs-xs); color: var(--c-text-3); }
 
 .wa-grid { display: grid; grid-template-columns: 1.4fr 1fr; gap: var(--sp-4); margin-top: var(--sp-4); }
+
+/* ===== 观影日历热力图 ===== */
+.cal-years { display: inline-flex; gap: 4px; flex-wrap: wrap; }
+.cal-year { font-size: var(--fs-xs); padding: 2px 9px; border-radius: 999px; border: 1px solid var(--c-border); background: transparent; color: var(--c-text-2); cursor: pointer; }
+.cal-year.on { background: var(--c-accent); color: #fff; border-color: transparent; }
+.cal-wrap { overflow-x: auto; padding: 6px 2px 2px; }
+.cal-months { display: grid; grid-auto-flow: column; grid-auto-columns: 12px; gap: 3px; margin-left: 23px; height: 16px; }
+.cal-month { font-size: 10px; color: var(--c-text-3); white-space: nowrap; }
+.cal-body { display: flex; gap: 5px; }
+.cal-dows { display: grid; grid-template-rows: repeat(7, 12px); gap: 3px; }
+.cal-dow { font-size: 9px; line-height: 12px; color: var(--c-text-3); width: 18px; text-align: right; }
+.cal-grid { display: grid; grid-template-rows: repeat(7, 12px); grid-auto-flow: column; grid-auto-columns: 12px; gap: 3px; }
+.cal-cell { width: 12px; height: 12px; border-radius: 2px; background: var(--c-bg-hover, rgba(255, 255, 255, .06)); }
+.cal-cell.out { opacity: .35; }
+.cal-cell.future { opacity: .18; }
+.cal-cell.lv1 { background: color-mix(in srgb, var(--c-accent) 22%, transparent); }
+.cal-cell.lv2 { background: color-mix(in srgb, var(--c-accent) 45%, transparent); }
+.cal-cell.lv3 { background: color-mix(in srgb, var(--c-accent) 70%, transparent); }
+.cal-cell.lv4 { background: var(--c-accent); }
+.cal-foot { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-3); margin-top: var(--sp-2); flex-wrap: wrap; }
+.cal-legend { display: inline-flex; align-items: center; gap: 3px; }
+.cal-legend .cal-cell { display: inline-block; }
+
+/* ===== 口味画像雷达图 ===== */
+.taste-wrap { display: grid; grid-template-columns: 330px 1fr; gap: var(--sp-4); align-items: center; }
+.taste-radar { width: 100%; height: auto; max-width: 340px; }
+.radar-ring { fill: none; stroke: var(--c-border); stroke-width: 1; opacity: .55; }
+.radar-axis { stroke: var(--c-border); stroke-width: 1; opacity: .4; }
+.radar-area { fill: color-mix(in srgb, var(--c-accent) 26%, transparent); stroke: var(--c-accent); stroke-width: 2; }
+.radar-dot { fill: var(--c-accent); }
+.radar-label { font-size: 11px; fill: var(--c-text-2); }
+.taste-dims { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 7px; }
+.taste-dims li { display: grid; grid-template-columns: 76px 1fr 104px; align-items: center; gap: 8px; font-size: var(--fs-xs); }
+.td-name { color: var(--c-text-2); }
+.td-bar { display: block; height: 6px; border-radius: 3px; background: var(--c-bg-hover); overflow: hidden; }
+.td-bar i { display: block; height: 100%; background: var(--c-accent); border-radius: 3px; }
+.td-val { color: var(--c-text-3); text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .wa-hours { display: flex; align-items: flex-end; gap: 3px; height: 160px; padding: 8px 4px 0; }
 .wa-hour { flex: 1; display: flex; flex-direction: column; align-items: center; height: 100%; justify-content: flex-end; gap: 4px; }
 .wa-hour-bar { width: 70%; min-height: 2px; border-radius: 3px 3px 0 0; background: linear-gradient(180deg, var(--c-primary), color-mix(in srgb, var(--c-primary) 55%, #000)); }
@@ -1526,6 +1752,8 @@ function insightText(it) {
 @media (max-width: 900px) {
   .wa-kpis { grid-template-columns: repeat(3, 1fr); }
   .wa-grid { grid-template-columns: 1fr; }
+  .taste-wrap { grid-template-columns: 1fr; }
+  .taste-radar { margin: 0 auto; }
 }
 @media (max-width: 640px) {
   .wa-kpis { grid-template-columns: repeat(2, 1fr); }

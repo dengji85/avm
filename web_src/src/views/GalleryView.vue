@@ -9,12 +9,11 @@ import { useTasks } from '../composables/useTasks.js'
 
 import MovieGrid from '../components/MovieGrid.vue'
 import MovieCard from '../components/MovieCard.vue'
-import Pager from '../components/Pager.vue'
 import BulkBar from '../components/BulkBar.vue'
 import MovieFilter from '../components/MovieFilter.vue'
 import ContextMenu from '../components/ContextMenu.vue'
 
-const { items, total, loading, pageCount, load, patchItem } = useLibrary()
+const { items, total, loading, loadingMore, hasMore, load, loadMore, patchItem } = useLibrary()
 const { runScan } = useTasks()
 
 const cont = ref([])
@@ -77,13 +76,15 @@ const showFilter = ref(false)
 
 /* 移动端沉浸式：向下浏览隐藏顶栏/工具栏；向上滑（哪怕一点）即显示，滚到顶部强制显示 */
 const navHidden = ref(false)
+const showTop = ref(false) // 无限滚动后回到顶部
 let vbEl = null
 let mqMobile = null
 let lastScrollTop = 0
 function onViewScroll() {
-  if (!mqMobile || !mqMobile.matches) { navHidden.value = false; return }
   if (!vbEl) return
   const st = vbEl.scrollTop
+  showTop.value = st > 900
+  if (!mqMobile || !mqMobile.matches) { navHidden.value = false; return }
   if (st <= 80) {
     // 接近顶部：始终显示
     navHidden.value = false
@@ -182,6 +183,7 @@ onUnmounted(() => {
   window.removeEventListener('scroll', closeCtx, true)
   if (vbEl) vbEl.removeEventListener('scroll', onViewScroll)
   if (mqMobile) mqMobile.removeEventListener('change', onViewScroll)
+  if (ioMore) { ioMore.disconnect(); ioMore = null }
   document.body.classList.remove('nav-hidden')
 })
 
@@ -228,10 +230,22 @@ function toggleRow(id) {
   state.selected = s
 }
 
-function goPage(p) {
-  state.page = p
-  document.querySelector('.view-body')?.scrollTo({ top: 0, behavior: 'smooth' })
+/** 无限滚动：底部哨兵进入视口即追加下一页 */
+const sentinel = ref(null)
+let ioMore = null
+
+function goTop() {
+  if (vbEl) vbEl.scrollTo({ top: 0, behavior: 'smooth' })
 }
+
+/* 换筛选/排序时回到顶部：否则停在底部会立刻连续触发好几页加载 */
+watch(
+  () => [state.q, state.actress.slice(), state.genre.slice(), state.tag.slice(), state.studio,
+         state.series, state.prefix, state.year, state.flags.slice(), state.multiOp,
+         state.minRating, state.sort],
+  () => { if (vbEl) vbEl.scrollTo({ top: 0 }) },
+  { deep: true },
+)
 
 function onBulkDone() {
   state.selected = new Set()
@@ -242,7 +256,25 @@ function onBulkDone() {
 onMounted(() => {
   load()
   loadContinue()
+  ioMore = new IntersectionObserver(
+    (entries) => { if (entries.some((e) => e.isIntersecting)) loadMore() },
+    { root: null, rootMargin: '700px 0px' },
+  )
+  if (sentinel.value) ioMore.observe(sentinel.value)
 })
+
+// 追加一批后重新观察：若哨兵仍在视口内（比如一页没填满屏幕）继续加载，避免卡住
+watch(
+  () => items.value.length,
+  () => {
+    if (!ioMore || !sentinel.value) return
+    nextTick(() => {
+      if (!ioMore || !sentinel.value) return
+      ioMore.unobserve(sentinel.value)
+      ioMore.observe(sentinel.value)
+    })
+  },
+)
 </script>
 
 <template>
@@ -304,7 +336,7 @@ onMounted(() => {
         <button class="btn tiny" :class="{ active: state.selMode }" @click="toggleSelMode">
           {{ state.selMode ? '退出多选' : '多选' }}
         </button>
-        <button v-if="state.selMode" class="btn tiny" @click="selectPage">选中本页</button>
+        <button v-if="state.selMode" class="btn tiny" @click="selectPage">选中已加载</button>
 
         <button class="btn tiny icon" @click="load()" data-tip="刷新">⟳</button>
       </div>
@@ -379,11 +411,26 @@ onMounted(() => {
             </div>
           </div>
 
-          <Pager :page="state.page" :page-count="pageCount" :total="total" @go="goPage" />
+          <!-- 无限滚动：滚到底自动追加下一页 -->
+          <div ref="sentinel" class="lib-sentinel" aria-hidden="true"></div>
+
+          <div v-if="!loading && items.length" class="lib-foot">
+            <template v-if="loadingMore">
+              <span class="spinner"></span>
+              <span class="ft-txt">{{ $t('gallery.loading') }}</span>
+            </template>
+            <button v-else-if="hasMore" class="btn tiny" @click="loadMore">
+              {{ $t('gallery.loadMore') }}
+            </button>
+            <span v-else class="ft-txt dim">{{ $t('gallery.loadedAll', { n: total }) }}</span>
+          </div>
         </section>
       </div>
 
       <BulkBar @done="onBulkDone" />
+
+      <!-- 无限滚动后一键回顶 -->
+      <button v-if="showTop" class="to-top" @click="goTop" :data-tip="$t('gallery.toTop')" :title="$t('gallery.toTop')">↑</button>
     </div>
 
     <ContextMenu
@@ -412,7 +459,35 @@ onMounted(() => {
   padding: 14px; background: var(--c-surface); border: 1px solid var(--c-line);
   border-radius: var(--r-lg);
 }
-.gallery-main { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
+.gallery-main { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; overflow: hidden; position: relative; }
+
+/* 无限滚动：底部哨兵与状态行 */
+.lib-sentinel { height: 1px; }
+.lib-foot {
+  display: flex; align-items: center; justify-content: center; gap: 8px;
+  padding: 18px 0 8px;
+  color: var(--c-text-3);
+}
+.ft-txt { font-size: 12px; }
+.ft-txt.dim { opacity: .75; }
+
+/* 回到顶部 */
+.to-top {
+  position: absolute;
+  right: 18px; bottom: 18px;
+  width: 38px; height: 38px;
+  display: grid; place-items: center;
+  border-radius: 50%;
+  border: 1px solid var(--c-line-strong);
+  background: var(--c-surface-3);
+  color: var(--c-text-2);
+  font-size: 17px;
+  cursor: pointer;
+  box-shadow: var(--sh-3, 0 8px 20px rgba(0, 0, 0, .35));
+  z-index: 20;
+  animation: rise-in var(--t-base, .18s);
+}
+.to-top:hover { color: #fff; background: var(--c-primary); border-color: var(--c-primary); }
 
 .back-detail {
   border-color: var(--c-primary);

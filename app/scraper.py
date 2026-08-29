@@ -103,7 +103,10 @@ def apply_metadata(conn, movie_id: int, meta: Dict[str, Any], cfg: Dict[str, Any
 
     cover_changed = False
     if cfg.get("cover", {}).get("download", True) and meta.get("cover"):
-        if overwrite or not current.get("cover"):
+        # 视频抽帧封面（cover_source='video'）视为临时占位，可被正式刮削图覆盖
+        can_override = (overwrite or not current.get("cover")
+                        or current.get("cover_source") == "video")
+        if can_override:
             cover_changed = bool(save_cover(conn, current, str(meta["cover"]), cfg,
                                             source=meta.get("source", "scrape")))
 
@@ -427,6 +430,30 @@ def _target_ids(conn, ids: Optional[List[int]], scope: str,
     return [r["mid"] for r in query_all(conn, sql, params)]
 
 
+def _extract_remaining_covers(conn, cfg: Dict[str, Any], total: int) -> int:
+    """刮削收尾：对仍无封面的影片，从视频抽帧兜底（临时占位封面）。
+    返回成功抽取的数量。受 cover.auto_extract 开关控制。"""
+    ffmpeg = (cfg.get("ffmpeg_path") or "ffmpeg").strip() or "ffmpeg"
+    ids = [r["id"] for r in query_all(
+        conn, "SELECT id FROM movies WHERE cover = '' AND has_code = 1")]
+    if not ids:
+        return 0
+    SCRAPE.message = f"正在为 {len(ids)} 部无封面影片从视频抽取封面…"
+    ok = 0
+    for i, mid in enumerate(ids):
+        if SCRAPE.cancelled:
+            break
+        try:
+            if store.extract_cover_from_video(conn, mid, ffmpeg):
+                ok += 1
+        except Exception:
+            pass
+        # 周期性刷新进度
+        if (i + 1) % 20 == 0 or i == len(ids) - 1:
+            SCRAPE.tick(f"封面抽取 {i + 1}/{len(ids)}")
+    return ok
+
+
 def run_scrape(ids: Optional[List[int]] = None, scope: str = "missing",
                overwrite: Optional[bool] = None, task_id: str = "",
                force: bool = False) -> Dict[str, Any]:
@@ -640,6 +667,13 @@ def run_scrape(ids: Optional[List[int]] = None, scope: str = "missing",
                     pool.shutdown(wait=False)
                 SCRAPE.message = f"已取消：完成 {done}/{SCRAPE.total}"
         conn.commit()
+        # —— 刮削收尾：为仍无封面的影片自动抽视频帧占位（受 cover.auto_extract 开关控制）——
+        if not SCRAPE.cancelled and bool(cfg.get("cover", {}).get("auto_extract", True)):
+            SCRAPE.phase = "cover_extract"
+            extracted = _extract_remaining_covers(conn, cfg, len(targets))
+            if extracted:
+                SCRAPE.counters["cover_extract"] = SCRAPE.counters.get("cover_extract", 0) + extracted
+            conn.commit()
     finally:
         conn.close()
 
@@ -658,10 +692,12 @@ def start_scrape_async(ids: Optional[List[int]] = None, scope: str = "missing",
             if not res.get("ok"):
                 SCRAPE.finish(SCRAPE.message or "抓取未执行")
             else:
+                extr = res.get('cover_extract', 0)
                 SCRAPE.finish(
                     "抓取已取消" if res.get("cancelled") else
                     f"完成：成功 {res.get('success', 0)}，未命中 {res.get('miss', 0)}，"
                     f"封面 {res.get('cover', 0) + res.get('cover_local', 0)}"
+                    + (f"，视频抽帧 {extr}" if extr else "")
                 )
         except Exception as exc:
             SCRAPE.error(str(exc))
@@ -672,17 +708,21 @@ def start_scrape_async(ids: Optional[List[int]] = None, scope: str = "missing",
 
 
 def batch_local_covers() -> Dict[str, int]:
-    """只做本地封面嗅探，不联网。"""
+    """本地封面嗅探；嗅探不到时自动从视频抽帧兜底。不联网。"""
     cfg = load_config()
+    ffmpeg = (cfg.get("ffmpeg_path") or "ffmpeg").strip() or "ffmpeg"
     conn = connect()
     found = 0
+    extracted = 0
     ids: List[int] = []
     try:
         ids = [r["id"] for r in query_all(conn, "SELECT id FROM movies WHERE cover = ''")]
         for mid in ids:
             if sniff_local_cover(conn, mid, cfg):
                 found += 1
+            elif store.extract_cover_from_video(conn, mid, ffmpeg):
+                extracted += 1
         conn.commit()
     finally:
         conn.close()
-    return {"checked": len(ids), "found": found}
+    return {"checked": len(ids), "found": found, "extracted": extracted}

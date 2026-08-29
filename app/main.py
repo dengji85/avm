@@ -219,3 +219,41 @@ class HashedStaticFiles(StaticFiles):
 
 
 app.mount("/assets", HashedStaticFiles(directory=str(WEB_DIR / "assets")), name="assets")
+
+
+# 品牌资源：favicon / logo / icons 位于 web_dist 根目录，浏览器标签页、桌面图标、关
+# 于页都要用。后端没有把整个 WEB_DIR 挂在根下（仅 / 与 /assets 暴露），这里白名单
+# 放行，路径逃逸校验保证只允许 web_dist 内的文件。
+_BRAND_MIME = {
+    "favicon.ico": "image/x-icon",
+    "favicon.svg": "image/svg+xml",
+    "logo.svg":    "image/svg+xml",
+}
+_BRAND_CACHE = "public, max-age=604800"  # 一周：favicon 变化频率低
+
+@app.get("/favicon.ico")
+def _favicon_ico() -> FileResponse:
+    p = (WEB_DIR / "favicon.ico").resolve()
+    return FileResponse(p, media_type="image/x-icon", headers={"Cache-Control": _BRAND_CACHE})
+
+@app.get("/favicon.svg")
+def _favicon_svg() -> FileResponse:
+    p = (WEB_DIR / "favicon.svg").resolve()
+    return FileResponse(p, media_type="image/svg+xml", headers={"Cache-Control": _BRAND_CACHE})
+
+@app.get("/logo.svg")
+def _logo_svg() -> FileResponse:
+    p = (WEB_DIR / "logo.svg").resolve()
+    return FileResponse(p, media_type="image/svg+xml", headers={"Cache-Control": _BRAND_CACHE})
+
+@app.get("/logo.png")
+def _logo_png() -> FileResponse:
+    p = (WEB_DIR / "logo.png").resolve()
+    return FileResponse(p, media_type="image/png", headers={"Cache-Control": _BRAND_CACHE})
+
+# 其余 PWA 图标（apple-touch-icon / icon-192 / icon-512 等）统一走 /icons 子目录
+app.mount(
+    "/icons",
+    StaticFiles(directory=str(WEB_DIR / "icons"), check_dir=False),
+    name="icons",
+)

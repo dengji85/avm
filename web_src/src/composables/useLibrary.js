@@ -11,8 +11,10 @@ export function useLibrary() {
   const items = ref([])
   const total = ref(0)
   const loading = ref(false)
+  const loadingMore = ref(false) // 无限滚动：追加下一页中
   const error = ref('')
   let reqSeq = 0
+  let loadedPage = 1 // 已加载到的页码（仅供无限滚动使用）
 
   const params = computed(() => ({
     q: state.q || undefined,
@@ -35,15 +37,20 @@ export function useLibrary() {
     Math.max(1, Math.ceil(total.value / (state.page_size || 60))),
   )
 
+  /** 还有下一页可追加（无限滚动用） */
+  const hasMore = computed(() => items.value.length < total.value)
+
   async function load() {
     const seq = ++reqSeq
     loading.value = true
+    loadingMore.value = false
     error.value = ''
     try {
       const r = await listMovies(params.value)
       if (seq !== reqSeq) return          // 丢弃过期响应
       items.value = r.items || []
       total.value = Number(r.total) || 0
+      loadedPage = state.page
       // 页码越界回退
       if (state.page > pageCount.value) {
         state.page = pageCount.value
@@ -56,6 +63,29 @@ export function useLibrary() {
       toast(error.value, 'err')
     } finally {
       if (seq === reqSeq) loading.value = false
+    }
+  }
+
+  /**
+   * 无限滚动：追加下一页。
+   * 刻意不改 state.page —— 否则会触发下面的分页 watch 把列表重置回单页。
+   */
+  async function loadMore() {
+    if (loading.value || loadingMore.value || !hasMore.value) return
+    const seq = ++reqSeq
+    loadingMore.value = true
+    try {
+      const r = await listMovies({ ...params.value, page: loadedPage + 1 })
+      if (seq !== reqSeq) return
+      const batch = r.items || []
+      items.value = items.value.concat(batch)
+      total.value = Number(r.total) || 0
+      loadedPage += 1
+    } catch (e) {
+      if (seq !== reqSeq) return
+      toast(e.message || '加载失败', 'err')
+    } finally {
+      if (seq === reqSeq) loadingMore.value = false
     }
   }
 
@@ -84,7 +114,7 @@ export function useLibrary() {
     if (i >= 0) { items.value.splice(i, 1); total.value = Math.max(0, total.value - 1) }
   }
 
-  return { items, total, loading, error, pageCount, load, reload, patchItem, removeItem }
+  return { items, total, loading, loadingMore, hasMore, error, pageCount, load, reload, loadMore, patchItem, removeItem }
 }
 
 /** 选择模式辅助 */

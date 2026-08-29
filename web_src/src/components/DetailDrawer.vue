@@ -4,12 +4,14 @@ import { state } from '../state.js'
 import {
   getMovie, updateMovie, deleteMovie, toggleFlag, playMovie,
   exportNfo, getPreviews, getSimilar, coverUrl, coverThumbUrl, uploadCover, clearCover,
+  extractCover,
   listTags, renameTag, deleteTag,
   aiGenerateSynopsis, aiSuggestTags, aiStatus,
+  getActress, avatarUrl,
 } from '../api.js'
 import AddToCollectionBtn from './AddToCollectionBtn.vue'
 import {
-  toast, confirmDialog, copyText, coverFallback, fmtSize, fmtDuration,
+  toast, confirmDialog, copyText, coverFallback, avatarFallback, fmtSize, fmtDuration,
   fmtDate, fmtAgo, qualityTag,
 } from '../utils.js'
 import { t } from '../i18n/index.js'
@@ -21,7 +23,7 @@ import ActressModal from './ActressModal.vue'
 
 const mv = ref(null)
 const loading = ref(false)
-const tab = ref('info')
+const tab = ref('preview')
 const playing = ref(false)
 const previews = ref([])
 const pvLoading = ref(false)
@@ -72,7 +74,7 @@ const quality = computed(() => qualityTag(mv.value?.resolution))
 async function load() {
   if (!id.value) return
   loading.value = true
-  tab.value = 'info'
+  tab.value = 'preview'
   playing.value = false
   previews.value = []
   similar.value = []
@@ -357,6 +359,19 @@ async function removeCover() {
   catch (e) { toast(e.message, 'err') }
 }
 
+// 从视频抽一帧作为封面（临时占位，刮削到正式海报时会被覆盖）
+const extracting = ref(false)
+const isVideoCover = computed(() => mv.value && mv.value.cover_source === 'video')
+async function extractFromVideo() {
+  extracting.value = true
+  try {
+    await extractCover(id.value)
+    bust.value = Date.now()
+    toast(t('detail.coverExtracted'), 'ok')
+  } catch (e) { toast(e.message, 'err') }
+  finally { extracting.value = false }
+}
+
 /* ---------- 跳转筛选 ---------- */
 function filterBy(key, value) {
   state.returnFromFilter = { id: id.value, title: (mv.value && (mv.value.title || mv.value.code)) || '' }
@@ -379,6 +394,90 @@ const actressModal = ref('')
 function openActress(name) {
   actressModal.value = name
 }
+
+/* ---------- 女优悬停预览（鼠标移到名字上显示基本信息浮层） ---------- */
+const hoverActress = ref('')      // 当前 hover 的女优名
+const hoverInfo = ref(null)       // 该女优的基本信息
+const hoverLoading = ref(false)
+const hoverShow = ref(false)
+const hoverPos = ref({ x: 0, y: 0 })
+const hoverDir = ref('down')      // down=chip 下方展开；up=上方展开
+let hoverTimer = null
+let hoverReq = 0                  // 防止快速切换时旧请求覆盖新结果
+
+async function actressHoverStart(name, ev) {
+  const rect = ev && ev.currentTarget && ev.currentTarget.getBoundingClientRect()
+  if (rect) {
+    // 下方空间足够则向下展开，否则向上翻转，避免溢出视口
+    const vh = window.innerHeight || document.documentElement.clientHeight
+    const down = rect.bottom + 8 + 320 <= vh
+    hoverDir.value = down ? 'down' : 'up'
+    hoverPos.value = down
+      ? { x: rect.left, y: rect.bottom + 8 }
+      : { x: rect.left, y: rect.top - 8 }
+  }
+  hoverActress.value = name
+  hoverShow.value = false
+  hoverInfo.value = null
+  // 小延迟，避免快速扫过就弹
+  clearTimeout(hoverTimer)
+  hoverTimer = setTimeout(async () => {
+    if (hoverActress.value !== name) return
+    hoverShow.value = true
+    hoverLoading.value = true
+    const reqId = ++hoverReq
+    try {
+      const r = await getActress(name, 1, 1)
+      if (reqId === hoverReq && hoverActress.value === name) {
+        hoverInfo.value = (r && r.info) || null
+      }
+    } catch (e) {
+      if (reqId === hoverReq) hoverInfo.value = null
+    } finally {
+      if (reqId === hoverReq) hoverLoading.value = false
+    }
+  }, 200)
+}
+let hoverCloseTimer = null
+// 鼠标移出 chip / 浮层时：延迟一小段再关闭，给鼠标留出从 chip 滑到浮层的时间
+function scheduleHoverEnd() {
+  clearTimeout(hoverTimer)
+  clearTimeout(hoverCloseTimer)
+  hoverCloseTimer = setTimeout(() => {
+    hoverActress.value = ''
+    hoverShow.value = false
+    hoverInfo.value = null
+  }, 200)
+}
+// 鼠标进入浮层：取消关闭，允许在浮层内滚动/阅读
+function cancelHoverEnd() {
+  clearTimeout(hoverCloseTimer)
+}
+// 立即关闭（供切换 chip 等场景）
+function actressHoverEnd() {
+  clearTimeout(hoverTimer)
+  clearTimeout(hoverCloseTimer)
+  hoverActress.value = ''
+  hoverShow.value = false
+  hoverInfo.value = null
+}
+const hoverAvatar = computed(() => {
+  const i = hoverInfo.value
+  if (!i) return ''
+  if (i.avatar) return avatarUrl(i.avatar)
+  return i.sample_id ? coverThumbUrl(i.sample_id, 240) : ''
+})
+const hoverMeasure = computed(() => {
+  const i = hoverInfo.value
+  if (!i) return ''
+  return [i.bust, i.waist, i.hip].filter(Boolean).join(' / ')
+})
+const hoverAge = computed(() => {
+  const b = hoverInfo.value && hoverInfo.value.birthday
+  if (!b) return null
+  const y = Number(String(b).slice(0, 4))
+  return y ? Math.max(0, new Date().getFullYear() - y) : null
+})
 
 /* ---------- 跳转筛选（按自定义标签） ---------- */
 function filterByTag(tag) {
@@ -450,8 +549,10 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', onKey) })
               <div class="dd-cover">
                 <img :src="coverSrc" alt="" @error="coverFallback" @click="lightbox = coverSrc" />
                 <div v-if="progressPct > 0" class="cw-bar"><i :style="{ width: progressPct + '%' }"></i></div>
+                <span v-if="isVideoCover" class="cover-src-badge" :title="$t('detail.videoCoverTip')">{{ $t('detail.videoCover') }}</span>
                 <div class="cov-acts">
                   <button class="btn tiny" @click="fileInput.click()">{{ $t('detail.changeCover') }}</button>
+                  <button class="btn tiny" :disabled="extracting" @click="extractFromVideo">{{ $t('detail.extractCover') }}</button>
                   <button class="btn tiny ghost" @click="removeCover">{{ $t('detail.clearCover') }}</button>
                   <input ref="fileInput" type="file" accept="image/*" hidden @change="onUpload" />
                 </div>
@@ -503,8 +604,15 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', onKey) })
                 <dl class="dd-facts">
                   <template v-if="mv.actresses && mv.actresses.length">
                     <dt>{{ $t('detail.fActress') }}</dt>
-                    <dd class="chip-list">
-                      <button v-for="a in mv.actresses" :key="a" class="chip" @click="openActress(a)">{{ a }}</button>
+                    <dd class="chip-list actress-list">
+                      <button
+                        v-for="a in mv.actresses"
+                        :key="a"
+                        class="chip actress-chip"
+                        @click="openActress(a)"
+                        @mouseenter="actressHoverStart(a, $event)"
+                        @mouseleave="scheduleHoverEnd"
+                      >{{ a }}</button>
                     </dd>
                   </template>
                   <template v-if="mv.genres && mv.genres.length">
@@ -601,8 +709,8 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', onKey) })
 
             <!-- 标签页 -->
             <div class="tabs dd-tabs">
-              <button class="tab" :class="{ on: tab === 'info' }" @click="tab = 'info'">{{ $t('detail.tabInfo') }}</button>
               <button class="tab" :class="{ on: tab === 'preview' }" @click="tab = 'preview'">{{ $t('detail.tabPreview') }}</button>
+              <button class="tab" :class="{ on: tab === 'info' }" @click="tab = 'info'">{{ $t('detail.tabInfo') }}</button>
               <button class="tab" :class="{ on: tab === 'files' }" @click="tab = 'files'">{{ $t('detail.tabFiles') }}</button>
               <div class="spacer"></div>
               <button class="btn tiny ghost" @click="doScrape" :disabled="loading">{{ $t('detail.rescrape') }}</button>
@@ -707,6 +815,38 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', onKey) })
 
     <!-- 女优弹框：在详情页内查看女优介绍，不关闭当前详情 -->
     <ActressModal v-if="actressModal" :ident="actressModal" @close="actressModal = ''" />
+
+    <!-- 女优悬停预览浮层（鼠标移到女优名字上显示基本信息） -->
+    <transition name="fade">
+      <div
+        v-if="hoverShow"
+        class="actress-pop"
+        :class="{ up: hoverDir === 'up' }"
+        :style="{ left: hoverPos.x + 'px', top: hoverPos.y + 'px' }"
+        @mouseenter="cancelHoverEnd"
+        @mouseleave="scheduleHoverEnd"
+      >
+        <div v-if="hoverLoading" class="actress-pop-load"><span class="spinner sm"></span></div>
+        <template v-else-if="hoverInfo">
+          <div class="ap-head">
+            <img v-if="hoverAvatar" class="ap-av" :src="hoverAvatar" alt="" @error="avatarFallback" />
+            <div class="ap-id">
+              <div class="ap-name">{{ hoverInfo.name || hoverActress }}</div>
+              <div v-if="hoverInfo.alias" class="ap-alias">{{ hoverInfo.alias }}</div>
+            </div>
+          </div>
+          <div v-if="hoverInfo.birthday || hoverInfo.height || hoverMeasure" class="ap-attr">
+            <span v-if="hoverInfo.birthday">{{ hoverInfo.birthday }}<template v-if="hoverAge != null">（{{ hoverAge }}岁）</template></span>
+            <span v-if="hoverInfo.height">{{ hoverInfo.height }}cm</span>
+            <span v-if="hoverMeasure">{{ hoverMeasure }}</span>
+            <span v-if="hoverInfo.cup">罩杯 {{ hoverInfo.cup }}</span>
+            <span v-if="hoverInfo.birthplace">{{ hoverInfo.birthplace }}</span>
+          </div>
+          <p v-if="hoverInfo.profile" class="ap-text">{{ hoverInfo.profile }}</p>
+        </template>
+        <div v-else class="ap-none">{{ $t('detail.noActressInfo') }}</div>
+      </div>
+    </transition>
   </Teleport>
 </template>
 
@@ -779,6 +919,14 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', onKey) })
 }
 .cw-bar { position: absolute; left: 0; right: 0; bottom: 40px; height: 3px; background: rgba(0,0,0,.5); }
 .cw-bar > i { display: block; height: 100%; background: var(--c-primary); }
+.cover-src-badge {
+  position: absolute; top: 6px; left: 6px; z-index: 2;
+  font-size: 10px; line-height: 1; padding: 3px 6px;
+  border-radius: 4px; color: #fff;
+  background: color-mix(in srgb, var(--c-primary) 80%, #000);
+  box-shadow: 0 1px 4px rgba(0,0,0,.35);
+  pointer-events: none;
+}
 .cov-acts { display: flex; gap: var(--sp-2); margin-top: var(--sp-2); }
 
 .dd-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: var(--sp-2); }
@@ -812,6 +960,31 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', onKey) })
 .dd-facts dt { color: var(--c-text-3); font-size: var(--fs-xs); }
 .dd-facts dd { margin: 0; min-width: 0; color: var(--c-text-1); }
 .dd-facts a { cursor: pointer; }
+
+/* 女优悬停预览浮层 */
+.actress-chip { position: relative; z-index: 1; }
+.actress-pop {
+  position: fixed; z-index: 1200;
+  width: 300px; max-height: 320px; overflow-y: auto;
+  padding: var(--sp-3); border-radius: var(--r-md);
+  background: var(--c-surface); border: 1px solid var(--c-line-strong);
+  box-shadow: var(--sh-2);
+  /* 默认从 chip 下方展开；若下方空间不足则向上展开，避免溢出屏幕 */
+  max-height: 320px;
+}
+.actress-pop.up { transform: translateY(-100%); }
+.actress-pop:empty { display: none; }
+.actress-pop-load { padding: var(--sp-3); text-align: center; }
+.ap-head { display: flex; align-items: center; gap: var(--sp-3); }
+.ap-av { width: 56px; height: 56px; border-radius: 50%; object-fit: cover; background: var(--c-surface-2); border: 2px solid var(--c-line); flex: none; }
+.ap-id { min-width: 0; }
+.ap-name { font-weight: 650; color: var(--c-text); }
+.ap-alias { font-size: var(--fs-xs); color: var(--c-text-3); margin-top: 1px; }
+.ap-attr { display: flex; flex-wrap: wrap; gap: 3px 12px; margin-top: var(--sp-2); font-size: var(--fs-sm); color: var(--c-text-2); }
+.ap-text { margin-top: var(--sp-2); font-size: var(--fs-sm); color: var(--c-text-2); line-height: 1.6; white-space: pre-line; max-height: 9em; overflow-y: auto; }
+.ap-none { padding: var(--sp-2) 0; font-size: var(--fs-sm); color: var(--c-text-3); }
+.fade-enter-active, .fade-leave-active { transition: opacity .12s ease; }
+.fade-enter-from, .fade-leave-to { opacity: 0; }
 
 .dd-tabs { padding: 0 var(--sp-5); align-items: center; gap: var(--sp-2); border-top: 1px solid var(--c-line); }
 .dd-pane { padding: var(--sp-4) var(--sp-5) var(--sp-6); }

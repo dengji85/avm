@@ -1,5 +1,5 @@
 <script setup>
-import { ref, computed } from 'vue'
+import { ref, computed, watch, onBeforeUnmount } from 'vue'
 import { state } from '../state.js'
 import { batchMovies, startScrape, addToCollection, listCollections, listTags, createCollection } from '../api.js'
 import { toast, confirmDialog } from '../utils.js'
@@ -18,6 +18,20 @@ const newCollName = ref('')
 
 const ids = computed(() => Array.from(state.selected))
 const n = computed(() => ids.value.length)
+
+/* 上报底部占用高度：批量栏出现时，迷你播放条与 toast 依次上移，避免叠在一起 */
+watch(
+  () => n.value,
+  (v) => {
+    if (typeof document !== 'undefined') {
+      document.documentElement.style.setProperty('--dock-bulk', v ? '56px' : '0px')
+    }
+  },
+  { immediate: true },
+)
+onBeforeUnmount(() => {
+  if (typeof document !== 'undefined') document.documentElement.style.setProperty('--dock-bulk', '0px')
+})
 
 function clear() {
   state.selected = new Set()

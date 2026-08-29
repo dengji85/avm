@@ -9,6 +9,9 @@ import NavMenu from './NavMenu.vue'
 
 const emit = defineEmits(['search'])
 const { anyRunning, activeTasks, lastFinished, taskHistory, overallPct, abort, clearHistory } = useTasks()
+
+/* 品牌图标 */
+const logoUrl = `${import.meta.env.BASE_URL}logo.svg`
 const showScrapeLogs = ref(null)   // 当前展开的明细所属任务 key（或历史 id）
 const openHistory = ref(new Set()) // 展开的历史记录 id 集合
 
@@ -150,7 +153,7 @@ async function setScrapeFilter(taskId, f) {
     <button class="btn ghost icon only-mobile" @click="state.mobileNavOpen = !state.mobileNavOpen" :data-tip="$t('nav.menu')">☰</button>
 
     <div class="brand" @click="state.view = 'home'">
-      <div class="logo">匣</div>
+      <img class="logo" :src="logoUrl" :alt="$t('nav.brand')" />
       <span class="brand-text">{{ $t('nav.brand') }}</span>
     </div>
 

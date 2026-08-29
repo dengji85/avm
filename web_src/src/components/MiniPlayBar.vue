@@ -40,8 +40,18 @@ watch(() => state.playQueue.open, (open) => {
   if (open) expanded.value = false
 })
 
-onMounted(() => { scheduleHide() })
-onBeforeUnmount(() => clearTimeout(hideTimer))
+/* 上报底部占用高度，让 toast 等底部浮层上移避让（展开态条更高） */
+function syncDock() {
+  if (typeof document === 'undefined') return
+  document.documentElement.style.setProperty('--dock-mini', expanded.value ? '72px' : '48px')
+}
+
+watch(expanded, syncDock)
+onMounted(() => { scheduleHide(); syncDock() })
+onBeforeUnmount(() => {
+  clearTimeout(hideTimer)
+  if (typeof document !== 'undefined') document.documentElement.style.setProperty('--dock-mini', '0px')
+})
 </script>
 
 <template>
@@ -81,7 +91,10 @@ onBeforeUnmount(() => clearTimeout(hideTimer))
 
 <style scoped>
 .mpb {
-  position: fixed; left: 50%; bottom: 16px; transform: translateX(-50%);
+  position: fixed; left: 50%;
+  bottom: calc(16px + var(--dock-bulk, 0px)); /* 批量操作栏出现时整体上移 */
+  transform: translateX(-50%);
+  transition: bottom var(--t-base, .2s);
   z-index: 150;
   display: flex; align-items: center; gap: var(--sp-3);
   width: min(560px, 94vw);
@@ -102,7 +115,10 @@ onBeforeUnmount(() => clearTimeout(hideTimer))
 
 /* 收起的悬浮点 */
 .mpb-dot {
-  position: fixed; left: 50%; bottom: 20px; transform: translateX(-50%);
+  position: fixed; left: 50%;
+  bottom: calc(20px + var(--dock-bulk, 0px));
+  transform: translateX(-50%);
+  transition: bottom var(--t-base, .2s);
   z-index: 150;
   display: flex; align-items: center; gap: 8px;
   padding: 4px;

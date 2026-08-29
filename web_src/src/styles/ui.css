@@ -363,8 +363,11 @@ input[type='range'] { accent-color: var(--c-primary); cursor: pointer; height: a
 /* ---------------- Toast ---------------- */
 .toast-layer {
   position: fixed;
-  left: 50%; bottom: var(--sp-6);
+  left: 50%;
+  /* 底部有迷你播放条 / 批量栏时自动上移，避免被遮挡 */
+  bottom: calc(var(--sp-6) + var(--dock-mini, 0px) + var(--dock-bulk, 0px));
   transform: translateX(-50%);
+  transition: bottom var(--t-base, .2s);
   z-index: var(--z-toast);
   display: flex; flex-direction: column; gap: var(--sp-2);
   align-items: center;

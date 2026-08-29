@@ -269,6 +269,9 @@ watch(() => state.playQueue.open, (open) => {
 
 .pl-stage { flex: 1; min-height: 0; display: flex; background: #000; }
 .pl-stage :deep(.player) { flex: 1; }
+/* 播放列表页里让播放器占满舞台剩余高度，而不是 VideoPlayer 默认的固定 70vh */
+.pl-stage :deep(.vjs-wrap) { flex: 1; height: 100% !important; }
+.pl-stage :deep(.video-js) { height: 100% !important; }
 .pl-empty { flex: 1; display: grid; place-items: center; color: var(--c-text-3); }
 
 .pl-side {

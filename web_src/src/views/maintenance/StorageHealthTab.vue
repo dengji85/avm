@@ -1,7 +1,7 @@
 <script setup>
 import { ref, reactive, computed, onMounted } from 'vue'
 import { state } from '../../state.js'
-import { getStorage, getIntegrity, getHealthCheck, getDedup, resolveDedup, getQuality, sniffCovers } from '../../api.js'
+import { getStorage, getIntegrity, getHealthCheck, getDedup, resolveDedup, getQuality, sniffCovers, getSoftwareStorage, cleanSoftwareStorage } from '../../api.js'
 import { toast, confirmDialog, fmtSize } from '../../utils.js'
 import { t } from '../../i18n/index.js'
 import PageHead from '../../components/PageHead.vue'
@@ -58,6 +58,66 @@ async function cleanQuality(it) {
 }
 async function doSniff() { try { const r = await sniffCovers(); toast(t('maint.sniffMatched', { n: (r && r.matched) || 0 }), 'ok'); await load() } catch (e) { toast(e.message, 'err') } }
 
+/* ---------------- 软件数据占用与清理 ---------------- */
+const sw = ref(null)
+const swLoading = ref(false)
+const swCleaning = ref(false)
+async function loadSoftware() {
+  swLoading.value = true
+  try { sw.value = await getSoftwareStorage() } catch (e) { toast(e.message, 'err') }
+  finally { swLoading.value = false }
+}
+const DIR_ORDER = ['covers', 'previews', 'avatars', 'fanarts', 'temp', 'db', 'config']
+const DIR_LABELS = {
+  covers: 'maint.swCovers', previews: 'maint.swPreviews', avatars: 'maint.swAvatars',
+  fanarts: 'maint.swFanarts', temp: 'maint.swTemp', db: 'maint.swDb', config: 'maint.swConfig',
+}
+const swDirs = computed(() => {
+  if (!sw.value) return []
+  const map = {}
+  ;(sw.value.dirs || []).forEach((d) => { map[d.label] = d })
+  return DIR_ORDER.filter((k) => map[k]).map((k) => map[k])
+})
+async function cleanOne(target, key) {
+  const cfg = {
+    temp: { title: t('maint.cleanTempTitle'), desc: t('maint.cleanTempDesc') },
+    preview_orphan: { title: t('maint.cleanOrphanTitle'), desc: t('maint.cleanOrphanDesc') },
+    preview_all: { title: t('maint.cleanPreviewTitle'), desc: t('maint.cleanPreviewDesc'), danger: true },
+    db_vacuum: { title: t('maint.cleanDbTitle'), desc: t('maint.cleanDbDesc') },
+  }[key]
+  const size = (sw.value && sw.value.cleanable[key] && sw.value.cleanable[key].bytes) || 0
+  const ok = await confirmDialog(cfg.title, cfg.desc, { danger: !!cfg.danger, okText: t('maint.confirmClean') })
+  if (!ok) return
+  swCleaning.value = true
+  try {
+    const r = await cleanSoftwareStorage([target])
+    toast(t('maint.cleaned', { n: r.removed || 0 }), 'ok')
+    await loadSoftware()
+  } catch (e) { toast(e.message, 'err') }
+  finally { swCleaning.value = false }
+}
+async function cleanAllSafe() {
+  const clean = sw.value && sw.value.cleanable
+  const n = (clean && clean.temp ? clean.temp.files : 0) + (clean && clean.preview_orphan ? clean.preview_orphan.files : 0)
+  const ok = await confirmDialog(t('maint.cleanSafeTitle'), t('maint.cleanSafeDesc', { n }), { danger: true, okText: t('maint.confirmClean') })
+  if (!ok) return
+  swCleaning.value = true
+  try {
+    const r = await cleanSoftwareStorage(['temp', 'preview_orphan', 'db_vacuum'])
+    toast(t('maint.cleaned', { n: r.removed || 0 }), 'ok')
+    await loadSoftware(); await load()
+  } catch (e) { toast(e.message, 'err') }
+  finally { swCleaning.value = false }
+}
+function cleanableFiles(key) {
+  const c = sw.value && sw.value.cleanable && sw.value.cleanable[key]
+  return (c && c.files) || 0
+}
+function cleanableBytes(key) {
+  const c = sw.value && sw.value.cleanable && sw.value.cleanable[key]
+  return (c && c.bytes) || 0
+}
+
 const QUALITY_GROUPS = [
   ['ad', 'maint.qAd', 'maint.qAdDesc', 'warn'],
   ['low_bitrate', 'maint.qLowBitrate', 'maint.qLowBitrateDesc', 'warn'],
@@ -86,7 +146,7 @@ const yearBars = computed(() => bars(st.by_year, 'bytes', 'year'))
 const healthCount = (k) => (health.value && health.value.counts && health.value.counts[k]) || 0
 const healthList = (k) => (health.value && health.value[k]) || []
 
-onMounted(load)
+onMounted(() => { load(); loadSoftware() })
 </script>
 
 <template>
@@ -96,6 +156,50 @@ onMounted(load)
       <div v-for="c in cards" :key="c.l" class="stat-card" :class="c.tone">
         <div class="stat-value">{{ c.v }}</div>
         <div class="stat-label">{{ $t(c.l) }}</div>
+      </div>
+    </div>
+
+    <!-- 软件数据占用与清理 -->
+    <div class="panel">
+      <div class="panel-head">
+        {{ $t('maint.swTitle') }}
+        <span class="sub">{{ $t('maint.swSub') }}</span>
+        <div class="spacer"></div>
+        <button class="btn tiny" :disabled="swLoading || swCleaning" @click="loadSoftware">{{ $t('maint.swRefresh') }}</button>
+      </div>
+      <div class="panel-body">
+        <div v-if="swLoading" class="empty compact"><span class="spinner large"></span></div>
+        <template v-else-if="sw">
+          <div class="sw-cards">
+            <div v-for="d in swDirs" :key="d.label" class="sw-card">
+              <div class="sw-name">{{ $t(DIR_LABELS[d.label] || d.label) }}</div>
+              <div class="sw-size">{{ fmtSize(d.bytes) }}</div>
+              <div class="sw-files">{{ d.files }} {{ $t('maint.files') }}</div>
+            </div>
+          </div>
+          <div class="sw-total">
+            {{ $t('maint.swTotal') }}：<b>{{ fmtSize(sw.total.bytes) }}</b>
+            <span class="muted">（{{ sw.total.files }} {{ $t('maint.files') }}）</span>
+          </div>
+
+          <div class="sw-clean">
+            <div class="sw-clean-title">{{ $t('maint.swCleanable') }}</div>
+            <div v-if="!cleanableFiles('temp') && !cleanableFiles('preview_orphan')" class="muted sm">{{ $t('maint.swCleanNone') }}</div>
+            <div v-if="cleanableFiles('temp')" class="sw-clean-item">
+              <span>{{ $t('maint.cleanTemp') }} · {{ fmtSize(cleanableBytes('temp')) }}</span>
+              <button class="btn tiny" :disabled="swCleaning" @click="cleanOne('temp','temp')">{{ $t('maint.clean') }}</button>
+            </div>
+            <div v-if="cleanableFiles('preview_orphan')" class="sw-clean-item">
+              <span>{{ $t('maint.cleanOrphan') }} · {{ fmtSize(cleanableBytes('preview_orphan')) }}</span>
+              <button class="btn tiny" :disabled="swCleaning" @click="cleanOne('preview_orphan','preview_orphan')">{{ $t('maint.clean') }}</button>
+            </div>
+            <div class="sw-clean-row">
+              <button class="btn tiny danger" :disabled="swCleaning" @click="cleanAllSafe">{{ $t('maint.cleanSafe') }}</button>
+              <button class="btn tiny" :disabled="swCleaning" @click="cleanOne('db_vacuum','db_vacuum')">{{ $t('maint.cleanDb') }}</button>
+              <button class="btn tiny" :disabled="swCleaning" @click="cleanOne('preview_all','preview_all')">{{ $t('maint.cleanPreview') }}</button>
+            </div>
+          </div>
+        </template>
       </div>
     </div>
 
@@ -246,6 +350,17 @@ onMounted(load)
 <style scoped>
 .sh { display: flex; flex-direction: column; gap: var(--sp-4); }
 .dist-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: var(--sp-4); }
+.sw-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: var(--sp-2); margin-bottom: var(--sp-3); }
+.sw-card { display: flex; flex-direction: column; gap: 2px; padding: var(--sp-2) var(--sp-3); border-radius: var(--r-md); background: var(--c-surface-2); border: 1px solid var(--c-line); }
+.sw-name { font-size: var(--fs-xs); color: var(--c-text-3); }
+.sw-size { font-size: var(--fs-md); font-weight: 650; color: var(--c-text); font-family: var(--font-mono, monospace); }
+.sw-files { font-size: var(--fs-xs); color: var(--c-text-3); }
+.sw-total { margin-bottom: var(--sp-3); font-size: var(--fs-md); }
+.sw-total b { font-family: var(--font-mono, monospace); }
+.sw-clean { padding-top: var(--sp-3); border-top: 1px dashed var(--c-line); display: flex; flex-direction: column; gap: var(--sp-2); }
+.sw-clean-title { font-weight: 600; font-size: var(--fs-md); }
+.sw-clean-item { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-2); font-size: var(--fs-sm); color: var(--c-text-2); }
+.sw-clean-row { display: flex; gap: var(--sp-2); flex-wrap: wrap; margin-top: var(--sp-1); }
 .empty.compact { padding: var(--sp-6) var(--sp-4); }
 .hs-row { display: flex; flex-wrap: wrap; gap: var(--sp-2); }
 .hs-card { display: flex; flex-direction: column; align-items: center; min-width: 92px; padding: var(--sp-2) var(--sp-3); border-radius: var(--r-md); background: var(--c-surface-2); border: 1px solid var(--c-line); cursor: pointer; transition: all var(--t-fast); }

@@ -10,6 +10,7 @@ const props = defineProps({
   movie: { type: Object, required: true },
   selectable: { type: Boolean, default: true },
   mode: { type: String, default: 'grid' }, // 'grid' | 'waterfall'
+  reason: { type: String, default: '' },   // 推荐理由（猜你喜欢场景，可选）
 })
 const emit = defineEmits(['open', 'changed'])
 
@@ -173,6 +174,7 @@ async function play(e) {
         <span v-if="m.studio" class="ellipsis">{{ m.studio }}</span>
         <span v-else class="dim">{{ fmtSize(m.size_bytes) }}</span>
       </div>
+      <div v-if="reason" class="card-reason" :title="reason"><span class="cr-ico">✦</span>{{ reason }}</div>
     </div>
   </article>
 </template>
@@ -229,6 +231,19 @@ async function play(e) {
   filter: brightness(1.2);
   opacity: 1;
 }
+
+/* 推荐理由（猜你喜欢） */
+.card-reason {
+  display: flex; align-items: center; gap: 4px;
+  margin-top: 4px;
+  font-size: 10px;
+  line-height: 1.35;
+  color: var(--c-text-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+}
+.card-reason .cr-ico { color: var(--c-gold, #f0b429); flex: none; }
 
 /* 卡片 meta 区：女优可点击筛选 */
 .meta-act {

@@ -159,3 +159,22 @@ export function qualityTag(resolution) {
   if (h >= 700) return '720P'
   return 'SD'
 }
+
+/**
+ * 把推荐的 reasons 数组转成一句人话（取权重最高的 1~2 条）。
+ * t 为 i18n 翻译函数（作为参数传入，避免 utils 与 i18n 循环依赖）。
+ */
+export function recommendReason(reasons, t, max = 2) {
+  const list = (reasons || []).filter((x) => x && x.kind)
+  if (!list.length || typeof t !== 'function') return ''
+  const one = (r) => {
+    if (r.kind === 'genre') return t('swipe.why_genre', { name: r.name })
+    if (r.kind === 'actress') return t('swipe.why_actress', { name: r.name })
+    if (r.kind === 'studio') return t('swipe.why_studio', { name: r.name })
+    if (r.kind === 'series') return t('swipe.why_series', { name: r.name })
+    if (r.kind === 'runtime') return t('swipe.why_runtime')
+    if (r.kind === 'year') return t('swipe.why_year')
+    return ''
+  }
+  return list.slice(0, max).map(one).filter(Boolean).join(' · ')
+}

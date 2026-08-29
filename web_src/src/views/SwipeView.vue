@@ -1,14 +1,15 @@
 <script setup>
 import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
 import { state } from '../state.js'
-import { listMovies, updateMovie, coverUrl, coverThumbUrl } from '../api.js'
-import { toast, coverFallback, fmtMin, qualityTag } from '../utils.js'
+import { listMovies, updateMovie, coverUrl, coverThumbUrl, getRecommend } from '../api.js'
+import { toast, coverFallback, fmtMin, qualityTag, recommendReason } from '../utils.js'
+import { t } from '../i18n/index.js'
 
 const deck = ref([])
 const idx = ref(0)
 const loading = ref(false)
 const started = ref(false)
-const mode = ref('unrated')
+const mode = ref('recommend')
 const stats = ref({ rated: 0, skipped: 0, faved: 0 })
 
 /* 拖拽 */
@@ -17,6 +18,7 @@ const dragging = ref(false)
 let startX = 0
 
 const MODES = [
+  ['recommend', 'swipe.recommend', { recommend: true }],
   ['unrated', 'swipe.unrated', { sort: 'added_desc' }],
   ['unwatched', 'swipe.unwatched', { flags: 'unwatched' }],
   ['random', 'swipe.random', { sort: 'random' }],
@@ -41,10 +43,23 @@ async function start() {
   stats.value = { rated: 0, skipped: 0, faved: 0 }
   try {
     const m = MODES.find((x) => x[0] === mode.value)
-    const r = await listMovies(Object.assign({ page: 1, page_size: 100 }, m ? m[2] : {}))
-    deck.value = r.items || []
+    const p = m ? m[2] : {}
+    if (p.recommend) {
+      // 口味加权推荐：按观看历史打分后加权随机，附带推荐理由
+      const r = await getRecommend({ limit: 60, exclude_watched: true })
+      deck.value = r.items || []
+      if (!r.has_history) toast(t('swipe.noHistory'), '')
+    } else {
+      const r = await listMovies(Object.assign({ page: 1, page_size: 100 }, p))
+      deck.value = r.items || []
+    }
     if (!deck.value.length) toast(t('swipe.noMatch'), 'err')
   } catch (e) { toast(e.message, 'err'); deck.value = [] } finally { loading.value = false }
+}
+
+/** 推荐理由文案（共用 utils 实现） */
+function reasonText(reasons) {
+  return recommendReason(reasons, t)
 }
 
 function advance() {
@@ -181,6 +196,9 @@ function openDetail() { if (cur.value) state.currentId = cur.value.id }
               <span v-if="cur.duration_minutes"> · {{ fmtMin(cur.duration_minutes) }}</span>
               <span v-if="qualityTag(cur.resolution)"> · {{ qualityTag(cur.resolution) }}</span>
             </div>
+            <div v-if="mode==='recommend' && reasonText(cur.reasons)" class="sw-why">
+              <span class="sw-why-ico">✦</span>{{ reasonText(cur.reasons) }}
+            </div>
           </div>
         </div>
 
@@ -247,6 +265,15 @@ function openDetail() { if (cur.value) state.currentId = cur.value.id }
 }
 .sw-title { font-size: var(--fs-lg); font-weight: 600; line-height: 1.4; }
 .sw-sub { font-size: var(--fs-sm); opacity: .78; margin-top: 3px; }
+/* 推荐理由（猜你喜欢） */
+.sw-why {
+  display: flex; align-items: center; gap: 5px;
+  margin-top: 6px;
+  font-size: var(--fs-xs);
+  color: #fff;
+  opacity: .92;
+}
+.sw-why-ico { color: var(--c-gold, #f0b429); font-size: 11px; }
 
 .sw-hint {
   position: absolute; top: var(--sp-5);

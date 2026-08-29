@@ -1,33 +1,16 @@
 <script setup>
-import { ref, onMounted } from 'vue'
+import { ref } from 'vue'
 import { state, openPlayQueue, NAV_ICONS } from '../state.js'
-import { getContinueWatching, listMovies, playMovie, getSimilar } from '../api.js'
-import { toast } from '../utils.js'
-import MovieCard from '../components/MovieCard.vue'
-import EmptyState from '../components/EmptyState.vue'
+import {
+  listMovies, playMovie, getContinueWatching, getRecommend,
+} from '../api.js'
+import { toast, recommendReason } from '../utils.js'
+import { t } from '../i18n/index.js'
+import MovieRail from '../components/MovieRail.vue'
 import PageHead from '../components/PageHead.vue'
+import EmptyState from '../components/EmptyState.vue'
 
-/* 续看 */
-const cw = ref([])
-const cwLoading = ref(true)
-const cwError = ref('')
-
-/* 最近添加 */
-const recent = ref([])
-const recentLoading = ref(true)
-const recentError = ref('')
-
-/* 随机看看 */
-const randomList = ref([])
-const randomLoading = ref(true)
-const randomError = ref('')
-
-/* 猜你喜欢（基于最近观看做相似推荐） */
-const similarList = ref([])
-const similarLoading = ref(true)
-const similarError = ref('')
-
-/* 随机播放（一键开播一部随机影片） */
+/* ---------- 随机播放（一键开播一部随机影片） ---------- */
 const shuffling = ref(false)
 async function shufflePlay() {
   if (shuffling.value) return
@@ -45,81 +28,68 @@ async function shufflePlay() {
   }
 }
 
-async function loadContinue() {
-  cwLoading.value = true
-  cwError.value = ''
-  try {
-    const r = await getContinueWatching()
-    cw.value = Array.isArray(r) ? r : (r.items || [])
-  } catch (e) {
-    cwError.value = e.message || '加载失败'
-  } finally {
-    cwLoading.value = false
-  }
+/* ---------- 区块数据源 ----------
+ * 统一为 (page, pageSize) => { items, total?, has_more? }，
+ * 由 MovieRail 负责翻页展示与按需追加。
+ * 一次性接口（继续观看 / 猜你喜欢）返回 has_more: false，只做翻页不追加。
+ */
+const RAIL_SIZE = 12
+
+const cwItems = ref([])
+const fetchContinue = async () => {
+  const r = await getContinueWatching(30)
+  return { items: Array.isArray(r) ? r : (r.items || []), has_more: false }
 }
 
-async function loadRecent() {
-  recentLoading.value = true
-  recentError.value = ''
-  try {
-    const r = await listMovies({ sort: 'new', page: 1, page_size: 12 })
-    recent.value = r.items || []
-  } catch (e) {
-    recentError.value = e.message || '加载失败'
-  } finally {
-    recentLoading.value = false
-  }
+const recentItems = ref([])
+const fetchRecentAdded = async (page, size) => {
+  const r = await listMovies({ sort: 'added_desc', page, page_size: size })
+  return { items: r.items || [], total: r.total || 0 }
 }
 
-async function loadRandom() {
-  randomLoading.value = true
-  randomError.value = ''
-  try {
-    const r = await listMovies({ sort: 'random', page: 1, page_size: 12 })
-    randomList.value = r.items || []
-  } catch (e) {
-    randomError.value = e.message || '加载失败'
-  } finally {
-    randomLoading.value = false
-  }
+const forYouItems = ref([])
+const forYouKey = ref(0)
+const fetchForYou = async () => {
+  const r = await getRecommend({ limit: 24, exclude_watched: true })
+  return { items: r.items || [], has_more: false }
 }
 
+/* 随机排序分页可能重复，前端按 id 去重，保证「一直加载」不出现重复卡 */
+const randomSeen = new Set()
+const randomItems = ref([])
+const randomKey = ref(0)
+const fetchRandom = async (page, size) => {
+  const r = await listMovies({ sort: 'random', page, page_size: size })
+  const items = (r.items || []).filter((m) => {
+    if (randomSeen.has(m.id)) return false
+    randomSeen.add(m.id)
+    return true
+  })
+  return { items, total: r.total || 0 }
+}
 function shuffleRandom() {
-  loadRandom()
+  randomSeen.clear()
+  randomKey.value++
 }
 
-/* 猜你喜欢：取续看里最新一部影片作种子，拉相似推荐 */
-async function loadSimilar() {
-  similarLoading.value = true
-  similarError.value = ''
-  try {
-    const seed = cw.value[0]
-    if (!seed) { similarList.value = []; return }
-    const r = await getSimilar(seed.id)
-    similarList.value = r.items || r || []
-  } catch (e) {
-    similarError.value = e.message || '加载失败'
-  } finally {
-    similarLoading.value = false
-  }
+/** 推荐理由文案 */
+function whyOf(m) {
+  return recommendReason(m.reasons, t)
 }
 
 function goGallery() {
   state.view = 'gallery'
 }
 
-/* 播放模式（迅雷式）：把某个区块的影片作为队列，打开全局播放器连播 */
+function openDetail(id) {
+  state.view = 'detail'
+  state.currentId = id
+}
+
+/* 播放模式（迅雷式）：把某个区块已加载的影片作为队列，打开全局播放器连播 */
 function playQueue(movies) {
   openPlayQueue(movies || [], '')
 }
-
-onMounted(async () => {
-  loadRecent()
-  loadRandom()
-  // 猜你喜欢依赖续看的第一部作为种子，须等续看加载完成
-  await loadContinue()
-  loadSimilar()
-})
 </script>
 
 <template>
@@ -138,96 +108,43 @@ onMounted(async () => {
         </template>
       </PageHead>
 
-      <!-- 续看 rail -->
+      <!-- 续看 -->
       <section class="block">
         <div class="block-head">
           <h2 class="block-title"><span class="dot"></span>{{ $t('home.continueWatching') }}</h2>
           <div class="block-actions">
-            <button v-if="cw.length" class="link" @click="playQueue(cw)" :data-tip="$t('home.playBlockTip')">▶ {{ $t('home.playBlock') }}</button>
-            <button v-if="cw.length" class="link" @click="goGallery">{{ $t('home.viewAll') }}</button>
+            <button v-if="cwItems.length" class="link" @click="playQueue(cwItems)" :data-tip="$t('home.playBlockTip')">▶ {{ $t('home.playBlock') }}</button>
+            <button v-if="cwItems.length" class="link" @click="goGallery">{{ $t('home.viewAll') }}</button>
           </div>
         </div>
-
-        <div v-if="cwLoading" class="rail-skeleton">
-          <div v-for="n in 4" :key="n" class="sk"></div>
-        </div>
-        <EmptyState
-          v-else-if="cwError"
-          icon="!"
-          :title="cwError"
-          action="重试"
-          @action="loadContinue"
-        />
-        <EmptyState
-          v-else-if="!cw.length"
-          icon="▶"
-          :title="$t('home.noContinue')"
-          :desc="$t('home.continueDesc')"
-        />
-        <div v-else class="rail">
-          <MovieCard v-for="m in cw" :key="m.id" :movie="m" :selectable="false" @open="(id) => { state.view = 'detail'; state.currentId = id }" />
-        </div>
+        <MovieRail v-model:items="cwItems" :fetch-page="fetchContinue" :page-size="30" @open="openDetail">
+          <template #empty>
+            <EmptyState icon="▶" :title="$t('home.noContinue')" :desc="$t('home.continueDesc')" />
+          </template>
+        </MovieRail>
       </section>
 
-      <!-- 最近添加 -->
-      <section class="block">
-        <div class="block-head">
-          <h2 class="block-title"><span class="dot"></span>{{ $t('home.recentlyAdded') }}</h2>
-          <div class="block-actions">
-            <button v-if="recent.length" class="link" @click="playQueue(recent)" :data-tip="$t('home.playBlockTip')">▶ {{ $t('home.playBlock') }}</button>
-            <button class="link" @click="goGallery">{{ $t('home.viewAll') }}</button>
-          </div>
-        </div>
-
-        <div v-if="recentLoading" class="grid-skeleton">
-          <div v-for="n in 8" :key="n" class="sk"></div>
-        </div>
-        <EmptyState
-          v-else-if="recentError"
-          icon="!"
-          :title="recentError"
-          action="重试"
-          @action="loadRecent"
-        />
-        <EmptyState
-          v-else-if="!recent.length"
-          icon="▦"
-          :title="$t('home.noFav')"
-          :desc="$t('home.emptyDesc')"
-        />
-        <div v-else class="grid">
-          <MovieCard v-for="m in recent" :key="m.id" :movie="m" :selectable="false" @open="(id) => { state.view = 'detail'; state.currentId = id }" />
-        </div>
-      </section>
-
-      <!-- 猜你喜欢（相似推荐） -->
+      <!-- 猜你喜欢（口味加权推荐） -->
       <section class="block">
         <div class="block-head">
           <h2 class="block-title"><span class="dot"></span>{{ $t('home.forYou') }}</h2>
           <div class="block-actions">
-            <button v-if="similarList.length" class="link" @click="playQueue(similarList)" :data-tip="$t('home.playBlockTip')">▶ {{ $t('home.playBlock') }}</button>
+            <button v-if="forYouItems.length" class="link" @click="playQueue(forYouItems)" :data-tip="$t('home.playBlockTip')">▶ {{ $t('home.playBlock') }}</button>
+            <button class="link" @click="forYouKey++">{{ $t('home.shuffle') }}</button>
           </div>
         </div>
-
-        <div v-if="similarLoading" class="grid-skeleton">
-          <div v-for="n in 6" :key="n" class="sk"></div>
-        </div>
-        <EmptyState
-          v-else-if="similarError"
-          icon="!"
-          :title="similarError"
-          action="重试"
-          @action="loadSimilar"
-        />
-        <EmptyState
-          v-else-if="!similarList.length"
-          icon="✦"
-          :title="$t('home.noForYou')"
-          :desc="$t('home.forYouEmpty')"
-        />
-        <div v-else class="grid">
-          <MovieCard v-for="m in similarList" :key="m.id" :movie="m" :selectable="false" @open="(id) => { state.view = 'detail'; state.currentId = id }" />
-        </div>
+        <MovieRail
+          v-model:items="forYouItems"
+          :fetch-page="fetchForYou"
+          :page-size="24"
+          :reload-key="forYouKey"
+          :reason-of="whyOf"
+          @open="openDetail"
+        >
+          <template #empty>
+            <EmptyState icon="✦" :title="$t('home.noForYou')" :desc="$t('home.forYouEmpty')" />
+          </template>
+        </MovieRail>
       </section>
 
       <!-- 随便看看（随机） -->
@@ -235,30 +152,37 @@ onMounted(async () => {
         <div class="block-head">
           <h2 class="block-title"><span class="dot"></span>{{ $t('home.randomTitle') }}</h2>
           <div class="block-actions">
-            <button v-if="randomList.length" class="link" @click="playQueue(randomList)" :data-tip="$t('home.playBlockTip')">▶ {{ $t('home.playBlock') }}</button>
+            <button v-if="randomItems.length" class="link" @click="playQueue(randomItems)" :data-tip="$t('home.playBlockTip')">▶ {{ $t('home.playBlock') }}</button>
             <button class="link" @click="shuffleRandom">{{ $t('home.shuffle') }}</button>
           </div>
         </div>
+        <MovieRail
+          v-model:items="randomItems"
+          :fetch-page="fetchRandom"
+          :page-size="RAIL_SIZE"
+          :reload-key="randomKey"
+          @open="openDetail"
+        >
+          <template #empty>
+            <EmptyState icon="▦" :title="$t('home.noFav')" :desc="$t('home.emptyDesc')" />
+          </template>
+        </MovieRail>
+      </section>
 
-        <div v-if="randomLoading" class="grid-skeleton">
-          <div v-for="n in 8" :key="n" class="sk"></div>
+      <!-- 最近添加 -->
+      <section class="block">
+        <div class="block-head">
+          <h2 class="block-title"><span class="dot"></span>{{ $t('home.recentlyAdded') }}</h2>
+          <div class="block-actions">
+            <button v-if="recentItems.length" class="link" @click="playQueue(recentItems)" :data-tip="$t('home.playBlockTip')">▶ {{ $t('home.playBlock') }}</button>
+            <button class="link" @click="goGallery">{{ $t('home.viewAll') }}</button>
+          </div>
         </div>
-        <EmptyState
-          v-else-if="randomError"
-          icon="!"
-          :title="randomError"
-          action="重试"
-          @action="loadRandom"
-        />
-        <EmptyState
-          v-else-if="!randomList.length"
-          icon="▦"
-          :title="$t('home.noFav')"
-          :desc="$t('home.emptyDesc')"
-        />
-        <div v-else class="grid">
-          <MovieCard v-for="m in randomList" :key="m.id" :movie="m" :selectable="false" @open="(id) => { state.view = 'detail'; state.currentId = id }" />
-        </div>
+        <MovieRail v-model:items="recentItems" :fetch-page="fetchRecentAdded" :page-size="RAIL_SIZE" @open="openDetail">
+          <template #empty>
+            <EmptyState icon="▦" :title="$t('home.noFav')" :desc="$t('home.emptyDesc')" />
+          </template>
+        </MovieRail>
       </section>
     </div>
   </section>
@@ -266,10 +190,11 @@ onMounted(async () => {
 
 <style scoped>
 .home { padding-bottom: 28px; }
-.block { margin-top: 0; }
+.block { margin-top: 26px; }
+.block:first-of-type { margin-top: 4px; }
 .block-head {
   display: flex; align-items: center; justify-content: space-between;
-  margin-bottom: 14px;
+  margin-bottom: 6px; gap: 12px;
 }
 .block-title {
   display: flex; align-items: center; gap: 9px;
@@ -289,34 +214,8 @@ onMounted(async () => {
 .block-actions .link { color: var(--c-ok, #3fb950); }
 .btn-ico { width: 16px; height: 16px; display: inline-block; vertical-align: -2px; margin-right: 6px; }
 
-.rail {
-  display: grid;
-  grid-auto-flow: column;
-  grid-auto-columns: 168px;
-  gap: 14px;
-  overflow-x: auto;
-  padding-bottom: 10px;
-  scroll-snap-type: x proximity;
+@media (max-width: 480px) {
+  .block-title { font-size: 15px; }
+  .block { margin-top: 20px; }
 }
-.rail > * { scroll-snap-align: start; }
-
-.grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
-  gap: 16px;
-}
-
-.rail-skeleton, .grid-skeleton {
-  display: grid; gap: 14px;
-}
-.rail-skeleton { grid-auto-flow: column; grid-auto-columns: 168px; }
-.grid-skeleton { grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); }
-.sk {
-  height: 230px; border-radius: var(--r-md);
-  background: linear-gradient(100deg, var(--c-surface-2) 30%, var(--c-surface-3) 50%, var(--c-surface-2) 70%);
-  background-size: 200% 100%;
-  animation: shimmer 1.2s infinite;
-}
-.rail-skeleton .sk { height: 230px; }
-@keyframes shimmer { to { background-position: -200% 0; } }
 </style>

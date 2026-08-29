@@ -235,13 +235,20 @@ function onTouchStart(e) {
   swipe.startY = t.clientY
   swipe.startTime = videoEl ? videoEl.currentTime : 0
   swipe.targetTime = swipe.startTime
+  startVolGesture(t.clientX, t.clientY, true)
 }
 function onTouchMove(e) {
   if (!swipe.active) return
   const t = e.touches[0]
   const dx = t.clientX - swipe.startX
   const dy = t.clientY - swipe.startY
-  // 判定为横滑：水平位移明显大于竖直位移（避免与页面纵向滚动冲突）
+  // 垂直音量手势：竖直位移明显大于水平（与横滑快进区分）
+  if (Math.abs(dy) > 15 && Math.abs(dy) > Math.abs(dx)) {
+    if (e.cancelable) e.preventDefault()
+    moveVolGesture(t.clientX, t.clientY)
+    return
+  }
+  // 横滑快进/快退：水平位移明显大于竖直位移
   if (Math.abs(dx) > 30 && Math.abs(dx) > Math.abs(dy)) {
     if (e.cancelable) e.preventDefault()
     if (!videoEl || !videoEl.duration) return
@@ -261,6 +268,113 @@ function onTouchEnd() {
   if (moved > 0.5 && player) {
     player.currentTime(swipe.targetTime)
   }
+  endVolGesture()
+}
+
+/* ---------- 音量手势（垂直滑动调音量）：桌面全屏鼠标拖动 + 移动端手指垂直滑动 ---------- */
+let volGesture = { active: false, startX: 0, startY: 0, startVol: 0, moved: false, touch: false }
+let volOsdEl = null
+let volOsdTimer = null
+let volOsdTxt = null
+let volOsdBar = null
+// 垂直音量手势结束后，抑制随后的 click（暂停），避免"拖动调音量却触发暂停"
+let suppressNextClick = false
+
+function setPlayerVolume(v) {
+  if (!player) return
+  v = Math.max(0, Math.min(1, v))
+  if (player.muted()) player.muted(false)
+  player.volume(v)
+  showVolumeOsd(v)
+}
+function showVolumeOsd(v) {
+  if (!volOsdEl || !player) return
+  const pct = Math.round(v * 100)
+  if (volOsdTxt) volOsdTxt.textContent = pct + '%'
+  if (volOsdBar) volOsdBar.style.width = pct + '%'
+  const ico = volOsdEl.querySelector('.vjs-vol-ico')
+  if (ico) ico.textContent = v <= 0 ? '🔇' : '🔊'
+  volOsdEl.style.display = 'flex'
+  clearTimeout(volOsdTimer)
+  volOsdTimer = setTimeout(() => { if (volOsdEl) volOsdEl.style.display = 'none' }, 1000)
+}
+function buildVolumeOsd() {
+  if (volOsdEl || !player) return
+  volOsdEl = document.createElement('div')
+  volOsdEl.className = 'vjs-vol-osd'
+  volOsdEl.style.display = 'none'
+  volOsdEl.innerHTML = '<div class="vjs-vol-ico">🔊</div><div class="vjs-vol-num"></div><div class="vjs-vol-track"><i class="vjs-vol-fill"></i></div>'
+  volOsdTxt = volOsdEl.querySelector('.vjs-vol-num')
+  volOsdBar = volOsdEl.querySelector('.vjs-vol-fill')
+  player.el().appendChild(volOsdEl)
+}
+function startVolGesture(x, y, isTouch) {
+  if (!player) return
+  volGesture.active = true
+  volGesture.touch = isTouch
+  volGesture.moved = false
+  volGesture.startX = x
+  volGesture.startY = y
+  volGesture.startVol = player.volume()
+}
+function moveVolGesture(x, y) {
+  if (!volGesture.active) return
+  const dy = y - volGesture.startY
+  // 竖直位移超过阈值才视为音量手势（避免误触发）
+  if (Math.abs(dy) > 15) {
+    volGesture.moved = true
+    // 上下各约 320px 对应满音量；上滑增大、下滑减小
+    const next = volGesture.startVol - (dy / 320)
+    setPlayerVolume(next)
+  }
+}
+function endVolGesture() {
+  if (!volGesture.active) return
+  volGesture.active = false
+  if (volGesture.moved) suppressNextClick = true
+}
+
+// 桌面鼠标：在播放画面上按下→垂直拖动调音量（非全屏也生效）
+let mouseGestBound = false
+function onMouseDown(e) {
+  // 排除控制条/进度条等交互（它们不在 overlay 上，此处只收到画面区域按下）
+  if (e.button !== 0) return
+  startVolGesture(e.clientX, e.clientY, false)
+  if (!mouseGestBound) {
+    document.addEventListener('mousemove', onMouseMove)
+    document.addEventListener('mouseup', onMouseUp)
+    mouseGestBound = true
+  }
+}
+function onMouseMove(e) {
+  moveVolGesture(e.clientX, e.clientY)
+  // 手势进行中阻止文本选中/拖拽
+  if (volGesture.active) {
+    if (e.cancelable) e.preventDefault()
+  }
+}
+function onMouseUp() {
+  endVolGesture()
+  if (mouseGestBound) {
+    document.removeEventListener('mousemove', onMouseMove)
+    document.removeEventListener('mouseup', onMouseUp)
+    mouseGestBound = false
+  }
+}
+// 桌面鼠标滚轮调音量（最常见、最直接）：在画面上滚动即可
+function onWheel(e) {
+  if (!player) return
+  // 只在播放画面上生效，不影响其它区域滚动
+  e.preventDefault()
+  const cur = player.volume()
+  const delta = e.deltaY < 0 ? 0.05 : -0.05
+  const next = Math.max(0, Math.min(1, cur + delta))
+  setPlayerVolume(next)
+}
+// 包装点击：若刚结束音量手势，则跳过本次点击（避免触发暂停）
+function onOverlayClickWithGesture(e) {
+  if (suppressNextClick) { suppressNextClick = false; return }
+  onOverlayClick(e)
 }
 
 function initPlayer() {
@@ -305,10 +419,14 @@ function initPlayer() {
     overlayEl = document.createElement('div')
     overlayEl.className = 'vjs-click-overlay'
     player.el().appendChild(overlayEl)
-    overlayEl.addEventListener('click', onOverlayClick)
+    overlayEl.addEventListener('click', onOverlayClickWithGesture)
     overlayEl.addEventListener('dblclick', onOverlayDblClick)
-    // 移动端：画面横滑快进/快退（passive:false 以便横滑时阻止默认/页面横向滚动）
+    // 桌面：鼠标滚轮调音量 + 按下拖动调音量
+    overlayEl.addEventListener('wheel', onWheel, { passive: false })
+    overlayEl.addEventListener('mousedown', onMouseDown)
+    // 移动端：画面横滑快进/快退 + 垂直滑动调音量（passive:false 以便阻止默认/页面滚动）
     overlayEl.addEventListener('touchstart', onTouchStart, { passive: true })
+    buildVolumeOsd()
     overlayEl.addEventListener('touchmove', onTouchMove, { passive: false })
     overlayEl.addEventListener('touchend', onTouchEnd)
     buildSwipeTip()
@@ -327,14 +445,21 @@ function destroyPlayer() {
       saveProgress(true)
       endSessionNow(0)
       if (overlayEl) {
-        overlayEl.removeEventListener('click', onOverlayClick)
+        overlayEl.removeEventListener('click', onOverlayClickWithGesture)
         overlayEl.removeEventListener('dblclick', onOverlayDblClick)
+        overlayEl.removeEventListener('wheel', onWheel)
+        overlayEl.removeEventListener('mousedown', onMouseDown)
         overlayEl.removeEventListener('touchstart', onTouchStart)
         overlayEl.removeEventListener('touchmove', onTouchMove)
         overlayEl.removeEventListener('touchend', onTouchEnd)
         overlayEl = null
       }
       document.removeEventListener('keydown', onKeydown)
+      if (mouseGestBound) {
+        document.removeEventListener('mousemove', onMouseMove)
+        document.removeEventListener('mouseup', onMouseUp)
+        mouseGestBound = false
+      }
       if (progressCtrl && hoverBound) {
         progressCtrl.removeEventListener('mousemove', onProgressMove)
         progressCtrl.removeEventListener('mouseleave', onProgressLeave)
@@ -351,6 +476,9 @@ function destroyPlayer() {
     tipTimeEl = null
     swipeTipEl = null
     swipe = { active: false, dir: 0, startX: 0, startY: 0, startTime: 0, targetTime: 0 }
+    volOsdEl = null
+    volGesture = { active: false, startX: 0, startY: 0, startVol: 0, moved: false, touch: false }
+    if (volOsdTimer) { clearTimeout(volOsdTimer); volOsdTimer = null }
   }
 }
 
@@ -597,4 +725,26 @@ watch(() => props.movieId, () => {
   height: 100% !important;
   object-fit: contain !important;
 }
+/* 音量手势 OSD：垂直滑动/滚轮调音量时居中显示音量百分比与进度条
+   （volOsdEl 是动态创建在 video.js 内部的元素，需用 :deep 穿透 scoped 才能命中） */
+.vjs-wrap :deep(.vjs-vol-osd) {
+  position: absolute;
+  left: 50%; top: 42%;
+  transform: translate(-50%, -50%);
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 18px;
+  border-radius: 22px;
+  background: rgba(0, 0, 0, .68);
+  color: #fff;
+  pointer-events: none;
+  box-shadow: 0 4px 16px rgba(0,0,0,.4);
+  white-space: nowrap;
+}
+.vjs-wrap :deep(.vjs-vol-ico) { font-size: 22px; line-height: 1; }
+.vjs-wrap :deep(.vjs-vol-num) { font-size: 22px; font-weight: 700; font-variant-numeric: tabular-nums; letter-spacing: .5px; min-width: 58px; text-align: center; }
+.vjs-wrap :deep(.vjs-vol-track) { width: 150px; height: 6px; border-radius: 3px; background: rgba(255,255,255,.25); overflow: hidden; }
+.vjs-wrap :deep(.vjs-vol-fill) { display: block; height: 100%; width: 50%; border-radius: 3px; background: #fff; transition: width .08s linear; }
 </style>

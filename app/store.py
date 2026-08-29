@@ -6,9 +6,11 @@ from datetime import datetime
 import json
 import os
 import re
+import shutil
 import sqlite3
 import subprocess
 import unicodedata
+from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from . import subtitles
@@ -1514,6 +1516,176 @@ def storage_stats(conn):
     }
 
 
+def _dir_size(p: Path) -> Tuple[int, int]:
+    """统计目录下文件个数与总字节数（不递归子目录的文件数按需）。"""
+    if not p.exists() or not p.is_dir():
+        return 0, 0
+    n = 0
+    total = 0
+    for f in p.rglob("*"):
+        if f.is_file():
+            try:
+                total += f.stat().st_size
+                n += 1
+            except OSError:
+                pass
+    return n, total
+
+
+def _list_temp_files() -> List[Path]:
+    """covers 下的临时抽帧/候选文件（_extract_ / _cand_ / _dbg_）。"""
+    from .config import COVER_DIR as _CD
+    if not _CD.is_dir():
+        return []
+    return [f for f in _CD.iterdir()
+            if f.is_file() and f.name.startswith(("_extract_", "_cand_", "_dbg_"))]
+
+
+def software_storage_stats(conn: sqlite3.Connection) -> Dict[str, Any]:
+    """统计软件自身的数据目录占用（封面、预览图、头像、背景图、临时文件、数据库等）。
+
+    并识别出可清理项（临时文件、孤儿预览图），供维护页展示。"""
+    from .config import AVATAR_DIR, FANART_DIR, DB_PATH, CONFIG_PATH, COVER_DIR
+    from .config import avatar_dir, fanart_dir
+    cover_n, cover_bytes = _dir_size(COVER_DIR)
+    av_n, av_bytes = _dir_size(avatar_dir())
+    fa_n, fa_bytes = _dir_size(fanart_dir())
+
+    # 预览图子目录（covers/preview/）
+    preview_dir = COVER_DIR / "preview"
+    pv_n, pv_bytes = _dir_size(preview_dir)
+
+    temp_files = _list_temp_files()
+    temp_n = len(temp_files)
+    temp_bytes = 0
+    for f in temp_files:
+        try:
+            temp_bytes += f.stat().st_size
+        except OSError:
+            pass
+
+    # 孤儿预览图：covers/preview/ 下的子目录 id 不在 movies 表
+    valid_ids = {r["id"] for r in query_all(conn, "SELECT id FROM movies")}
+    orphan_pv = 0
+    orphan_pv_bytes = 0
+    orphan_pv_dirs: List[str] = []
+    if preview_dir.is_dir():
+        for d in preview_dir.iterdir():
+            if not d.is_dir():
+                continue
+            try:
+                mid = int(d.name)
+            except ValueError:
+                mid = -1
+            if mid not in valid_ids:
+                n, b = _dir_size(d)
+                orphan_pv += n
+                orphan_pv_bytes += b
+                orphan_pv_dirs.append(d.name)
+
+    db_bytes = DB_PATH.stat().st_size if DB_PATH.exists() else 0
+    cfg_bytes = CONFIG_PATH.stat().st_size if CONFIG_PATH.exists() else 0
+
+    def entry(label, n, b):
+        return {"label": label, "files": n, "bytes": b}
+
+    dirs = [
+        entry("covers", cover_n, cover_bytes),
+        entry("previews", pv_n, pv_bytes),
+        entry("avatars", av_n, av_bytes),
+        entry("fanarts", fa_n, fa_bytes),
+        entry("temp", temp_n, temp_bytes),
+        entry("db", 1, db_bytes),
+        entry("config", 1, cfg_bytes),
+    ]
+    total_files = sum(d["files"] for d in dirs)
+    total_bytes = sum(d["bytes"] for d in dirs)
+    return {
+        "dirs": dirs,
+        "total": {"files": total_files, "bytes": total_bytes},
+        "cleanable": {
+            "temp": {"files": temp_n, "bytes": temp_bytes},
+            "preview_orphan": {"files": orphan_pv, "bytes": orphan_pv_bytes,
+                               "dirs": orphan_pv_dirs},
+        },
+    }
+
+
+def clean_software_storage(conn: sqlite3.Connection, targets: List[str]) -> Dict[str, Any]:
+    """按 targets 清理软件数据。targets 可取：
+    - 'temp'            : 临时抽帧/候选文件
+    - 'preview_orphan'  : 孤儿预览图（影片已不存在的预览目录）
+    - 'preview_all'     : 全部预览图（需在详情页重新生成）
+    - 'db_vacuum'       : 收缩数据库未用空间
+    返回清理统计。"""
+    from .config import COVER_DIR
+    removed = 0
+    freed = 0
+    cleared: List[str] = []
+
+    if "temp" in targets:
+        for f in _list_temp_files():
+            try:
+                sz = f.stat().st_size
+                f.unlink()
+                removed += 1
+                freed += sz
+            except OSError:
+                pass
+        cleared.append("temp")
+
+    if "preview_orphan" in targets:
+        valid_ids = {r["id"] for r in query_all(conn, "SELECT id FROM movies")}
+        preview_dir = COVER_DIR / "preview"
+        if preview_dir.is_dir():
+            for d in preview_dir.iterdir():
+                if not d.is_dir():
+                    continue
+                try:
+                    mid = int(d.name)
+                except ValueError:
+                    mid = -1
+                if mid in valid_ids:
+                    continue
+                n, b = _dir_size(d)
+                try:
+                    import shutil as _sh
+                    _sh.rmtree(d)
+                    removed += n
+                    freed += b
+                except OSError:
+                    pass
+        cleared.append("preview_orphan")
+
+    if "preview_all" in targets:
+        preview_dir = COVER_DIR / "preview"
+        if preview_dir.is_dir():
+            for d in preview_dir.iterdir():
+                if d.is_dir():
+                    n, b = _dir_size(d)
+                    try:
+                        import shutil as _sh
+                        _sh.rmtree(d)
+                        removed += n
+                        freed += b
+                    except OSError:
+                        pass
+        # 清空预览记录，详情页可重新生成
+        conn.execute("DELETE FROM movie_previews")
+        cleared.append("preview_all")
+
+    if "db_vacuum" in targets:
+        try:
+            conn.commit()
+            conn.execute("VACUUM")
+            cleared.append("db_vacuum")
+        except Exception:
+            pass
+
+    conn.commit()
+    return {"cleared": cleared, "removed": removed, "freed": freed}
+
+
 def integrity_issues(conn):
     """完整性概览：缺失文件、缺封面、未识别番号。"""
     missing = conn.execute("SELECT COUNT(*) AS c FROM movie_files WHERE missing = 1").fetchone()["c"]
@@ -1901,6 +2073,267 @@ def stats_enhanced(conn: sqlite3.Connection) -> Dict[str, Any]:
     }
 
 
+def taste_profile(conn: sqlite3.Connection, year: int = 0) -> Dict[str, Any]:
+    """观影口味画像：8 个维度（0~100），全部基于真实观看行为（watch_sessions）。
+
+    year=0 表示全部时间；否则只统计该年份开始观看的场次。
+    每个维度返回 {key, value(0-100), raw(0-1), top(top 项名称, 可选)}，
+    文案由前端 i18n 按 key 渲染，后端不返回中文。
+    """
+    yc = "substr(s.started_at,1,4)=?" if year else "1=1"
+    ya = [str(year)] if year else []
+
+    tot = query_one(
+        conn,
+        "SELECT COUNT(*) AS sessions, COALESCE(SUM(s.watched_sec),0) AS total_sec, "
+        f"COUNT(DISTINCT s.movie_id) AS movies FROM watch_sessions s WHERE {yc}",
+        tuple(ya),
+    ) or {}
+    sessions = int(tot.get("sessions") or 0)
+    total_sec = float(tot.get("total_sec") or 0)
+    movies = int(tot.get("movies") or 0)
+    if sessions <= 0 or total_sec <= 0:
+        return {"year": year, "dims": [],
+                "totals": {"sessions": 0, "total_sec": 0, "movies": 0}}
+
+    def pct(numer: float) -> float:
+        """按时长占比换算成 0~100，用于雷达图数值。"""
+        return round(max(0.0, min(100.0, (numer / total_sec) * 100.0)), 1)
+
+    def sum_sec(sql: str, extra: tuple = ()) -> float:
+        """求和观看秒数；约定年份条件 yc 放在 WHERE 末尾，因此 ya 参数放最后。"""
+        row = query_one(conn, sql, tuple(extra) + tuple(ya)) or {}
+        return float(row.get("ws") or 0)
+
+    # 1 类型专注：观看时长 top3 类型占比
+    g_rows = query_all(
+        conn,
+        "SELECT g.name AS name, SUM(s.watched_sec) AS ws FROM watch_sessions s "
+        "JOIN movie_genre mg ON mg.movie_id=s.movie_id JOIN genres g ON g.id=mg.genre_id "
+        f"WHERE {yc} GROUP BY g.id ORDER BY ws DESC LIMIT 3",
+        tuple(ya),
+    )
+    genre_focus = pct(sum(float(r["ws"] or 0) for r in g_rows))
+
+    # 2 女优专一：观看时长 top3 女优占比
+    a_rows = query_all(
+        conn,
+        "SELECT a.name AS name, SUM(s.watched_sec) AS ws FROM watch_sessions s "
+        "JOIN movie_actress ma ON ma.movie_id=s.movie_id JOIN actresses a ON a.id=ma.actress_id "
+        f"WHERE {yc} GROUP BY a.id ORDER BY ws DESC LIMIT 3",
+        tuple(ya),
+    )
+    actress_loyalty = pct(sum(float(r["ws"] or 0) for r in a_rows))
+
+    # 3 长片偏好：单片时长 > 120 分钟的观看占比
+    long_sec = sum_sec(
+        "SELECT COALESCE(SUM(s.watched_sec),0) AS ws FROM watch_sessions s "
+        f"JOIN movies m ON m.id=s.movie_id WHERE COALESCE(m.runtime,0)>120 AND {yc}")
+
+    # 4 追新：发行年份 >= 今年-2 的观看占比
+    import datetime as _dt
+    cut = _dt.date.today().year - 2
+    fresh_sec = sum_sec(
+        "SELECT COALESCE(SUM(s.watched_sec),0) AS ws FROM watch_sessions s "
+        f"JOIN movies m ON m.id=s.movie_id WHERE COALESCE(m.year,0)>=? AND {yc}", (cut,))
+
+    # 5 无码倾向：无码影片的观看占比
+    unc_sec = sum_sec(
+        "SELECT COALESCE(SUM(s.watched_sec),0) AS ws FROM watch_sessions s "
+        f"JOIN movies m ON m.id=s.movie_id WHERE COALESCE(m.uncensored,0)=1 AND {yc}")
+
+    # 6 夜猫子：20:00~04:00 开始的观看占比
+    night_sec = sum_sec(
+        "SELECT COALESCE(SUM(s.watched_sec),0) AS ws FROM watch_sessions s "
+        "WHERE (CAST(strftime('%H',s.started_at) AS INTEGER)>=20 OR "
+        f"CAST(strftime('%H',s.started_at) AS INTEGER)<4) AND {yc}")
+
+    # 7 看完率：标记为看完的场次占比（按场次，不按时长）
+    fin = query_one(
+        conn,
+        f"SELECT COUNT(*) AS c FROM watch_sessions s "
+        f"WHERE COALESCE(s.finished,0)=1 AND {yc}", tuple(ya)) or {}
+    completion = round((int(fin.get("c") or 0) / sessions) * 100, 1) if sessions else 0.0
+
+    # 8 重温：看过 2 次以上的影片占已看影片的比例
+    rw = query_one(
+        conn,
+        "SELECT COUNT(*) AS c FROM (SELECT s.movie_id FROM watch_sessions s "
+        f"WHERE {yc} GROUP BY s.movie_id HAVING COUNT(*)>1)", tuple(ya)) or {}
+    rewatch = round((int(rw.get("c") or 0) / movies) * 100, 1) if movies else 0.0
+
+    def dim(key: str, value: float, raw: float, top: list = None) -> Dict[str, Any]:
+        return {"key": key, "value": value, "raw": round(raw, 3), "top": top or []}
+
+    return {
+        "year": year,
+        "totals": {"sessions": sessions, "total_sec": total_sec, "movies": movies},
+        "dims": [
+            dim("genre_focus", genre_focus, genre_focus / 100.0,
+                [str(r["name"]) for r in g_rows]),
+            dim("actress_loyalty", actress_loyalty, actress_loyalty / 100.0,
+                [str(r["name"]) for r in a_rows]),
+            dim("long_form", pct(long_sec), long_sec / total_sec),
+            dim("freshness", pct(fresh_sec), fresh_sec / total_sec),
+            dim("uncensored", pct(unc_sec), unc_sec / total_sec),
+            dim("night_owl", pct(night_sec), night_sec / total_sec),
+            dim("completion", completion, completion / 100.0),
+            dim("rewatch", rewatch, rewatch / 100.0),
+        ],
+    }
+
+
+def recommend_movies(conn: sqlite3.Connection, limit: int = 30, seed: int = None,
+                     exclude_watched: bool = True, explore: float = 1.0) -> Dict[str, Any]:
+    """口味加权推荐：用观看历史算出偏好，对候选影片打分后**加权随机**抽取。
+
+    偏好来源：观看时长在 类型/女优/厂商/系列 上的分布，以及时长/年份/无码倾向。
+    打分后按 (score+ε)^explore 加权随机（Efraimidis-Spirakis），
+    保证高分片更容易出现，但每次结果不同且冷门片也有机会，避免信息茧房。
+
+    返回 {items:[{影片字段..., score, reasons:[{kind,name}]}], has_history, total}
+    """
+    import random as _rnd
+
+    # ---- 1. 观看历史 → 偏好权重 ----
+    sess = query_all(conn, "SELECT movie_id, watched_sec FROM watch_sessions")
+    total_sec = sum(float(r["watched_sec"] or 0) for r in sess)
+    watched_ids = {int(r["movie_id"]) for r in sess if r["movie_id"]}
+    has_history = total_sec > 0 and bool(watched_ids)
+
+    def _weights(sql: str) -> Dict[int, float]:
+        """按观看时长占比归一化成 0~1 的权重。"""
+        out: Dict[int, float] = {}
+        if not has_history:
+            return out
+        for r in query_all(conn, sql):
+            k = r["k"]
+            v = float(r["ws"] or 0)
+            if k is not None and v > 0:
+                out[int(k)] = v / total_sec
+        return out
+
+    w_genre = _weights(
+        "SELECT mg.genre_id AS k, SUM(s.watched_sec) AS ws FROM watch_sessions s "
+        "JOIN movie_genre mg ON mg.movie_id=s.movie_id GROUP BY mg.genre_id")
+    w_actress = _weights(
+        "SELECT ma.actress_id AS k, SUM(s.watched_sec) AS ws FROM watch_sessions s "
+        "JOIN movie_actress ma ON ma.movie_id=s.movie_id GROUP BY ma.actress_id")
+    w_studio = _weights(
+        "SELECT m.studio_id AS k, SUM(s.watched_sec) AS ws FROM watch_sessions s "
+        "JOIN movies m ON m.id=s.movie_id WHERE m.studio_id IS NOT NULL GROUP BY m.studio_id")
+    w_series = _weights(
+        "SELECT m.series_id AS k, SUM(s.watched_sec) AS ws FROM watch_sessions s "
+        "JOIN movies m ON m.id=s.movie_id WHERE m.series_id IS NOT NULL GROUP BY m.series_id")
+
+    pref_dur = pref_year = pref_unc = 0.0
+    if has_history:
+        d_rows = query_all(
+            conn,
+            "SELECT COALESCE(m.runtime,0) AS rt, COALESCE(m.year,0) AS yr, "
+            "COALESCE(m.uncensored,0) AS unc, s.watched_sec AS ws "
+            "FROM watch_sessions s JOIN movies m ON m.id=s.movie_id")
+        s_all = sum(float(r["ws"] or 0) for r in d_rows) or 1.0
+        pref_dur = sum(float(r["rt"] or 0) * float(r["ws"] or 0) for r in d_rows) / s_all
+        pref_year = sum(float(r["yr"] or 0) * float(r["ws"] or 0) for r in d_rows) / s_all
+        pref_unc = sum(float(r["unc"] or 0) * float(r["ws"] or 0) for r in d_rows) / s_all
+
+    # ---- 2. 候选影片 + 特征索引 ----
+    movies = query_all(
+        conn,
+        "SELECT id, code, title, cover, year, runtime, rating, uncensored, "
+        "studio_id, series_id, favorite, watchlist FROM movies")
+    gmap: Dict[int, List[int]] = {}
+    for r in query_all(conn, "SELECT movie_id, genre_id FROM movie_genre"):
+        gmap.setdefault(int(r["movie_id"]), []).append(int(r["genre_id"]))
+    amap: Dict[int, List[int]] = {}
+    for r in query_all(conn, "SELECT movie_id, actress_id FROM movie_actress"):
+        amap.setdefault(int(r["movie_id"]), []).append(int(r["actress_id"]))
+
+    gname = {int(r["id"]): r["name"] for r in query_all(conn, "SELECT id, name FROM genres")}
+    aname = {int(r["id"]): r["name"] for r in query_all(conn, "SELECT id, name FROM actresses")}
+    sname = {int(r["id"]): r["name"] for r in query_all(conn, "SELECT id, name FROM studios")}
+    sename = {int(r["id"]): r["name"] for r in query_all(conn, "SELECT id, name FROM series")}
+
+    # ---- 3. 逐部打分 ----
+    rng = _rnd.Random(seed)
+    scored: List[Dict[str, Any]] = []
+    for mv in movies:
+        mid = int(mv["id"])
+        if exclude_watched and mid in watched_ids:
+            continue
+        score = 0.0
+        reasons: List[Dict[str, Any]] = []
+        if has_history:
+            # 类型（权重 3.0）
+            gs = [(g, w_genre.get(g, 0.0)) for g in gmap.get(mid, [])]
+            gs = [x for x in gs if x[1] > 0]
+            if gs:
+                top = max(gs, key=lambda x: x[1])
+                score += 3.0 * sum(w for _, w in gs)
+                reasons.append({"kind": "genre", "name": gname.get(top[0], ""), "w": round(top[1], 3)})
+            # 女优（权重 3.5，口味里最显著的信号）
+            acts = [(a, w_actress.get(a, 0.0)) for a in amap.get(mid, [])]
+            acts = [x for x in acts if x[1] > 0]
+            if acts:
+                top = max(acts, key=lambda x: x[1])
+                score += 3.5 * sum(w for _, w in acts)
+                reasons.append({"kind": "actress", "name": aname.get(top[0], ""), "w": round(top[1], 3)})
+            # 厂商 / 系列
+            if mv["studio_id"] and w_studio.get(int(mv["studio_id"])):
+                score += 1.0 * w_studio[int(mv["studio_id"])]
+                reasons.append({"kind": "studio", "name": sname.get(int(mv["studio_id"]), ""),
+                                "w": round(w_studio[int(mv["studio_id"])], 3)})
+            if mv["series_id"] and w_series.get(int(mv["series_id"])):
+                score += 0.8 * w_series[int(mv["series_id"])]
+                reasons.append({"kind": "series", "name": sename.get(int(mv["series_id"]), ""),
+                                "w": round(w_series[int(mv["series_id"])], 3)})
+            # 时长契合（0~1.2）
+            rt = float(mv["runtime"] or 0)
+            if pref_dur > 0 and rt > 0:
+                fit = 1.0 - min(1.0, abs(rt - pref_dur) / max(60.0, pref_dur))
+                if fit > 0:
+                    score += 1.2 * fit
+                    if fit > 0.6:
+                        reasons.append({"kind": "runtime", "name": "", "w": round(fit, 3)})
+            # 年份契合（0~0.6）
+            yr = float(mv["year"] or 0)
+            if pref_year > 0 and yr > 0:
+                fit = 1.0 - min(1.0, abs(yr - pref_year) / 12.0)
+                if fit > 0:
+                    score += 0.6 * fit
+                    if fit > 0.75:
+                        reasons.append({"kind": "year", "name": "", "w": round(fit, 3)})
+            # 无码倾向契合
+            unc = 1.0 if (mv["uncensored"] or 0) else 0.0
+            score += 0.5 * (1.0 - abs(unc - pref_unc))
+        else:
+            # 无观看历史：按评分 / 收藏兜底（冷启动）
+            score = float(mv["rating"] or 0) / 2.0 + (0.5 if mv["favorite"] else 0.0)
+        # 轻微随机扰动：每次结果不同，且给冷门片出头机会
+        score *= 0.85 + 0.3 * rng.random()
+        reasons.sort(key=lambda x: -x["w"])
+        scored.append({
+            "id": mid, "code": mv["code"], "title": mv["title"], "cover": mv["cover"],
+            "year": mv["year"], "runtime": mv["runtime"], "rating": mv["rating"],
+            "uncensored": mv["uncensored"], "favorite": mv["favorite"],
+            "watchlist": mv["watchlist"],
+            "score": round(score, 4), "reasons": reasons[:3],
+        })
+
+    # ---- 4. 加权随机排序（避免信息茧房） ----
+    exp = max(0.0, float(explore or 1.0))
+    for it in scored:
+        w = max(1e-6, (it["score"] + 0.15)) ** exp
+        it["_k"] = rng.random() ** (1.0 / w)
+    scored.sort(key=lambda x: -x["_k"])
+    items = scored[:max(1, int(limit or 30))]
+    for it in items:
+        it.pop("_k", None)
+    return {"items": items, "has_history": has_history,
+            "total": len(scored), "explore": exp}
+
+
 # ----------------------------------------------------------------- 标签字典（已有标签）
 def list_tags(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
     """返回所有已存在的标签及其使用次数，用于详情页标签输入建议。"""
@@ -2014,6 +2447,205 @@ def generate_previews(media_path: str, out_dir: str, ffmpeg: str = "ffmpeg",
         if os.path.exists(outp):
             paths.append(outp)
     return paths or None
+
+
+def _score_frame(path: os.PathLike) -> Optional[float]:
+    """给抽出的帧打分，越高代表越适合做封面。
+    综合考量：亮度适中、色彩丰富、宏观边缘结构、信息量高（避开黑场、纯色、花屏、过曝）。
+    PIL 不可用时返回 None（调用方回退到单帧策略）。"""
+    try:
+        from PIL import Image, ImageStat
+    except Exception:
+        return None
+    try:
+        im = Image.open(path).convert("RGB")
+        im.thumbnail((96, 96))  # 缩略打分，速度快
+        # 轻微模糊，抑制像素级噪点，凸显宏观结构
+        try:
+            im = im.filter(__import__('PIL').ImageFilter.GaussianBlur(1.2))
+        except Exception:
+            pass
+        gray = im.convert("L")
+        # 亮度：过亮/过暗都扣分
+        stat = ImageStat.Stat(gray)
+        bright = stat.mean[0] / 255.0
+        if bright < 0.05 or bright > 0.95:
+            return 0.0  # 纯黑/纯白直接弃用
+        b_score = 1.0 - abs(bright - 0.5) * 1.6
+
+        # 色彩丰富度：像素级饱和度（max(R,G,B)-min(R,G,B)），灰度图趋近 0、彩色图较高
+        w0, h0 = im.size
+        rp, gch, bp = im.split()
+        rp = rp.load(); gch = gch.load(); bp = bp.load()
+        sat_sum = 0; sat_cnt = 0
+        for y in range(0, h0, 2):
+            for x in range(0, w0, 2):
+                r = rp[x, y]; g2 = gch[x, y]; b = bp[x, y]
+                mx = max(r, g2, b); mn = min(r, g2, b)
+                sat_sum += (mx - mn)
+                sat_cnt += 1
+        color = (sat_sum / sat_cnt) / 255.0 if sat_cnt else 0.0
+        c_score = min(1.0, color * 2.0)
+
+        # 宏观边缘结构：用较大步长的差分（模糊后），抑制像素级噪点、保留真实轮廓
+        w, h = gray.size
+        gp = gray.load()
+        step = max(4, min(w, h) // 24)  # 大步长采样宏观结构
+        diff_sum = 0
+        cnt = 0
+        for y in range(0, h - step, step):
+            for x in range(0, w - step, step):
+                d = abs(gp[x, y] - gp[x + step, y]) + abs(gp[x, y] - gp[x, y + step])
+                diff_sum += d
+                cnt += 1
+        edge = diff_sum / cnt / 510.0 if cnt else 0.0
+        # 边缘过低=纯色/平滑；过高=花屏噪声；理想区间约 0.05~0.30
+        if edge < 0.02:
+            e_score = 0.0
+        elif edge <= 0.30:
+            e_score = edge / 0.30  # 0.02~0.30 线性到 1
+        else:
+            e_score = max(0.0, 1.0 - (edge - 0.30) * 3.0)  # 花屏/极端噪声重罚
+
+        # 直方图熵：信息量
+        hist = gray.histogram()
+        total = sum(hist)
+        ent = 0.0
+        for c in hist:
+            if c:
+                p = c / total
+                ent -= p * (p and _ln(p))
+        ent_score = min(1.0, ent / 4.0)  # 8bit 熵最高约 8
+
+        return b_score * 0.28 + c_score * 0.28 + e_score * 0.30 + ent_score * 0.14
+    except Exception:
+        return None
+
+
+def _ln(x: float) -> float:
+    try:
+        import math
+        return math.log(x)
+    except Exception:
+        return 0.0
+
+
+def _extract_frame(video: str, t: float, ffmpeg: str, outp: os.PathLike) -> bool:
+    """抽单帧：input seeking 优先（快），失败回退 output seeking（稳）。成功返回 True。"""
+    cmds = [
+        [ffmpeg, "-y", "-ss", f"{t:.2f}", "-i", video, "-frames:v", "1", "-q:v", "3", str(outp)],
+        [ffmpeg, "-y", "-i", video, "-ss", f"{t:.2f}", "-frames:v", "1", "-q:v", "3", str(outp)],
+    ]
+    for cmd in cmds:
+        try:
+            subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=180, check=True)
+        except Exception:
+            pass
+        if os.path.exists(outp) and os.path.getsize(outp) >= 512:
+            return True
+        if os.path.exists(outp):
+            try:
+                os.unlink(outp)
+            except OSError:
+                pass
+    return False
+
+
+def extract_cover_from_video(conn: sqlite3.Connection, movie_id: int,
+                             ffmpeg: str = "ffmpeg") -> Optional[str]:
+    """从影片主视频中「智能」抽取一帧作为封面。成功返回 cover 文件名，失败返回 None。
+
+    智能选帧：在中段范围（20%~80%）均匀采样多帧，逐帧打分（亮度/色彩/清晰度/信息量），
+    挑出最能反映影片内容、且避开黑场/字幕/花屏/纯色的那一帧作封面。
+    需要外部 ffmpeg（配置 ffmpeg_path 或 PATH；若都没有则自动探测 tools/ffmpeg）。"""
+    from . import images
+    from .config import COVER_DIR
+    # 解析 ffmpeg：PATH 找不到时探测项目自带
+    if not os.path.dirname(ffmpeg) and not shutil.which(ffmpeg):
+        cand = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                            "tools", "ffmpeg", "bin", "ffmpeg.exe")
+        if os.path.exists(cand):
+            ffmpeg = cand
+    video = movie_primary_file(conn, movie_id)
+    if not video or not os.path.exists(video):
+        return None
+    # 推导 ffprobe
+    if os.path.dirname(ffmpeg):
+        base = os.path.basename(ffmpeg)
+        ext = os.path.splitext(base)[1] or ".exe"
+        ffprobe = os.path.join(os.path.dirname(ffmpeg), "ffprobe" + ext)
+    else:
+        ffprobe = "ffprobe"
+    dur = _ffprobe_duration(video, ffprobe)
+    if not dur or dur <= 0:
+        return None
+    row = query_one(conn, "SELECT key, cover, cover_source FROM movies WHERE id=?", (int(movie_id),))
+    if not row:
+        return None
+    # 仅当「无封面」或「当前封面是视频抽帧」时才写入，避免覆盖正式刮削/上传封面
+    if row["cover"] and row["cover_source"] not in ("", "video"):
+        return "skipped"
+    key = row["key"]
+    outp = COVER_DIR / f"_extract_{int(movie_id)}_{os.getpid()}.jpg"
+
+    # —— 智能选帧：中段采样 N 帧打分，选最佳 ——
+    # 采样数：时长越长越能多采样，最多 14 帧；短影片少抽（抽帧开销也小）
+    n = max(6, min(14, int(dur / 240) + 4))
+    best_score = -1.0
+    best_cand: Optional[os.PathLike] = None
+    any_frame = False
+    for i in range(n):
+        # 时间点在中段 20%~85% 均匀分布，正片内容最集中的区域
+        ratio = 0.20 + 0.65 * (i / max(1, n - 1))
+        t = max(0.05, min(dur * ratio, dur * 0.9))
+        if not _extract_frame(video, t, ffmpeg, outp):
+            continue
+        any_frame = True
+        s = _score_frame(outp)
+        if s is None:
+            # PIL 不可用：放弃打分，直接用当前帧（保持兼容）
+            name = images.save_local_file(key, outp)
+            try:
+                outp.unlink()
+            except OSError:
+                pass
+            return name
+        # 时间偏好：40%~65% 轻微加分（正片黄金区）
+        time_bonus = 0.15 if 0.40 <= ratio <= 0.65 else 0.0
+        score = s + time_bonus
+        if score > best_score:
+            best_score = score
+            cand = COVER_DIR / f"_cand_{int(movie_id)}_{os.getpid()}.jpg"
+            try:
+                if os.path.exists(cand):
+                    os.unlink(cand)
+                import shutil as _sh
+                _sh.copyfile(outp, cand)
+                best_cand = cand
+            except Exception:
+                pass
+    # 清理本轮中间抽帧
+    try:
+        if outp.exists():
+            outp.unlink()
+    except OSError:
+        pass
+    if not best_cand:
+        return None
+    # 迁移最优候选到正式封面文件
+    name = images.save_local_file(key, best_cand)
+    try:
+        best_cand.unlink()
+    except OSError:
+        pass
+    if not name:
+        return None
+    if name:
+        conn.execute(
+            "UPDATE movies SET cover = ?, cover_source = 'video' WHERE id = ?",
+            (name, int(movie_id)),
+        )
+    return name
 
 
 def get_previews(conn: sqlite3.Connection, movie_id: int) -> List[str]:

@@ -84,6 +84,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "cover": {
         # 扫描时自动嗅探同目录下的本地封面图
         "auto_local": True,
+        # 刮削任务结束后，自动为仍无封面的影片从视频抽帧兜底（临时占位，刮削到正式海报会覆盖）
+        "auto_extract": True,
         # 允许从元数据源返回的 URL 下载封面
         "download": True,
         "timeout": 20,

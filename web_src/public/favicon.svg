@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="片匣">
+  <title>片匣</title>
+  <defs>
+    <linearGradient id="bg" x1="16" y1="16" x2="496" y2="496" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#ff7d95"/>
+      <stop offset=".5" stop-color="#e0355a"/>
+      <stop offset="1" stop-color="#9e1330"/>
+    </linearGradient>
+    <linearGradient id="bar" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#ffffff" stop-opacity=".5"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity=".12"/>
+    </linearGradient>
+    <clipPath id="clip"><rect x="16" y="16" width="480" height="480" rx="112"/></clipPath>
+  </defs>
+  <g clip-path="url(#clip)">
+    <rect x="16" y="16" width="480" height="480" fill="url(#bg)"/>
+    <ellipse cx="150" cy="110" rx="210" ry="160" fill="#ffffff" fill-opacity=".12"/>
+  </g>
+  <rect x="156.0" y="132.0" width="200" height="200" rx="44" fill="#ffffff"/>
+  <path d="M296.0 171.0 L314.0 232 L296.0 305.0 Z" fill="#e0355a"/>
+  <rect x="120" y="436" width="272" height="16" rx="8" fill="url(#bar)"/>
+  <rect x="120" y="436" width="180" height="16" rx="8" fill="#ffffff"/>
+  <circle cx="300" cy="444" r="12" fill="#ffffff"/>
+</svg>
