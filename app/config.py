@@ -95,8 +95,9 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "scraper": {
         "enabled": True,
         # 抓取顺序，先命中的先用；可选 javbus / javdb / avwiki / local_nfo / http_json / http_html
-        # avwiki 置前：优先用其素人化名→真名映射补齐素人片元数据，封面回退到 javbus/javdb
-        "order": ["avwiki", "javbus", "javdb", "local_nfo"],
+        # avwiki 固定沉底（见 providers.ALWAYS_LAST）：它只收录素人片且抓取开销大，
+        # 作为补充源在最后补查女优真名，避免普通番号为它空转拖慢整体速度。
+        "order": ["javbus", "javdb", "local_nfo", "avwiki"],
         "timeout": 20,
         # 并发抓取线程数；网络 IO 密集型，适度提高可显著加速（建议 2-8）
         "workers": 4,

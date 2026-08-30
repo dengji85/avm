@@ -2038,7 +2038,8 @@ def reparse_all_codes(conn: sqlite3.Connection, only_missing: bool = True) -> Di
             parsed = _parser.extract_code(str(cand or ""))
             code = parsed[0] if parsed else ""
             if code:
-                new_code, used_rule = code, parsed[1] if len(parsed) > 1 else "reparse"
+                # extract_code 返回 (番号, 原始匹配串, 规则名)，这里要的是规则名
+                new_code, used_rule = code, parsed[2] if len(parsed) > 2 else "reparse"
                 break
         if new_code:
             conn.execute(

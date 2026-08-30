@@ -54,6 +54,11 @@ dist_build/
 app.db
 app/pics.db
 
+# ----- 打包产物（zip 解压目录 / 发布包，不入库） -----
+AVM-*-win64/
+dist/
+*.zip
+
 # ----- 系统 / 编辑器 -----
 .DS_Store
 Thumbs.db

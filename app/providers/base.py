@@ -40,6 +40,29 @@ class BaseProvider:
     def fetch(self, movie: Dict[str, Any]) -> Optional[MetaResult]:
         raise NotImplementedError
 
+    # 收录范围声明：子类可覆写，用于「智能刮削」跳过不可能命中的源。
+    # 返回 None/空 表示不限制；返回类型集合表示只处理这些类型。
+    #: 只处理这些番号类型（空 = 不限制）
+    handles: tuple = ()
+    #: 明确不处理这些番号类型（空 = 不排除）
+    excludes: tuple = ()
+
+    def can_handle(self, movie: Dict[str, Any]) -> bool:
+        """预判本源是否可能收录该影片；False 时调度层直接跳过，不发请求。
+
+        依据番号类型（见 app/code_kind）：FC2 / 素人 / 普通商业片。
+        默认不限制（True），各源按自身收录范围覆写 handles / excludes。
+        """
+        if not self.handles and not self.excludes:
+            return True
+        from ..code_kind import classify_movie
+        kind = classify_movie(movie, self.cfg)
+        if self.handles and kind not in self.handles:
+            return False
+        if self.excludes and kind in self.excludes:
+            return False
+        return True
+
     # -------------------------------------------------------------- 工具
 
     @property

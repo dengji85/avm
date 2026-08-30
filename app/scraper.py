@@ -377,6 +377,18 @@ def scrape_one_parallel(movie: Dict[str, Any], providers: List[Any], cfg: Dict[s
     per_provider: List[Dict[str, Any]] = []  # 逐源明细，供失败面板诊断
     try:
         for provider in providers:
+            # 智能跳过：按收录范围预判，本源不可能收录的番号直接跳过（不发请求）
+            try:
+                if not provider.can_handle(movie):
+                    per_provider.append({
+                        "provider": provider.name,
+                        "status": "skip",
+                        "reason": "番号类型不在本源收录范围",
+                        "elapsed_ms": 0,
+                    })
+                    continue
+            except Exception:
+                pass  # 预判失败不影响主流程，照常抓取
             t0 = time.monotonic()
             try:
                 meta = provider.fetch(movie)
@@ -510,6 +522,28 @@ def run_scrape(ids: Optional[List[int]] = None, scope: str = "missing",
     providers = build_providers(cfg)
     delay = max(0, int(cfg["scraper"].get("delay_ms", 0))) / 1000.0
     auto_local = bool(cfg["cover"].get("auto_local", True))
+
+    # 数据库里已有核心资料的女优：刮削前一次性查出并注入数据源，
+    # 刮到这些女优时直接跳过档案页抓取（无需用户配置，已有资料不再重复抓）。
+    # 判定「已有核心资料」= (身高或三围B 已有) 且 (生日或头像 已有)。
+    try:
+        _c = connect()
+        try:
+            ready_rows = query_all(
+                _c,
+                "SELECT name FROM actresses WHERE "
+                "(COALESCE(height,'')<>'' OR COALESCE(bust,'')<>'') AND "
+                "(COALESCE(birthday,'')<>'' OR COALESCE(avatar,'')<>'')",
+            )
+        finally:
+            _c.close()
+        ready_names = {r["name"] for r in ready_rows if r.get("name")}
+        for p in providers:
+            setter = getattr(p, "set_skip_actresses", None)
+            if callable(setter):
+                setter(ready_names)
+    except Exception:
+        pass  # 查库失败不影响主流程，退化为每次抓取
 
     def _touch_skip(conn, mid: int, code: str, reason: str, kind: str) -> None:
         """稳定失败时把影片加进跳过名单（累计失败次数）；已存在则 +1。"""

@@ -79,6 +79,8 @@ def _parse_runtime(text: str) -> Optional[int]:
 class JavBusProvider(BaseProvider):
     name = "javbus"
     label = "JavBus"
+    # JavBus 不收录 FC2 同人与素人片，这两类直接跳过，避免无效请求
+    excludes = ("fc2", "amateur")
     desc = "JavBus 在线元数据（详情页，封面走 DMM 图床直连）。主域有 driver-verify 验证页，" \
            "需配置代理或粘贴浏览器整段 Cookie 才能抓取。"
 
@@ -95,7 +97,10 @@ class JavBusProvider(BaseProvider):
         cookie = (self.options.get("cookie") or "").strip()
         if cookie:
             headers["Cookie"] = cookie
-        html = self.http_get(url, headers=headers)
+        # 详情页走较短超时：javbus 详情页在国内网络常读超时，若沿用全局
+        # timeout(20s) × retries(3) 会让单部片干等 40~60s。这里压到 10s、
+        # 不重试，超时就快速降级到搜索兜底 / 下一个数据源。
+        html = self._detail_get(url, headers)
         if not html:
             # 直接详情 404 / 连接失败：退回搜索兜底（部分素人番号只在搜索结果里出现）
             return self._search(code, headers)
@@ -105,6 +110,29 @@ class JavBusProvider(BaseProvider):
             # 直接详情被拦 / 无结果时，退回搜索
             return self._search(code, headers)
         return self._parse(code, html)
+
+    #: 详情页超时（秒）与重试次数。javbus 详情页常读超时，重试只会成倍放大耗时，
+    #: 这里快速失败，把机会让给搜索兜底和其它数据源。
+    _DETAIL_TIMEOUT = 10
+    _DETAIL_RETRIES = 1
+
+    def _detail_get(self, url: str, headers: Optional[Dict[str, str]] = None) -> Optional[str]:
+        """详情页专用请求：短超时 + 不重试，避免单部片被慢响应拖死。"""
+        saved_timeout = self.scfg.get("timeout")
+        saved_retries = self.scfg.get("retries")
+        try:
+            self.scfg["timeout"] = self._DETAIL_TIMEOUT
+            self.scfg["retries"] = self._DETAIL_RETRIES
+            return self.http_get(url, headers)
+        finally:
+            if saved_timeout is None:
+                self.scfg.pop("timeout", None)
+            else:
+                self.scfg["timeout"] = saved_timeout
+            if saved_retries is None:
+                self.scfg.pop("retries", None)
+            else:
+                self.scfg["retries"] = saved_retries
 
     def _search_cover(self, code: str) -> Optional[str]:
         """从站内搜索结果页取封面图（javbus 搜索结果用 cloudfront 图床，
@@ -129,9 +157,13 @@ class JavBusProvider(BaseProvider):
             return None
 
     def _search(self, code: str, headers: Dict[str, str]) -> Optional[Dict[str, Any]]:
-        """搜索兜底：直接详情拿不到时，用站内搜索定位真实番号再抓详情。"""
+        """搜索兜底：直接详情拿不到时，用站内搜索定位真实番号再抓详情。
+
+        同样走短超时（见 _detail_get）：搜索页 + 详情页若都慢，会成倍放大
+        单部片耗时，不如快速放弃、把机会让给后续数据源。
+        """
         surl = f"{self.base_url}/search/{code}"
-        shtml = self.http_get(surl, headers=headers)
+        shtml = self._detail_get(surl, headers)
         if not shtml or detect_blocker(shtml):
             return None
         soup = BeautifulSoup(shtml, "html.parser")
@@ -143,7 +175,7 @@ class JavBusProvider(BaseProvider):
         real = m[-1] if m else None
         if not real:
             return None
-        dhtml = self.http_get(f"{self.base_url}/{real}", headers=headers)
+        dhtml = self._detail_get(f"{self.base_url}/{real}", headers)
         if not dhtml or detect_blocker(dhtml):
             return None
         return self._parse(real, dhtml)

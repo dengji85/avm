@@ -10,7 +10,8 @@ URL 规律为 https://av-wiki.net/{番号小写}/（例如 mfc-354）。
 from __future__ import annotations
 
 import re
-from typing import Any, Dict, Optional
+import threading
+from typing import Any, Dict, List, Optional
 
 from bs4 import BeautifulSoup
 
@@ -22,13 +23,24 @@ class AvWikiProvider(BaseProvider):
     name = "avwiki"
     label = "AV-Wiki (素人)"
     desc = "av-wiki.net 素人化名→真名映射，补齐素人片元数据（无封面，封面回退其它源）"
+    # av-wiki 只收录素人片：非素人番号直接跳过，不再为空转浪费一次 CDP 抓取
+    handles = ("amateur",)
 
     def __init__(self, cfg: Dict[str, Any]) -> None:
         super().__init__(cfg)
         self.base_url = (self.options.get("base_url") or "https://av-wiki.net").rstrip("/")
+        # 数据库里已有核心资料的女优（规范化名）：刮削时直接跳过其档案页抓取
+        self._skip_actresses: set = set()
 
     def enabled(self) -> bool:
         return bool(self.options.get("enabled", True))
+
+    def set_skip_actresses(self, names) -> None:
+        """注入「数据库已有核心资料」的女优名集合（由调度层刮削前一次性查出）。
+
+        这些女优无需再抓档案页，刮削时直接跳过，显著提速且不影响已有数据。
+        """
+        self._skip_actresses = {self._norm(n) for n in (names or ()) if n}
 
     # ----------------------------------------------------------- 文本提取助手
     @staticmethod
@@ -49,26 +61,57 @@ class AvWikiProvider(BaseProvider):
     _RE_CUP = re.compile(r"[Bb]\d{2,3}\(([^)]+)\)")
     _RE_H = re.compile(r"[Tt](\d{2,3})")
 
+    # 女优资料缓存（进程内、跨影片复用）：{规范化女优名: profile 或 None}
+    # 刮削同一女优的多部片时，档案页只需抓一次；「抓过但没资料」也记 None，
+    # 避免同一批任务里反复重试同一个搜索/档案页（CDP 抓取开销大）。
+    _PROFILE_CACHE: Dict[str, Any] = {}
+    _PROFILE_LOCK = threading.Lock()
+
     def _actress_slugs(self, html: str):
         """从素人页提取 av-actress 链接 slug，按出现次数排序（主女优通常最多次）。"""
         from collections import Counter
         slugs = Counter(re.findall(r"/av-actress/([a-z0-9-]+)/", html))
         return [s for s, _ in slugs.most_common() if s and s != "unknown"]
 
+    #: 回退到裸 requests 时的超时/重试。av-wiki 对无信任度的请求不直接拒绝，
+    #: 而是故意慢速拖到超时；沿用全局 timeout(20s) × retries(3) 会让单次回退
+    #: 耗上 20~60s 却仍拿到空壳页。这里压到「5 秒、不重试」快速放弃。
+    _FALLBACK_TIMEOUT = 5
+    _FALLBACK_RETRIES = 1
+
+    def _quick_http_get(self, url: str) -> Optional[str]:
+        """短超时回退：拿不到就快速放弃，避免 av-wiki 慢速拖垮刮削速度。"""
+        saved_timeout = self.scfg.get("timeout")
+        saved_retries = self.scfg.get("retries")
+        try:
+            self.scfg["timeout"] = self._FALLBACK_TIMEOUT
+            self.scfg["retries"] = self._FALLBACK_RETRIES
+            return self.http_get(url)
+        finally:
+            if saved_timeout is None:
+                self.scfg.pop("timeout", None)
+            else:
+                self.scfg["timeout"] = saved_timeout
+            if saved_retries is None:
+                self.scfg.pop("retries", None)
+            else:
+                self.scfg["retries"] = saved_retries
+
     def _cget(self, url: str) -> Optional[str]:
-        """带信任度地抓取：优先走常驻 Chrome（CDP），失败再回退普通 requests。
+        """带信任度地抓取：优先走常驻 Chrome（CDP），失败再快速回退普通 requests。
 
         av-wiki 对裸 requests 基本会拦截/返回空白壳页，女优档案页/搜索页
         必须用养出信任度的 CDP 会话才能拿到真实内容，否则身高三围生日头像全抓空。
+        回退走短超时（见 _quick_http_get），避免被慢速拖 20~60s。
         """
         port = int(self.scfg.get("chrome_debug_port", 9222) or 9222)
         try:
-            html = cdp_fetch(url, port=port, wait=20, auto_launch=True)
+            html = cdp_fetch(url, port=port, wait=12, auto_launch=True)
             if html and not _is_blocker(html):
                 return html
         except Exception:
             pass
-        return self.http_get(url)
+        return self._quick_http_get(url)
 
     def _fetch_actress_profiles(self, html: str, real_names, depth: int = 2) -> Dict[str, Any]:
         """素人刮削时顺带抓女优资料（身高/三围/生日/头像），返回 {女优名: {...}}。
@@ -79,22 +122,52 @@ class AvWikiProvider(BaseProvider):
         """
         if not real_names:
             return {}
-        want = {self._norm(n) for n in real_names if n}
-        if not want:
-            return {}
-        out: Dict[str, Any] = {}
-        for name in real_names:
-            nrm = self._norm(name)
-            if not nrm or nrm not in want:
+        # 数据库已有核心资料的女优直接跳过，不再重复抓取档案页
+        if self._skip_actresses:
+            real_names = [n for n in real_names
+                          if n and self._norm(n) not in self._skip_actresses]
+            if not real_names:
+                return {}
+        # 规范化名 -> 原名（搜索 ?s= 必须用原名）
+        name_map: Dict[str, str] = {}
+        for n in real_names:
+            if not n:
                 continue
+            key = self._norm(n)
+            if key:
+                name_map.setdefault(key, n)
+        if not name_map:
+            return {}
+
+        out: Dict[str, Any] = {}
+        # 先消费缓存：已抓过的女优直接复用，未命中才走网络
+        todo: List[str] = []
+        for key in name_map:
+            with self._PROFILE_LOCK:
+                hit = key in self._PROFILE_CACHE
+                cached = self._PROFILE_CACHE.get(key)
+            if hit:
+                if cached:
+                    out[key] = cached
+                continue
+            todo.append(key)
+        if not todo:
+            return out
+
+        remaining = set(todo)
+        for key in todo:
+            name = name_map[key]
             try:
                 from urllib.parse import quote
                 search_html = self._cget(f"{self.base_url}/?s={quote(name)}")
             except Exception:
+                self._cache_profile(key, None)
                 continue
             if not search_html:
+                self._cache_profile(key, None)
                 continue
             slugs = self._actress_slugs(search_html)[:depth]
+            got = None
             for slug in slugs:
                 try:
                     page = self._cget(f"{self.base_url}/av-actress/{slug}/")
@@ -108,16 +181,35 @@ class AvWikiProvider(BaseProvider):
                 # 用「包含」而非「相等」校验，命中目标真名即可
                 if not page_name:
                     continue
-                matched = next((t for t in want if self._norm(t) in self._norm(page_name)), None)
+                matched = next((t for t in remaining if self._norm(t) in self._norm(page_name)), None)
                 if not matched:
                     continue
                 profile = self._parse_actress_page(page, page_name)
                 if profile:
                     out[matched] = profile
-                    want.discard(matched)
-                    if not want:
-                        break
+                    got = profile
+                    # 资料归属 matched（可能是本次搜索之外的女优），按其名缓存
+                    self._cache_profile(matched, profile)
+                    remaining.discard(matched)
+                    break
+            if got is None:
+                # 搜过但没拿到资料：记负缓存，同一批任务内不再重复尝试
+                self._cache_profile(key, None)
+            if not remaining:
+                break
         return out
+
+    @classmethod
+    def _cache_profile(cls, key: str, profile: Any) -> None:
+        """写入女优资料缓存（线程安全）。profile 为 None 表示「抓过但没资料」。"""
+        with cls._PROFILE_LOCK:
+            cls._PROFILE_CACHE[key] = profile
+
+    @classmethod
+    def clear_profile_cache(cls) -> None:
+        """清空女优资料缓存（需要强制重抓时调用）。"""
+        with cls._PROFILE_LOCK:
+            cls._PROFILE_CACHE.clear()
 
     @staticmethod
     def _norm(s: str) -> str:
@@ -198,12 +290,12 @@ class AvWikiProvider(BaseProvider):
         html = None
         port = int(self.scfg.get("chrome_debug_port", 9222) or 9222)
         try:
-            html = cdp_fetch(url, port=port, wait=25, auto_launch=True)
+            html = cdp_fetch(url, port=port, wait=12, auto_launch=True)
         except Exception as exc:  # CDP 不可用，回退
             self.last_error = f"CDP 抓取失败，回退 requests: {exc}"
             html = None
         if not html:
-            html = self.http_get(url)
+            html = self._quick_http_get(url)
         if not html:
             return None
 
@@ -283,24 +375,19 @@ class AvWikiProvider(BaseProvider):
             # 素人片以 av-wiki 为最全信息源：顺带抓女优档案（身高/三围/生日/头像）
             # 受 cover/media.auto_actress_profile 配置开关控制（默认开启）
             auto_profile = self.options.get("auto_actress_profile", True)
+            # 数据库已有核心资料的女优：连素人页回抓都省掉，直接跳过
+            if auto_profile and self._norm(real_name) in self._skip_actresses:
+                auto_profile = False
             if auto_profile:
-                # 用普通 requests 的素人页 html 解析 av-actress 链接（CDP 渲染版结构可能缺失）
-                plain = self.http_get(url) or html
-                profiles = self._fetch_actress_profiles(plain, [real_name])
+                # 女优资料走 WordPress 搜索定位档案页，不依赖素人页 html
+                # （原先会额外回抓一次整页用于解析链接，既慢又用不上，已去掉）
+                profiles = self._fetch_actress_profiles(html, [real_name])
                 if profiles:
                     meta["actress_profiles"] = profiles
-        # 化名作为标签，便于画廊按素人筛选 / 关联；并统一打「素人」标签
-        tags = []
-        if alias:
-            tags.append(alias)
-        tags.append("素人")
-        # 智能提取标题里的 # 主题标签（水着/巨乳/人妻…），作为自定义标签采用
-        for tag in re.findall(r"#([^#\s#]+)", title):
-            t = tag.strip()
-            if t and t not in tags and len(t) <= 20:
-                tags.append(t)
-        meta["tags"] = tags
-        # 把「化名 → 真名」关系也记到 plot，方便人工核对
+        # 素人片统一打「素人」类型（genre），不写入自定义标签，避免自定义标签快速膨胀。
+        # 「素人」本就是影片类型，作为 genre 可正常展示并按类型筛选。
+        meta["genres"] = ["素人"]
+        # 把「化名 → 真名」关系记到 plot，方便人工核对（化名不再作为标签污染自定义标签）
         if alias and real_name:
             meta["plot"] = f"素人名义：{alias} → 真名：{real_name}"
 

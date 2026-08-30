@@ -34,8 +34,19 @@ REGISTRY: Dict[str, Type[BaseProvider]] = {
 }
 
 
+#: 固定沉底的数据源：无论用户在设置里怎么排序，都强制放到最后执行。
+#: av-wiki 只收录素人片，且抓取开销大（走 CDP）。若排在前面，普通番号也要
+#: 先去它那空转一次（实测约 20s/部），严重拖慢整体刮削。作为补充源沉底，
+#: 只在前面主源没给出女优真名时才补查，普通片完全不受影响。
+ALWAYS_LAST = ("avwiki",)
+
+
 def build_providers(cfg: Dict[str, Any]) -> List[BaseProvider]:
-    """按配置里的 order 顺序实例化所有已启用的数据源（去重）。"""
+    """按配置里的 order 顺序实例化所有已启用的数据源（去重）。
+
+    注意：``ALWAYS_LAST`` 里的源（avwiki）会被强制移到最后，用户在设置里
+    把它拖到前面也不会生效——这是有意为之的性能保护。
+    """
     order = cfg.get("scraper", {}).get("order") or ["javbus", "javdb", "local_nfo"]
     seen = set()
     providers: List[BaseProvider] = []
@@ -53,6 +64,12 @@ def build_providers(cfg: Dict[str, Any]) -> List[BaseProvider]:
             continue
         if inst.enabled():
             providers.append(inst)
+    # 稳定沉底：保持其余源的相对顺序，只把 ALWAYS_LAST 移到末尾
+    if len(providers) > 1:
+        tail = [p for p in providers if p.name in ALWAYS_LAST]
+        if tail:
+            head = [p for p in providers if p.name not in ALWAYS_LAST]
+            providers = head + tail
     return providers
 
 
