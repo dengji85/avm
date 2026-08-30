@@ -52,6 +52,7 @@ dist_build/
 
 # ----- 运行时数据库（根目录 app.db 等同 data/ 库，不入库） -----
 app.db
+app/pics.db
 
 # ----- 系统 / 编辑器 -----
 .DS_Store

@@ -37,13 +37,6 @@
 
 ---
 
-## 🎬 30 秒看懂片匣
-
-<p align="center">
-  <img src="docs/assets/avm_demo.gif" alt="30 秒看懂片匣" width="900"/>
-  <br/><sub>↑ 占位：将 15–30 秒录屏存为 <code>docs/assets/avm_demo.gif</code>（建议镜头：扫描建库 → 女优墙 → 详情刮削 → 网页即播）</sub>
-</p>
-
 > **一句话**：把散落硬盘的 AV 文件，扫成**能搜、能去重、能看女优资料、能网页即播**的私人资料库——全程本地运行，数据全在你自己手里。
 
 ---
@@ -97,7 +90,17 @@
 ## ✨ 核心功能
 
 <p align="center">
-  <img src="docs/assets/avm影片库.PNG" alt="AVM 系统一览" width="1100"/>
+  <img src="docs/assets/avm_影片库.PNG" alt="AVM 系统一览" width="1100"/>
+</p>
+
+<p align="center">
+<table>
+  <tr>
+    <td align="center"><img src="docs/assets/avm_影片库.PNG" alt="影片库" width="300"/><br/><sub>影片库：分面筛选 · 卡片墙 · 排序 · 多选整理</sub></td>
+    <td align="center"><img src="docs/assets/avm_片单.PNG" alt="片单" width="300"/><br/><sub>片单：系统片单 / 智能片单，即点即播</sub></td>
+    <td align="center"><img src="docs/assets/avm_播放队列.PNG" alt="播放队列" width="300"/><br/><sub>播放队列：连续播放 · 顺序/乱序 · 循环 · 进度</sub></td>
+  </tr>
+</table>
 </p>
 
 - **🗂 自动扫描建库**：递归扫描、剥离站点噪声、跳过 sample/预告；支持自动嗅探同目录图片作本地封面。
