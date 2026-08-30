@@ -421,10 +421,26 @@ def scrape_one_parallel(movie: Dict[str, Any], providers: List[Any], cfg: Dict[s
                 primary_meta = meta
                 primary_name = provider.name
                 continue
-            if not primary_meta.get("cover") and meta.get("cover"):
-                primary_meta = dict(primary_meta)
-                primary_meta["cover"] = meta["cover"]
-                primary_meta["source"] = f"{primary_name}+{provider.name}"
+            # 后续源补齐主源缺失的字段（早期只补封面，导致本地 nfo / 补充源的
+            # 标题、女优、类型、简介等被整体丢弃）。列表型字段取并集，
+            # 避免只拿到某一源的少量标签。
+            merged = dict(primary_meta)
+            changed = False
+            for key, val in meta.items():
+                if key == "source" or val in (None, "", [], 0):
+                    continue
+                cur = merged.get(key)
+                if cur in (None, "", [], 0):
+                    merged[key] = val
+                    changed = True
+                elif isinstance(cur, list) and isinstance(val, list):
+                    extra = [x for x in val if x and x not in cur]
+                    if extra:
+                        merged[key] = cur + extra
+                        changed = True
+            if changed:
+                merged["source"] = f"{primary_name}+{provider.name}"
+                primary_meta = merged
 
         if primary_meta is None:
             # 没有命中：若是网络/服务端临时错误或被拦导致，标记 neterr（不进跳过名单）

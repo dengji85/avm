@@ -146,6 +146,16 @@ def _clean(meta: Dict[str, Any]) -> Dict[str, Any]:
     return {k: v for k, v in meta.items() if v not in (None, "", [], 0) or k in ("runtime", "rating")}
 
 
+def _norm_name(name: str) -> str:
+    """规范化文件名用于匹配：主名与扩展名分别去首尾空白后再拼接。
+
+    手动整理的文件常在扩展名前多一个空格（如 "812MMC-004 .nfo"、
+    "812MMC-004 .mp4"），直接比对会因这个空格永远匹配不上。
+    """
+    p = Path(name)
+    return (p.stem.strip() + p.suffix.strip()).lower()
+
+
 def find_sidecar(video_path: str | Path, code: str = "") -> Optional[Path]:
     """查找视频旁边的元数据文件。"""
     p = Path(video_path)
@@ -156,12 +166,15 @@ def find_sidecar(video_path: str | Path, code: str = "") -> Optional[Path]:
     if code:
         bases.insert(1, code)
     try:
-        existing = {f.name.lower(): f for f in folder.iterdir() if f.is_file()}
+        existing: Dict[str, Path] = {}
+        for f in folder.iterdir():
+            if f.is_file():
+                existing.setdefault(_norm_name(f.name), f)
     except OSError:
         return None
     for base in bases:
         for ext in (".nfo", ".json"):
-            hit = existing.get(f"{base}{ext}".lower())
+            hit = existing.get(f"{str(base).strip()}{ext}".lower())
             if hit:
                 return hit
     return None

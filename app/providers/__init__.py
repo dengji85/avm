@@ -34,6 +34,13 @@ REGISTRY: Dict[str, Type[BaseProvider]] = {
 }
 
 
+#: 固定置顶的数据源：无论用户在设置里怎么排序，都强制放到最前执行。
+#: 本地 nfo/json 是用户自己整理的权威数据，且完全离线、零延迟；影片没有
+#: nfo 时它直接未命中并落到在线源，没有任何额外成本。置顶可保证本地整理
+#: 的元数据不被在线源覆盖（早期实现里本地 nfo 排在在线源之后，读到的标题 /
+#: 女优 / 类型会被整体丢弃，只在缺封面时补图）。
+ALWAYS_FIRST = ("local_nfo",)
+
 #: 固定沉底的数据源：无论用户在设置里怎么排序，都强制放到最后执行。
 #: av-wiki 只收录素人片，且抓取开销大（走 CDP）。若排在前面，普通番号也要
 #: 先去它那空转一次（实测约 20s/部），严重拖慢整体刮削。作为补充源沉底，
@@ -64,12 +71,16 @@ def build_providers(cfg: Dict[str, Any]) -> List[BaseProvider]:
             continue
         if inst.enabled():
             providers.append(inst)
-    # 稳定沉底：保持其余源的相对顺序，只把 ALWAYS_LAST 移到末尾
     if len(providers) > 1:
+        # 稳定置顶：保持其余源的相对顺序，只把 ALWAYS_FIRST 提到最前
+        head = [p for p in providers if p.name in ALWAYS_FIRST]
+        if head:
+            rest = [p for p in providers if p.name not in ALWAYS_FIRST]
+            providers = head + rest
+        # 稳定沉底：保持其余源的相对顺序，只把 ALWAYS_LAST 移到末尾
         tail = [p for p in providers if p.name in ALWAYS_LAST]
         if tail:
-            head = [p for p in providers if p.name not in ALWAYS_LAST]
-            providers = head + tail
+            providers = [p for p in providers if p.name not in ALWAYS_LAST] + tail
     return providers
 
 

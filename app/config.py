@@ -95,9 +95,11 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "scraper": {
         "enabled": True,
         # 抓取顺序，先命中的先用；可选 javbus / javdb / avwiki / local_nfo / http_json / http_html
+        # local_nfo 置前：本地 nfo/json 是用户自己整理的权威数据，且完全离线、零延迟；
+        # 影片没有 nfo 时它直接未命中，自动落到在线源，无额外成本。缺失字段由后续源补齐。
         # avwiki 固定沉底（见 providers.ALWAYS_LAST）：它只收录素人片且抓取开销大，
         # 作为补充源在最后补查女优真名，避免普通番号为它空转拖慢整体速度。
-        "order": ["javbus", "javdb", "local_nfo", "avwiki"],
+        "order": ["local_nfo", "javbus", "javdb", "avwiki"],
         "timeout": 20,
         # 并发抓取线程数；网络 IO 密集型，适度提高可显著加速（建议 2-8）
         "workers": 4,
