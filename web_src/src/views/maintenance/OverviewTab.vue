@@ -68,13 +68,15 @@ async function doScrape() { busy.value = true; try { runScrape({ missing_only: t
 async function doLocalCovers() { busy.value = true; try { await rescanLocalCovers(); toast(t('maint.ovCoversStarted'), 'ok') } finally { busy.value = false } }
 async function doReparse() { busy.value = true; try { await reparseCodes({}); toast(t('maint.ovReparseStarted'), 'ok') } finally { busy.value = false } }
 
+function triggerScan() {
+  // 浏览器仅暴露文件/目录名称，真实路径需后端 watch 目录；此处触发全库扫描
+  runScan({})
+  toast(t('maint.ovScanStarted'), 'ok')
+}
 function onDrop(e) {
   e.preventDefault()
   dropActive.value = false
-  const items = [...(e.dataTransfer?.files || [])]
-  // 取首个文件/目录路径（浏览器仅暴露名称，真实路径需后端 watch 目录；此处触发全库扫描）
-  runScan({})
-  toast(t('maint.ovScanStarted'), 'ok')
+  triggerScan()
 }
 const dropActive = ref(false)
 
@@ -92,6 +94,9 @@ onMounted(() => { loadSummary(); loadTasks() })
       @dragover.prevent="dropActive = true"
       @dragleave.prevent="dropActive = false"
       @drop="onDrop"
+      @click="triggerScan"
+      role="button"
+      tabindex="0"
     >
       <span class="dz-ico">⤓</span>
       <span class="dz-t">{{ $t('maint.ovDrag') }}</span>
