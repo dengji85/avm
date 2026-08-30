@@ -51,14 +51,14 @@ async function playRecent() {
     }
   } catch (e) { toast(e.message, 'err'); return false }
   if (!all.length) { toast(t('playlist.emptyNoMovies'), 'err'); return false }
-  openPlayQueue(all, t('view.recent'))
+  openPlayQueue(all, t('view.recent'), -1, 0, state.recentAutoPlay)
   return true
 }
 
 onMounted(async () => {
   load()
-  // 进入即播放（迅雷式）；无播放记录则留在网格
-  await playRecent()
+  // 进入即打开播放列表（迅雷式），可由设置关闭；无播放记录则留在网格
+  if (state.recentOpenPlaylist) await playRecent()
 })
 </script>
 

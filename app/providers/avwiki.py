@@ -14,7 +14,7 @@ from typing import Any, Dict, Optional
 
 from bs4 import BeautifulSoup
 
-from ..cdp_fetch import cdp_fetch
+from ..cdp_fetch import cdp_fetch, _is_blocker
 from .base import BaseProvider, MetaResult, NetBlocked, detect_blocker
 
 
@@ -41,6 +41,149 @@ class AvWikiProvider(BaseProvider):
                 if val:
                     return val
         return ""
+
+    # -------------------------------------------------- 女优资料抓取
+    _RE_BIRTH = re.compile(r"(\d{4})\s*[年/\-]\s*(\d{1,2})\s*[月/\-]\s*(\d{1,2})\s*日?")
+    # 三围：B87(D) W59 H88 —— 罩杯可能带括号（如 (D)），用非捕获组不改变分组编号
+    _RE_BWH = re.compile(r"[Bb](\d{2,3})(?:\([^)]*\))?[-\s]*[Ww](\d{2,3})[-\s]*[Hh](\d{2,3})")
+    _RE_CUP = re.compile(r"[Bb]\d{2,3}\(([^)]+)\)")
+    _RE_H = re.compile(r"[Tt](\d{2,3})")
+
+    def _actress_slugs(self, html: str):
+        """从素人页提取 av-actress 链接 slug，按出现次数排序（主女优通常最多次）。"""
+        from collections import Counter
+        slugs = Counter(re.findall(r"/av-actress/([a-z0-9-]+)/", html))
+        return [s for s, _ in slugs.most_common() if s and s != "unknown"]
+
+    def _cget(self, url: str) -> Optional[str]:
+        """带信任度地抓取：优先走常驻 Chrome（CDP），失败再回退普通 requests。
+
+        av-wiki 对裸 requests 基本会拦截/返回空白壳页，女优档案页/搜索页
+        必须用养出信任度的 CDP 会话才能拿到真实内容，否则身高三围生日头像全抓空。
+        """
+        port = int(self.scfg.get("chrome_debug_port", 9222) or 9222)
+        try:
+            html = cdp_fetch(url, port=port, wait=20, auto_launch=True)
+            if html and not _is_blocker(html):
+                return html
+        except Exception:
+            pass
+        return self.http_get(url)
+
+    def _fetch_actress_profiles(self, html: str, real_names, depth: int = 2) -> Dict[str, Any]:
+        """素人刮削时顺带抓女优资料（身高/三围/生日/头像），返回 {女优名: {...}}。
+
+        用 WordPress 搜索 ``?s={真名}`` 定位女优档案页（不依赖素人页 html 结构，
+        兼容 CDP 渲染版），逐个抓档案页校验「AV女優名」包含真名才采用。
+        搜索与档案页都走 CDP（带信任度），避免被 av-wiki 拦截导致资料抓空。
+        """
+        if not real_names:
+            return {}
+        want = {self._norm(n) for n in real_names if n}
+        if not want:
+            return {}
+        out: Dict[str, Any] = {}
+        for name in real_names:
+            nrm = self._norm(name)
+            if not nrm or nrm not in want:
+                continue
+            try:
+                from urllib.parse import quote
+                search_html = self._cget(f"{self.base_url}/?s={quote(name)}")
+            except Exception:
+                continue
+            if not search_html:
+                continue
+            slugs = self._actress_slugs(search_html)[:depth]
+            for slug in slugs:
+                try:
+                    page = self._cget(f"{self.base_url}/av-actress/{slug}/")
+                except Exception:
+                    continue
+                if not page:
+                    continue
+                fields = self._dl_fields(page)
+                page_name = fields.get("AV女優名", "")
+                # 档案页「AV女優名」常带注音/英文（如「那賀崎ゆきね（なかさきゆきね）- nakasaki yukine」），
+                # 用「包含」而非「相等」校验，命中目标真名即可
+                if not page_name:
+                    continue
+                matched = next((t for t in want if self._norm(t) in self._norm(page_name)), None)
+                if not matched:
+                    continue
+                profile = self._parse_actress_page(page, page_name)
+                if profile:
+                    out[matched] = profile
+                    want.discard(matched)
+                    if not want:
+                        break
+        return out
+
+    @staticmethod
+    def _norm(s: str) -> str:
+        s = (s or "").strip().lower()
+        for ch in (" ", "　", "・", "·", ".", "（", "）", "(", ")", "ー", "-", "、", ","):
+            s = s.replace(ch, "")
+        return s
+
+    @staticmethod
+    def _dl_fields(html: str) -> Dict[str, str]:
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup(html, "html.parser")
+        out: Dict[str, str] = {}
+        for dl in soup.find_all("dl"):
+            for dt in dl.find_all("dt"):
+                key = dt.get_text(" ", strip=True)
+                if not key:
+                    continue
+                key = re.sub(r"[：:\s]+$", "", key).strip()
+                if not key or key in out:
+                    continue
+                dd = dt.find_next_sibling("dd")
+                out[key] = dd.get_text(" ", strip=True) if dd else ""
+        return out
+
+    @classmethod
+    def _parse_actress_page(cls, html: str, name: str) -> Dict[str, Any]:
+        """解析女优档案页，返回资料 + 头像 URL。"""
+        from bs4 import BeautifulSoup
+        fields = cls._dl_fields(html)
+        prof: Dict[str, Any] = {}
+        for key in ("生年月日", "誕生日"):
+            m = cls._RE_BIRTH.search(fields.get(key, "") or "")
+            if m:
+                prof["birthday"] = f"{m.group(1)}-{int(m.group(2)):02d}-{int(m.group(3)):02d}"
+                break
+        size_txt = fields.get("サイズ", "") or fields.get("尺寸", "")
+        mh = cls._RE_H.search(size_txt)
+        if mh:
+            prof["height"] = str(int(mh.group(1)))
+        mb = cls._RE_BWH.search(size_txt)
+        if mb:
+            prof["bust"] = str(int(mb.group(1)))
+            prof["waist"] = str(int(mb.group(2)))
+            prof["hip"] = str(int(mb.group(3)))
+        mc = cls._RE_CUP.search(size_txt)
+        if mc and not prof.get("cup"):
+            prof["cup"] = str(mc.group(1))
+        # 头像：档案页里非懒加载、alt 近似女优名的实图
+        target = cls._norm(name)
+        for img in BeautifulSoup(html, "html.parser").find_all("img"):
+            src = (img.get("src") or "").strip()
+            if not src or src.startswith("data:"):
+                continue
+            clsname = " ".join(img.get("class") or [])
+            if "lazyload" in clsname:
+                continue
+            alt = (img.get("alt") or "").strip()
+            if target and target in cls._norm(alt):
+                prof["avatar_url"] = src
+                break
+            # DMM 女优头像目录（actress / actjpgs），且文件名含女优罗马音或路径不含作品号
+            if (".jpg" in src or ".png" in src) and ("/actress/" in src or "/actjpgs/" in src):
+                prof["avatar_url"] = src
+                break
+        return prof
 
     def fetch(self, movie: Dict[str, Any]) -> Optional[MetaResult]:
         code = (movie.get("code") or "").strip()
@@ -92,23 +235,33 @@ class AvWikiProvider(BaseProvider):
             r"名前は、\s*([^\s,、]+?)\s*さん",
             r"出演してるAV女優の名前は、\s*([^\s,、]+?)\s*さん",
         )
-        # 化名（素人名义）
+        # 化名（素人名义）：文案形如「素人名義 さなさん 29歳 結婚5年目 表参道」
+        # 或「〔 さなさん 29歳 結婚5年目 表参道 〕は誰」。化名只是首个 token，
+        # 后面的年龄/婚龄/出身地等描述不能算进去，否则会变成超长脏标签。
         alias = self._grep(
             body_text,
-            r"素人名義[：:]\s*([^\s,、]+)",
-            r"の〔([^〕]+)〕は誰",
-            r"（" + re.escape(slug.upper()) + r"）の〔([^〕]+)〕",
+            r"素人名義[：:\s]*([^\s,、]+)",
+            r"の〔\s*([^\s〕]+)",
+            r"（" + re.escape(slug.upper()) + r"）の〔\s*([^\s〕]+)〕",
         )
+        if alias:
+            # 兜底：只保留首个词（化名），去掉年龄/婚龄/出身地等噪声
+            alias = alias.split()[0]
         # 厂牌 / 配信商
         studio = self._grep(
             body_text,
             r"配信メーカー[：:]\s*([^\s,、/]+)",
             r"メーカー[：:]\s*([^\s,、/]+)",
         )
+        # 系列（シリーズ）—— dl 定义列表里键名可能不带冒号，两种写法都兼容
+        series = self._grep(
+            body_text,
+            r"シリーズ[：:]?\s*([^\s,、/]+)",
+        )
         # 发行日
         release = self._grep(
             body_text,
-            r"配信開始日[：:]\s*(\d{4}[-/年]\d{1,2}[-/月]\d{1,2}日?)",
+            r"配信開始日[：:]?\s*(\d{4}[-/年]\d{1,2}[-/月]\d{1,2}日?)",
             r"作品配信開始\D*(\d{4}[-/]\d{1,2}[-/]\d{1,2})",
         )
         release = release.replace("年", "-").replace("月", "-").replace("日", "").strip("-")
@@ -123,13 +276,29 @@ class AvWikiProvider(BaseProvider):
             "studio": studio,
             "source": f"avwiki:{slug}",
         }
+        if series:
+            meta["series"] = series
         if real_name:
             meta["actresses"] = [real_name]
+            # 素人片以 av-wiki 为最全信息源：顺带抓女优档案（身高/三围/生日/头像）
+            # 受 cover/media.auto_actress_profile 配置开关控制（默认开启）
+            auto_profile = self.options.get("auto_actress_profile", True)
+            if auto_profile:
+                # 用普通 requests 的素人页 html 解析 av-actress 链接（CDP 渲染版结构可能缺失）
+                plain = self.http_get(url) or html
+                profiles = self._fetch_actress_profiles(plain, [real_name])
+                if profiles:
+                    meta["actress_profiles"] = profiles
         # 化名作为标签，便于画廊按素人筛选 / 关联；并统一打「素人」标签
         tags = []
         if alias:
             tags.append(alias)
         tags.append("素人")
+        # 智能提取标题里的 # 主题标签（水着/巨乳/人妻…），作为自定义标签采用
+        for tag in re.findall(r"#([^#\s#]+)", title):
+            t = tag.strip()
+            if t and t not in tags and len(t) <= 20:
+                tags.append(t)
         meta["tags"] = tags
         # 把「化名 → 真名」关系也记到 plot，方便人工核对
         if alias and real_name:

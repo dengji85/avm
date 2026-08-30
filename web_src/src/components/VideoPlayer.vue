@@ -9,6 +9,7 @@ import { t } from '../i18n/index.js'
 const props = defineProps({
   movieId: { type: Number, required: true },
   startAt: { type: Number, default: 0 },
+  autoplay: { type: Boolean, default: true },   // 打开播放器后是否自动开始播放
 })
 const emit = defineEmits(['close', 'progress', 'ended'])
 
@@ -387,7 +388,7 @@ function initPlayer() {
     containerEl.value.appendChild(el)
 
     player = videojs(el, {
-      autoplay: true,
+      autoplay: props.autoplay,
       controls: true,
       preload: 'auto',
       fluid: false,

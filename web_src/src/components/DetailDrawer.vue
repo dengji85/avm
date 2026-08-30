@@ -7,7 +7,7 @@ import {
   extractCover,
   listTags, renameTag, deleteTag,
   aiGenerateSynopsis, aiSuggestTags, aiStatus,
-  getActress, avatarUrl,
+  getActress, avatarUrl, getConfig,
 } from '../api.js'
 import AddToCollectionBtn from './AddToCollectionBtn.vue'
 import {
@@ -36,6 +36,32 @@ const lightbox = ref('')
 const aiReady = ref(false)
 const aiBusy = ref(false)
 
+/* 常用在线站点：详情页一键打开影片在各站点的页面 */
+const sites = ref([])
+const topSites = computed(() => sites.value.slice(0, 3))
+const moreSites = computed(() => sites.value.slice(3))
+async function loadSites() {
+  try {
+    const cfg = await getConfig()
+    const list = (cfg && cfg.online_sites) || []
+    sites.value = list.filter((s) => s.enabled && s.url && s.url.includes('{code}'))
+  } catch { sites.value = [] }
+}
+function renderSiteUrl(site, code) {
+  // 同时支持 {code}（番号）与 {title}（标题）占位
+  const raw = (mv.value && mv.value.title) || code || ''
+  const codeVal = site.lower ? String(code || '').toLowerCase() : (code || '')
+  const titleVal = site.lower ? String(raw).toLowerCase() : raw
+  return String(site.url)
+    .replace(/\{code\}/g, encodeURIComponent(codeVal))
+    .replace(/\{title\}/g, encodeURIComponent(titleVal))
+}
+function openSite(site) {
+  const code = (mv.value && mv.value.code) || ''
+  const final = renderSiteUrl(site, code)
+  if (final) window.open(final, '_blank', 'noopener')
+}
+
 async function checkAi() {
   try { const r = await aiStatus(); aiReady.value = !!r.enabled } catch { aiReady.value = false }
 }
@@ -60,6 +86,8 @@ async function doAiTags() {
 
 const open = computed(() => !!state.currentId)
 const id = computed(() => state.currentId)
+// 打开详情时加载常用站点配置（只取启用的）
+watch(open, (v) => { if (v) loadSites() })
 
 const progressPos = computed(() => Number(mv.value?.progress?.position) || 0)
 const progressPct = computed(() => {
@@ -576,6 +604,39 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', onKey) })
                   <button class="btn icon" :class="{ active: mv.watched }" @click="flip('watched')" :data-tip="$t('flag.watched')">{{ mv.watched ? '●' : '○' }}</button>
 
                   <AddToCollectionBtn :movie-id="id" variant="detail" />
+
+                  <!-- 打开在线页面：前 3 个平铺，更多 hover 展开 -->
+                  <template v-if="sites.length">
+                    <button
+                      v-for="s in topSites"
+                      :key="s.id"
+                      class="btn site-flat"
+                      :title="s.url"
+                      @click="openSite(s)"
+                    >
+                      <span class="i">🔗</span> {{ s.name || s.url }}
+                    </button>
+                    <div v-if="moreSites.length" class="dd-sites-more">
+                      <button class="btn site-flat">
+                        <span class="i">🔗</span> {{ $t('detail.openSitesMore', { n: moreSites.length }) }}
+                        <span class="caret">▾</span>
+                      </button>
+                      <div class="sites-pop">
+                        <div class="sites-pop-tip">{{ $t('detail.openSitesTip') }}</div>
+                        <button
+                          v-for="s in moreSites"
+                          :key="s.id"
+                          class="sites-pop-item"
+                          @click="openSite(s)"
+                        >
+                          <span class="i">↗</span> {{ s.name || s.url }}
+                        </button>
+                      </div>
+                    </div>
+                  </template>
+                  <button v-else class="btn" disabled :title="$t('detail.openSitesTip')">
+                    <span class="i">🔗</span> {{ $t('detail.openSitesEmpty') }}
+                  </button>
                 </div>
 
                 <!-- 评分 -->
@@ -931,6 +992,20 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', onKey) })
 
 .dd-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: var(--sp-2); }
 .dd-actions { display: flex; flex-wrap: wrap; gap: var(--sp-2); }
+.site-flat { white-space: nowrap; font-size: 12px; padding: 5px 9px; }
+.dd-sites-more { position: relative; }
+.dd-sites-more .caret { font-size: 10px; opacity: .7; margin-left: 2px; }
+/* 更多：鼠标移入展开，移出收起；用 padding-top 做透明桥，避免移动到面板时丢失 hover */
+.dd-sites-more .sites-pop { display: none; }
+.dd-sites-more:hover .sites-pop,
+.dd-sites-more .sites-pop:hover { display: flex; }
+.sites-pop { position: absolute; top: 100%; left: 0; z-index: 60; min-width: 220px;
+  background: var(--c-bg-pop); border: 1px solid var(--c-border); border-radius: 10px;
+  box-shadow: 0 10px 30px rgba(0,0,0,.28); padding: 6px var(--sp-2) var(--sp-2); flex-direction: column; gap: 2px; }
+.sites-pop-tip { font-size: 11px; color: var(--c-text-3); padding: 2px 6px 6px; }
+.sites-pop-item { display: flex; align-items: center; gap: 6px; text-align: left; width: 100%;
+  border: 0; background: transparent; color: var(--c-text-1); padding: 7px 8px; border-radius: 7px; cursor: pointer; font-size: 13px; }
+.sites-pop-item:hover { background: var(--c-bg-hover); color: var(--c-primary); }
 .dd-rate { display: flex; align-items: center; gap: var(--sp-3); }
 
 .coll-wrap { position: relative; }

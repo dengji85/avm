@@ -123,6 +123,11 @@ def apply_metadata(conn, movie_id: int, meta: Dict[str, Any], cfg: Dict[str, Any
     if av_map:
         avatar_changed = _save_actress_avatars(conn, av_map, cfg)
 
+    # 女优资料（身高/三围/生日/头像）：素人刮削时 av-wiki 顺带抓到的，更新女优表（补空不覆盖）
+    prof_map = meta.get("actress_profiles") or {}
+    if prof_map:
+        _save_actress_profiles(conn, prof_map, cfg)
+
     conn.execute(
         "UPDATE movies SET scraped_at = datetime('now','localtime'), scrape_source = ? WHERE id = ?",
         (str(meta.get("source", ""))[:120], movie_id),
@@ -197,6 +202,48 @@ def _save_actress_avatars(conn, av_map: Dict[str, str], cfg: Dict[str, Any]) -> 
                 "UPDATE actresses SET avatar = ? WHERE id = ?",
                 (name_on_disk, r["id"]),
             )
+            changed += 1
+    return changed
+
+
+def _save_actress_profiles(conn, prof_map: Dict[str, Dict[str, Any]],
+                           cfg: Dict[str, Any]) -> int:
+    """把素人刮削顺带抓到的女优资料（身高/三围/生日/头像）写入女优表。
+
+    仅补空不覆盖已有字段；头像仅在本地无头像时下载落盘。返回更新的女优数。
+    """
+    if not prof_map:
+        return 0
+    rows = query_all(conn, "SELECT id, name, avatar FROM actresses")
+    by_name = {r["name"]: r for r in rows}
+    changed = 0
+    for name, prof in prof_map.items():
+        r = by_name.get(name)
+        if not r or not isinstance(prof, dict):
+            continue
+        sets: Dict[str, Any] = {}
+        # 先查当前值（补空不覆盖）
+        _cur_rows = query_all(conn, "SELECT height,bust,waist,hip,cup,birthday,birthplace,hobby,profile "
+                                    "FROM actresses WHERE id=?", (r["id"],))
+        cur = _cur_rows[0] if _cur_rows else None
+        for fld in ("height", "bust", "waist", "hip", "cup", "birthday",
+                    "birthplace", "hobby", "profile"):
+            val = prof.get(fld)
+            if val in (None, ""):
+                continue
+            existing = cur.get(fld) if cur else None
+            if existing not in (None, ""):
+                continue
+            sets[fld] = val
+        # 头像：仅当本地无头像时下载
+        avatar_url = prof.get("avatar_url")
+        if avatar_url and (not r["avatar"] or images.is_remote(r["avatar"])):
+            disk = images.save_avatar(name, avatar_url, cfg)
+            if disk:
+                sets["avatar"] = disk
+        if sets:
+            cols = ", ".join(f"{k}=?" for k in sets)
+            conn.execute(f"UPDATE actresses SET {cols} WHERE id=?", list(sets.values()) + [r["id"]])
             changed += 1
     return changed
 

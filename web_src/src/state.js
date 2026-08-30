@@ -71,6 +71,9 @@ export const state = reactive({
   mobileNavOpen: false,
   // 播放器偏好：auto=智能优先网络（失败回退系统） / web=始终网络 / external=始终系统
   playerMode: saved.playerMode || 'auto',
+  // 历史 tab 行为偏好
+  recentOpenPlaylist: saved.recentOpenPlaylist !== false,  // 进入历史是否自动打开播放列表（迅雷式），默认开
+  recentAutoPlay: saved.recentAutoPlay !== false,          // 打开播放列表后是否自动播放，默认开
 
   // ---- 上次加入的片单（快速加片单/队列用）----
   lastCollection: saved.lastCollection || 0,
@@ -87,6 +90,7 @@ export const state = reactive({
     loop: saved.playLoop !== false,
     source: '',
     cid: 0,
+    autoplay: true,   // 打开播放列表后是否自动播放（历史 tab 可关闭）
   },
 
   // ---- 后台任务 ----
@@ -109,6 +113,7 @@ watch(
     page_size: state.page_size, multiOp: state.multiOp, lastCollection: state.lastCollection,
     playOrder: state.playQueue.order, playLoop: state.playQueue.loop,
     playerMode: state.playerMode,
+    recentOpenPlaylist: state.recentOpenPlaylist, recentAutoPlay: state.recentAutoPlay,
   }),
   (v) => { try { localStorage.setItem(PREF_KEY, JSON.stringify(v)) } catch (e) {} },
   { deep: true },
@@ -116,7 +121,7 @@ watch(
 
 /* ---------------- 全局播放队列操作 ---------------- */
 /** 打开一个队列进行播放：movies 为影片项数组，source 为来源描述，cid 为片单 id（可选） */
-export function openPlayQueue(movies, source = '', startIdx = -1, cid = 0) {
+export function openPlayQueue(movies, source = '', startIdx = -1, cid = 0, autoplay = true) {
   const list = (movies || []).map((m) => ({
     id: m.id, code: m.code || m.title, title: m.title, cover: m.cover,
     playable: !!m.playable, progress_seconds: m.progress_seconds || 0,
@@ -133,6 +138,7 @@ export function openPlayQueue(movies, source = '', startIdx = -1, cid = 0) {
   state.playQueue.idx = s
   state.playQueue.source = source || ''
   state.playQueue.cid = cid || 0
+  state.playQueue.autoplay = autoplay !== false
   state.playQueue.open = true
 }
 

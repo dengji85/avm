@@ -38,11 +38,30 @@ except ImportError:  # pragma: no cover
 
 
 def _is_blocker(html: str) -> bool:
-    """判断拿到的页面是否仍是 av-wiki 的反爬验证页。"""
+    """判断拿到的页面是否仍是 av-wiki 的反爬验证页（或空白壳页）。
+
+    av-wiki 对未建立信任度的会话会返回：
+      - 旧的「请稍候…」reload 循环页（含 loader / 正在验证 字样）；
+      - 新版几乎纯 JS 渲染的空白壳页（body 无实质文本，只有占位脚本）。
+    后者 ``body`` 文本极短，必须识别为未放行，否则会把空白当成功、
+    写入空标题/空演员。这里用「含验证字样」或「正文实质内容过短」双重判定。
+    """
     if not html:
-        return False
+        return True
     low = html.lower()
     if ("loader" in low and "正在验证" in html) or "请稍候" in html or "正在验证您的请求" in html:
+        return True
+    # 去掉脚本/样式后看正文长度：正常作品页至少有几百字，
+    # 空白壳页通常 < 50 字（只有占位符/菜单名）。
+    try:
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup(html, "html.parser")
+        for t in soup(["script", "style", "form", "nav", "footer"]):
+            t.decompose()
+        text = soup.get_text(" ", strip=True)
+    except Exception:
+        text = html
+    if len(text) < 80:
         return True
     return False
 

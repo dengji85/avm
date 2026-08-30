@@ -10,7 +10,7 @@ MetaResult = Dict[str, Any]
 FIELDS = (
     "title", "original_title", "plot", "release_date", "runtime", "studio",
     "publisher", "series", "director", "rating", "cover", "fanart",
-    "actresses", "genres", "tags",
+    "actresses", "genres", "tags", "actress_profiles",
 )
 
 
@@ -48,6 +48,11 @@ class BaseProvider:
 
     def http_get(self, url: str, headers: Optional[Dict[str, str]] = None) -> Optional[str]:
         return http_get(url, self.scfg, self.options, headers)
+
+    @staticmethod
+    def normalize(meta: Dict[str, Any], source: str) -> "MetaResult":
+        """统一字段类型，剔除空值（委托模块级实现）。"""
+        return _normalize_meta(meta, source)
 
 
 def http_get(url: str, scfg: Dict[str, Any], options: Dict[str, Any],
@@ -119,18 +124,17 @@ def http_get(url: str, scfg: Dict[str, Any], options: Dict[str, Any],
                 verify=False,
             )
             resp.raise_for_status()
-            resp.encoding = resp.apparent_encoding or resp.encoding
+            # 解码优先级：响应头/HTML 声明的 charset > chardet 猜测 > UTF-8 兜底。
+            # 注意：不要用 resp.apparent_encoding 单独兜底——它对日文 UTF-8 常误判成
+            # 其它编码，导致标题/演员名等变成乱码（如 av-wiki 的日文片名）。
+            declared = resp.charset_encoding
+            resp.encoding = declared or resp.apparent_encoding or "utf-8"
             return resp.text
         except Exception as exc:  # 代理隧道抖动 / 超时 / 4xx，重试
             last_exc = exc
             if attempt < retries - 1:
                 time.sleep(0.4 * (attempt + 1))
     return None
-
-    @staticmethod
-    def normalize(meta: Dict[str, Any], source: str) -> MetaResult:
-        """统一字段类型，剔除空值（委托模块级实现）。"""
-        return _normalize_meta(meta, source)
 
 
 def detect_blocker(html: str) -> str:
@@ -166,6 +170,9 @@ def _normalize_meta(meta: Dict[str, Any], source: str) -> MetaResult:
             out[field] = _as_float(value)
         elif field == "release_date":
             out[field] = _as_date(value)
+        elif field == "actress_profiles":
+            # 女优资料映射 {女优名: {字段: 值}}，保留 dict 原样
+            out[field] = value if isinstance(value, dict) else {}
         else:
             out[field] = str(value).strip()
     cleaned = {k: v for k, v in out.items() if v not in (None, "", [])}

@@ -53,9 +53,9 @@ export function fmtDate(d) {
 /** 相对时间：3天前 */
 export function fmtAgo(d) {
   if (!d) return ''
-  const t = new Date(String(d).replace(' ', 'T')).getTime()
-  if (!t) return fmtDate(d)
-  const diff = (Date.now() - t) / 1000
+  const ts = new Date(String(d).replace(' ', 'T')).getTime()
+  if (!ts) return fmtDate(d)
+  const diff = (Date.now() - ts) / 1000
   if (diff < 60) return t('fmt.justNow')
   if (diff < 3600) return t('fmt.minutesAgo', { n: Math.floor(diff / 60) })
   if (diff < 86400) return t('fmt.hoursAgo', { n: Math.floor(diff / 3600) })

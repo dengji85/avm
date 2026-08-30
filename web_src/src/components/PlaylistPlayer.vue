@@ -190,7 +190,7 @@ watch(() => state.playQueue.open, (open) => {
         </div>
 
         <div v-if="current" class="pl-stage">
-          <VideoPlayer :key="currentId" :movie-id="currentId" :start-at="current.progress_seconds || 0" @progress="onProgress" @ended="next(true)" />
+          <VideoPlayer :key="currentId" :movie-id="currentId" :start-at="current.progress_seconds || 0" :autoplay="state.playQueue.autoplay" @progress="onProgress" @ended="next(true)" />
         </div>
         <div v-else class="pl-empty">
           <div class="icon">▶</div>

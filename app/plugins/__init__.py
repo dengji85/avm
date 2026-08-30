@@ -11,6 +11,8 @@ from .gfriends import GfriendsPlugin
 register_plugin(GfriendsPlugin())
 from .wiki_actress import WikiActressPlugin
 register_plugin(WikiActressPlugin())
+from .avwiki_actress import AvWikiActressPlugin
+register_plugin(AvWikiActressPlugin())
 
 # 未来新增插件在此追加，例如：
 # from .javdb import JavdbProfilePlugin

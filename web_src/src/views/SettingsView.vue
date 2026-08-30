@@ -20,6 +20,7 @@ const TABS = [
   ['parser', 'settings.tab.parser'],
   ['ai', 'settings.tab.ai'],
   ['appearance', 'settings.tab.appearance'],
+  ['sites', 'settings.tab.sites'],
   ['remote', 'settings.tab.remote'],
   ['about', 'settings.tab.about'],
 ]
@@ -42,7 +43,19 @@ const cfg = reactive({
   previews_quality: 'smart',
   ai: { enabled: false, base_url: 'https://api.openai.com/v1', api_key: '', model: 'gpt-4o-mini', temperature: 0.4 },
   wiki: { languages: ['ja', 'zh'] },
+  online_sites: [],
 })
+
+/* 常见站点预设：首次进入或点「添加常见站点」时一次性补入。
+   lower=true 表示跳转前把 {code} 转为小写（如 JavBus / 123av 的路径为小写番号）。 */
+const PRESET_SITES = [
+  { id: 'preset_javbus', name: 'JavBus', url: 'https://javbus.com/{code}', lower: true, enabled: true },
+  { id: 'preset_javwiki', name: 'AV-Wiki', url: 'https://av-wiki.net/{code}/', enabled: true },
+  { id: 'preset_javdb', name: 'JavDB', url: 'https://javdb.com/search?q={code}', lower: true, enabled: true },
+  { id: 'preset_javlibrary', name: 'JavLibrary', url: 'https://www.javlibrary.com/cn/vl_searchbyid.php?keyword={code}', enabled: true },
+  { id: 'preset_missav', name: '123av', url: 'https://123av.com/cn/v/{code}', lower: true, enabled: true },
+  { id: 'preset_jable', name: 'Jable', url: 'https://jable.tv/videos/{code}/', lower: true, enabled: true },
+]
 
 const providers = reactive({ available: [], active: [] })
 const provOn = reactive({})
@@ -76,6 +89,11 @@ async function load() {
     cfg.scraper.javbus = Object.assign({ base_url: '', cookie: '' }, cfg.scraper.javbus)
     cfg.scraper.javdb = Object.assign({ base_url: '', cookie: '' }, cfg.scraper.javdb)
     cfg.wiki = Object.assign({ languages: ['ja', 'zh'] }, c.wiki)
+    cfg.online_sites = Array.isArray(c.online_sites) ? c.online_sites : []
+    // 首次使用（后端尚无任何站点配置）时，预填一组常见站点，用户可自由增删改
+    if (!cfg.online_sites.length && !c.online_sites) {
+      cfg.online_sites = PRESET_SITES.map((s) => ({ ...s }))
+    }
     cfg.previews_quality = c.previews_quality || 'smart'
 
     ignoreText.value = (cfg.library.ignore_keywords || []).join(', ')
@@ -491,6 +509,70 @@ async function saveWiki() {
   finally { savingWiki.value = false }
 }
 
+/* ---------------- 常用在线站点 ---------------- */
+const savingSites = ref(false)
+const editingSite = ref(null) // 正在编辑的站点（null=关闭弹窗）
+const draftSite = reactive({ id: '', name: '', url: '', enabled: true })
+
+function openAddSite() {
+  Object.assign(draftSite, { id: '', name: '', url: '', enabled: true })
+  editingSite.value = 'new'
+}
+function openEditSite(s) {
+  Object.assign(draftSite, { id: s.id, name: s.name, url: s.url, enabled: !!s.enabled })
+  editingSite.value = s.id
+}
+function closeSiteEditor() { editingSite.value = null }
+function saveSiteEditor() {
+  const name = draftSite.name.trim()
+  const url = draftSite.url.trim()
+  if (!url || !url.includes('{code}')) {
+    toast(t('settings.sitesInvalid'), 'err')
+    return
+  }
+  if (editingSite.value === 'new') {
+    cfg.online_sites.push({ id: 's_' + Date.now(), name: name || url, url, enabled: draftSite.enabled })
+  } else {
+    const i = cfg.online_sites.findIndex((s) => s.id === editingSite.value)
+    if (i >= 0) Object.assign(cfg.online_sites[i], { name: name || url, url, enabled: draftSite.enabled })
+  }
+  closeSiteEditor()
+}
+async function deleteSite(s) {
+  if (!(await confirmDialog(t('settings.sitesDeleteTitle'), t('settings.sitesDeleteDesc', { name: s.name }), { danger: true }))) return
+  cfg.online_sites = cfg.online_sites.filter((x) => x.id !== s.id)
+}
+function moveSite(i, dir) {
+  const j = i + dir
+  if (j < 0 || j >= cfg.online_sites.length) return
+  const arr = cfg.online_sites
+  ;[arr[i], arr[j]] = [arr[j], arr[i]]
+}
+async function saveSites() {
+  savingSites.value = true
+  try {
+    await putConfig({ online_sites: cfg.online_sites.map((s) => ({ ...s })) })
+    toast(t('settings.sitesSaved'), 'ok')
+  } catch (e) { toast(e.message, 'err') }
+  finally { savingSites.value = false }
+}
+// 把预设里尚未添加的站点一键补入（已存在的按 id 去重）
+function addCommonSites() {
+  const have = new Set(cfg.online_sites.map((s) => s.id))
+  let added = 0
+  for (const p of PRESET_SITES) {
+    if (!have.has(p.id)) { cfg.online_sites.push({ ...p }); added++ }
+  }
+  if (added) toast(t('settings.sitesAddCommon') + ` (+${added})`, 'ok')
+  else toast(t('settings.sitesAddCommon'), 'ok')
+}
+// 用番号渲染模板，用于预览（不实际跳转）
+function renderUrl(site, code) {
+  const codeVal = site.lower ? String(code || 'ABC-123').toLowerCase() : (code || 'ABC-123')
+  return site.url.replace(/\{code\}/g, codeVal)
+}
+const sitesPreviewCode = ref('ABC-123')
+
 onMounted(async () => { await load(); await loadServerInfo(); loadPlugins() })
 </script>
 
@@ -571,10 +653,10 @@ onMounted(async () => { await load(); await loadServerInfo(); loadPlugins() })
               <span class="hint">{{ $t('settings.regenPreviewHint') }}</span>
             </div>
             <div class="field">
-              <label class="switch">
-                <input type="checkbox" v-model="autoScan" @change="saveLibrary" />
-                <span>{{ $t('settings.autoScan') }}</span>
+              <label class="toggle">
+                <input type="checkbox" v-model="autoScan" @change="saveLibrary" /><span class="track"></span>
               </label>
+              <span>{{ $t('settings.autoScan') }}</span>
               <span class="hint">{{ $t('settings.autoScanHint') }}</span>
             </div>
             <div class="field-row" v-if="autoScan">
@@ -876,6 +958,87 @@ onMounted(async () => { await load(); await loadServerInfo(); loadPlugins() })
         </div>
       </template>
 
+      <!-- ============ 常用在线站点 ============ -->
+      <template v-else-if="tab === 'sites'">
+        <div class="panel">
+          <div class="panel-head">{{ $t('settings.sites') }}</div>
+          <div class="panel-sub">{{ $t('settings.sitesSub') }}</div>
+          <div class="panel-body">
+            <div class="sites-toolbar">
+              <button class="btn btn-primary" @click="openAddSite">
+                <span class="i">＋</span> {{ $t('settings.sitesAdd') }}
+              </button>
+              <button class="btn" @click="addCommonSites">
+                <span class="i">⚡</span> {{ $t('settings.sitesAddCommon') }}
+              </button>
+            </div>
+
+            <div v-if="!cfg.online_sites.length" class="empty-hint">{{ $t('settings.sitesEmpty') }}</div>
+
+            <ul v-else class="sites-list">
+              <li v-for="(s, i) in cfg.online_sites" :key="s.id" class="sites-item">
+                <label class="switch sm">
+                  <input type="checkbox" v-model="s.enabled" />
+                  <span class="track"></span>
+                </label>
+                <div class="sites-info">
+                  <div class="sites-name">{{ s.name }}</div>
+                  <div class="sites-url">{{ s.url }}</div>
+                </div>
+                <div class="sites-actions">
+                  <button class="btn btn-ghost sm" :title="$t('settings.sitesUp')" @click="moveSite(i, -1)">↑</button>
+                  <button class="btn btn-ghost sm" :title="$t('settings.sitesDown')" @click="moveSite(i, 1)">↓</button>
+                  <button class="btn btn-ghost sm" @click="openEditSite(s)">{{ $t('settings.sitesEdit') }}</button>
+                  <button class="btn btn-ghost sm danger" @click="deleteSite(s)">{{ $t('settings.sitesDelete') }}</button>
+                </div>
+              </li>
+            </ul>
+
+            <div class="form-actions">
+              <button class="btn btn-primary" :disabled="savingSites" @click="saveSites">
+                {{ savingSites ? '…' : $t('settings.sitesSave') }}
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <!-- 新增/编辑弹窗 -->
+        <div v-if="editingSite" class="modal-mask" @click.self="closeSiteEditor">
+          <div class="modal">
+            <div class="modal-head">{{ editingSite === 'new' ? $t('settings.sitesAddTitle') : $t('settings.sitesEditTitle') }}</div>
+            <div class="modal-body">
+              <div class="form-row">
+                <label>{{ $t('settings.sitesName') }}</label>
+                <input v-model="draftSite.name" :placeholder="$t('settings.sitesUrlPh')" />
+              </div>
+              <div class="form-row">
+                <label>{{ $t('settings.sitesUrl') }}</label>
+                <input v-model="draftSite.url" :placeholder="$t('settings.sitesUrlPh')" />
+              </div>
+              <div class="form-hint">{{ $t('settings.sitesUrlHint') }}</div>
+              <div class="form-row inline">
+                <label class="switch sm">
+                  <input type="checkbox" v-model="draftSite.enabled" />
+                  <span class="track"></span>
+                </label>
+                <span>{{ $t('settings.sitesEnabled') }}</span>
+              </div>
+              <div class="preview-box" v-if="draftSite.url.includes('{code}')">
+                <div class="preview-title">{{ $t('settings.sitesPreview') }}</div>
+                <div class="form-row inline">
+                  <label>{{ $t('settings.sitesPreviewDesc', { code: sitesPreviewCode }) }}</label>
+                </div>
+                <a class="preview-link" :href="renderUrl(draftSite, sitesPreviewCode)" target="_blank" rel="noopener">{{ renderUrl(draftSite, sitesPreviewCode) }}</a>
+              </div>
+            </div>
+            <div class="modal-foot">
+              <button class="btn btn-ghost" @click="closeSiteEditor">{{ $t('common.cancel') }}</button>
+              <button class="btn btn-primary" @click="saveSiteEditor">{{ $t('common.save') }}</button>
+            </div>
+          </div>
+        </div>
+      </template>
+
       <!-- ============ 外观 ============ -->
       <template v-else-if="tab === 'appearance'">
         <div class="panel">
@@ -925,7 +1088,21 @@ onMounted(async () => { await load(); await loadServerInfo(); loadPlugins() })
                 <button class="btn tiny" :class="{ active: state.playerMode === 'web' }" @click="state.playerMode = 'web'">{{ $t('settings.playerModeWeb') }}</button>
                 <button class="btn tiny" :class="{ active: state.playerMode === 'external' }" @click="state.playerMode = 'external'">{{ $t('settings.playerModeExternal') }}</button>
               </div>
-              <span class="hint">{{ $t('settings.playerModeHint') }}</span>
+            </div>
+            <span class="hint">{{ $t('settings.playerModeHint') }}</span>
+            <div class="field">
+              <label class="toggle">
+                <input type="checkbox" v-model="state.recentOpenPlaylist" /><span class="track"></span>
+              </label>
+              <span>{{ $t('settings.recentOpenPlaylist') }}</span>
+              <span class="hint">{{ $t('settings.recentOpenPlaylistHint') }}</span>
+            </div>
+            <div class="field">
+              <label class="toggle">
+                <input type="checkbox" v-model="state.recentAutoPlay" :disabled="!state.recentOpenPlaylist" /><span class="track"></span>
+              </label>
+              <span>{{ $t('settings.recentAutoPlay') }}</span>
+              <span class="hint">{{ $t('settings.recentAutoPlayHint') }}</span>
             </div>
           </div>
         </div>
@@ -980,10 +1157,10 @@ onMounted(async () => { await load(); await loadServerInfo(); loadPlugins() })
               </div>
             </div>
             <div class="field">
-              <label class="switch">
-                <input type="checkbox" v-model="requireToken" @change="saveRequireToken" />
-                <span>{{ $t('settings.requireToken') }}</span>
+              <label class="toggle">
+                <input type="checkbox" v-model="requireToken" @change="saveRequireToken" /><span class="track"></span>
               </label>
+              <span>{{ $t('settings.requireToken') }}</span>
             </div>
           </div>
         </div>
@@ -1243,4 +1420,51 @@ kbd {
   white-space: pre-wrap;
   word-break: break-all;
 }
+
+/* ---- 常用在线站点 ---- */
+.sites-toolbar { margin-bottom: var(--sp-3); }
+.sites-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--sp-2); }
+.sites-item {
+  display: flex; align-items: center; gap: var(--sp-3);
+  padding: var(--sp-3); border: 1px solid var(--c-line); border-radius: var(--r-lg);
+  background: var(--c-surface);
+}
+.sites-item .sites-info { flex: 1; min-width: 0; }
+.sites-name { font-weight: 600; }
+.sites-url { font-size: var(--fs-sm); color: var(--c-text-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sites-actions { display: flex; gap: var(--sp-2); flex-shrink: 0; }
+.btn.sm { padding: 4px 10px; font-size: var(--fs-sm); }
+.btn.ghost { background: transparent; border-color: var(--c-line); color: var(--c-text-2); }
+.btn.ghost:hover { color: var(--c-text-1); border-color: var(--c-text-3); }
+.btn.ghost.danger:hover { color: #e6355a; border-color: #e6355a; }
+.empty-hint { color: var(--c-text-3); padding: var(--sp-4) 0; }
+.form-actions { margin-top: var(--sp-4); }
+/* switch 开关（小号） */
+.switch { position: relative; display: inline-flex; align-items: center; cursor: pointer; }
+.switch.sm { --w: 34px; --h: 18px; }
+.switch input { position: absolute; opacity: 0; width: 0; height: 0; }
+.switch .track {
+  width: var(--w); height: var(--h); border-radius: 999px; background: var(--c-line);
+  transition: background .15s; position: relative; flex: none;
+}
+.switch .track::after {
+  content: ''; position: absolute; top: 2px; left: 2px; width: calc(var(--h) - 4px); height: calc(var(--h) - 4px);
+  border-radius: 50%; background: #fff; transition: transform .15s;
+}
+.switch input:checked + .track { background: var(--c-primary); }
+.switch input:checked + .track::after { transform: translateX(calc(var(--w) - var(--h))); }
+/* modal 弹窗 */
+.modal-mask { position: fixed; inset: 0; background: rgba(0,0,0,.45); display: flex; align-items: center; justify-content: center; z-index: 200; }
+.modal { width: min(460px, 92vw); background: var(--c-bg-pop); border: 1px solid var(--c-line); border-radius: var(--r-lg); box-shadow: 0 18px 50px rgba(0,0,0,.35); overflow: hidden; }
+.modal-head { padding: var(--sp-4) var(--sp-4) 0; font-size: 1.05rem; font-weight: 700; }
+.modal-body { padding: var(--sp-4); display: flex; flex-direction: column; gap: var(--sp-3); }
+.modal-foot { padding: var(--sp-3) var(--sp-4); display: flex; justify-content: flex-end; gap: var(--sp-2); border-top: 1px solid var(--c-line); }
+.form-row { display: flex; flex-direction: column; gap: 6px; }
+.form-row > label { font-size: var(--fs-sm); color: var(--c-text-2); }
+.form-row input { padding: 8px 10px; border-radius: var(--r-md); border: 1px solid var(--c-line); background: var(--c-bg-input); color: var(--c-text-1); }
+.form-row.inline { flex-direction: row; align-items: center; gap: 8px; }
+.form-hint { font-size: var(--fs-sm); color: var(--c-text-3); }
+.preview-box { padding: var(--sp-3); border: 1px dashed var(--c-line); border-radius: var(--r-md); background: var(--c-surface); }
+.preview-title { font-size: var(--fs-sm); color: var(--c-text-2); margin-bottom: 6px; }
+.preview-link { color: var(--c-primary); word-break: break-all; font-size: var(--fs-sm); }
 </style>
