@@ -70,7 +70,13 @@ class BaseProvider:
         return int(self.scfg.get("timeout", 20))
 
     def http_get(self, url: str, headers: Optional[Dict[str, str]] = None) -> Optional[str]:
-        return http_get(url, self.scfg, self.options, headers)
+        # 用可变容器接收模块级实现的失败原因，落到 last_error 供诊断接口展示。
+        # 否则失败时上层只能看到「返回空」，无法区分是 404 / 反爬 / 代理不通 / 超时。
+        err: Dict[str, Any] = {}
+        text = http_get(url, self.scfg, self.options, headers, err_out=err)
+        if err.get("msg"):
+            self.last_error = str(err["msg"])
+        return text
 
     @staticmethod
     def normalize(meta: Dict[str, Any], source: str) -> "MetaResult":
@@ -79,11 +85,16 @@ class BaseProvider:
 
 
 def http_get(url: str, scfg: Dict[str, Any], options: Dict[str, Any],
-             headers: Optional[Dict[str, str]] = None) -> Optional[str]:
+             headers: Optional[Dict[str, str]] = None,
+             err_out: Optional[Dict[str, Any]] = None) -> Optional[str]:
     """模块级 HTTP GET（供 BaseProvider 与女优资料插件等复用）。
 
     处理代理 / 完整浏览器请求头 / 数据源级 Cookie / 重试，并复用 scfg 里的
     timeout / proxy / user_agent / retries 配置。返回响应文本或 None（含重试耗尽）。
+
+    err_out：可选的可变容器，用于回传失败原因（{"msg": "..."}）。调用方（如
+    BaseProvider.http_get）据此把原因写到 last_error，让诊断接口能给出可操作
+    的提示，而不是笼统的「返回空」。
     """
     try:
         import requests
@@ -147,17 +158,70 @@ def http_get(url: str, scfg: Dict[str, Any], options: Dict[str, Any],
                 verify=False,
             )
             resp.raise_for_status()
-            # 解码优先级：响应头/HTML 声明的 charset > chardet 猜测 > UTF-8 兜底。
-            # 注意：不要用 resp.apparent_encoding 单独兜底——它对日文 UTF-8 常误判成
-            # 其它编码，导致标题/演员名等变成乱码（如 av-wiki 的日文片名）。
-            declared = resp.charset_encoding
-            resp.encoding = declared or resp.apparent_encoding or "utf-8"
+            # 解码优先级：响应头声明的 charset > HTML <meta> 声明 > UTF-8 兜底。
+            #
+            # 注意 1：resp.charset_encoding 是 urllib3 的属性，requests.Response 上
+            #   没有（requests 2.34 实测无此属性）。直接取会抛 AttributeError 并被
+            #   下面的 except 吞掉，表现为「所有在线源一律返回空」——而响应本身是
+            #   200 正常的，极具迷惑性。这里用 getattr 兜底并优先用 resp.encoding。
+            # 注意 2：不要用 resp.apparent_encoding 兜底——它对日文 UTF-8 常误判成
+            #   其它编码，导致标题/演员名变乱码（如 av-wiki 的日文片名）。
+            declared = getattr(resp, "charset_encoding", "") or resp.encoding or ""
+            if not declared or declared.lower() in ("iso-8859-1", "latin-1"):
+                # requests 对无声明响应默认给 ISO-8859-1，不可信，改从 HTML 里找
+                declared = _html_charset(resp.text) or "utf-8"
+            resp.encoding = declared
             return resp.text
-        except Exception as exc:  # 代理隧道抖动 / 超时 / 4xx，重试
+        except Exception as exc:  # 代理隧道抖动 / 超时 / 4xx
             last_exc = exc
+            # 4xx 是确定性结果（404 番号不存在、403 被拒、401 未授权），
+            # 重试只是成倍放大耗时且结果不变，直接退出。
+            status = getattr(getattr(exc, "response", None), "status_code", 0) or 0
+            if 400 <= int(status) < 500:
+                break
             if attempt < retries - 1:
                 time.sleep(0.4 * (attempt + 1))
+    if err_out is not None and last_exc is not None:
+        err_out["msg"] = _human_http_error(last_exc)
     return None
+
+
+def _html_charset(text: str) -> str:
+    """从 HTML 的 <meta charset=...> 提取字符集声明。
+
+    requests 对无 charset 声明的响应默认给 ISO-8859-1（不可信，会把 UTF-8
+    日文解成乱码），此时改从 HTML 自身声明取，比 apparent_encoding 猜测更准。
+    """
+    m = re.search(r"<meta[^>]+charset=[\"']?\s*([\w\-]+)", (text or "")[:4096], re.I)
+    return (m.group(1) or "").strip().lower() if m else ""
+
+
+def _human_http_error(exc: Exception) -> str:
+    """把 requests 异常翻译成人话，供诊断接口展示。"""
+    resp = getattr(exc, "response", None)
+    status = getattr(resp, "status_code", 0) or 0
+    name = type(exc).__name__
+    if status:
+        if status == 404:
+            return "HTTP 404：该番号在此站点不存在（或详情页 URL 规则不同）"
+        if status == 403:
+            return "HTTP 403：站点拒绝访问（多半是反爬，需 Cookie 或换代理）"
+        if status == 401:
+            return "HTTP 401：需要登录 / Cookie"
+        if status == 429:
+            return "HTTP 429：请求过于频繁，稍后再试"
+        if 400 <= status < 500:
+            return f"HTTP {status}：请求被拒绝"
+        return f"HTTP {status}：服务端错误"
+    if "Timeout" in name or "timeout" in str(exc).lower():
+        return f"请求超时（{name}）：代理不通或站点响应慢，可调大设置里的超时"
+    if "ProxyError" in name or "proxy" in str(exc).lower():
+        return f"代理连接失败（{name}）：请检查代理地址与代理软件是否运行"
+    if "SSLError" in name:
+        return f"SSL 错误（{name}）：代理不支持 HTTPS 或证书校验失败"
+    if "ConnectionError" in name or "NewConnectionError" in name:
+        return f"连接失败（{name}）：网络不通或代理未启动"
+    return f"{name}: {exc}"
 
 
 def detect_blocker(html: str) -> str:

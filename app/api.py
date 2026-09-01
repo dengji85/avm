@@ -973,10 +973,32 @@ def test_scrape(payload: Dict[str, Any] = Body(default={})) -> Dict[str, Any]:
                 "code": None, "results": [], "cover_ok": False, "cover_url": None}
     if movie_for_test is None:
         movie_for_test = {"code": code, "title": code, "key": code}
+        # 本地 NFO 源要按影片文件路径去找同名 .nfo / .json，只有番号是查不到的。
+        # 若库里存在该番号，就取真实影片（含 files）来测，否则本地源必然「返回空」。
+        try:
+            with db() as conn:
+                row = query_one(conn, "SELECT id FROM movies WHERE code=? LIMIT 1", (code,))
+                if row:
+                    det = store.movie_detail(conn, int(row["id"]))
+                    if det and det.get("files"):
+                        movie_for_test = det
+        except Exception:
+            pass
 
     results: List[Dict[str, Any]] = []
     first_cover: Optional[str] = None
     for p in plist:
+        # 智能刮削会跳过的源（如 avwiki 只收录素人片）：直接标注「跳过」，
+        # 不发请求。否则测普通番号时会因反爬/404 报红，看起来像故障。
+        try:
+            if not p.can_handle(movie_for_test):
+                results.append({
+                    "provider": p.name, "ok": False, "skipped": True,
+                    "reason": "该番号类型不在本源收录范围（实际刮削会自动跳过，非故障）",
+                })
+                continue
+        except Exception:
+            pass
         try:
             meta = p.fetch(movie_for_test)
         except Exception as exc:
