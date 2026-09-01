@@ -36,6 +36,10 @@ from .base import ActressPlugin
 
 WIKI_API = "https://{lang}.wikipedia.org/w/api.php"
 
+# 搜索兜底时最多尝试的候选标题数。候选逐个抓取 = 逐个网络请求，
+# 「查不到」的女优会把所有候选试完，批量补全时这是主要耗时来源。
+_MAX_CANDIDATES = 3
+
 # 模板块起止：匹配 {{AV女優 到对应的 }}（只取首个，AV 模板通常在条目最前）
 _RE_AVBOX = re.compile(r"\{\{\s*AV女優\s*(.*?)\}\}", re.S | re.I)
 # 在模板块内提取 |字段=值
@@ -89,8 +93,11 @@ def _wiki_fetch_text(cfg: Dict[str, Any], lang: str, params: Dict[str, Any]) -> 
     """
     scfg = cfg.get("scraper", {}) or {}
     proxy = scfg.get("proxy") or ""
-    timeout = int(scfg.get("timeout", 25))
-    retries = int(scfg.get("retries", 3)) or 1
+    # 维基百科 API 正常 1~3 秒就返回。若沿用刮削全局 timeout（20~25s）× retries（3），
+    # 一个「查不到」的女优会把超时与重试全部吃满（单次最坏 75s，再乘以语言数与候选数），
+    # 批量补全时整批被拖到几十分钟。这里对维基单独收敛上限。
+    timeout = min(int(scfg.get("timeout", 25)), 12)
+    retries = min(int(scfg.get("retries", 3)) or 1, 2)
 
     params["format"] = "json"
     query = urllib.parse.urlencode(params)
@@ -293,7 +300,9 @@ def _search_and_fetch(cfg: Dict[str, Any], name: str, lang: str) -> Optional[Dic
     # 2) search 兜底：命中别名 / 不同写法（如中文名在日文维基的日文名）
     titles = _search_titles(cfg, name, lang)
     candidates = _pick_candidates(name, titles)
-    for title in candidates:
+    # 候选逐个抓取 = 逐个网络请求。真正命中的几乎总是前 1~2 个，后面的绝大多数
+    # 是同名无关条目；「查不到」时逐个试完全部候选是批量任务慢的主因，这里截断。
+    for title in candidates[:_MAX_CANDIDATES]:
         if not title or _norm(title) == _norm(name):
             continue
         wikitext = _fetch_wikitext(cfg, title, lang)

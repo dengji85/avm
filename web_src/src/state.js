@@ -64,7 +64,10 @@ export const state = reactive({
   onboarded: false,   // true 表示引导已结束（遮罩关闭）
 
   // ---- 界面偏好（持久化） ----
-  theme: saved.theme || 'dark',
+  // 默认深色：媒体库主视觉偏暗，且深色主题对浏览器原生控件（如 file picker）
+  // 也更友好。仅接受合法的 'light'，其余（空值/脏数据/旧版本遗留）一律回退深色，
+  // 避免存档里残留异常值导致主题“静默失效”。
+  theme: saved.theme === 'light' ? 'light' : 'dark',
   density: saved.density || 'cozy',
   cardSize: saved.cardSize || 'normal',   // dense | normal | large
   sidebarCollapsed: !!saved.sidebarCollapsed,

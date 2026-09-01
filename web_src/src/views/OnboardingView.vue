@@ -162,69 +162,79 @@ function skip() {
 </template>
 
 <style scoped>
+/* 注意：本文件曾使用 --bg-panel / --text / --muted / --border / --accent 等
+   旧变量名，它们已在 tokens.css 里被 --c-* 取代、不再有定义，于是全部
+   fallback 到深色兜底色。浅色主题下表现为「深色卡片 + 继承来的深色文字」，
+   已添加的路径完全看不清。现统一改用现行 design token。 */
 .ob-mask {
   position: fixed; inset: 0; z-index: 1000;
-  background: rgba(0,0,0,.72);
+  background: var(--c-overlay);
   display: flex; align-items: center; justify-content: center;
   padding: 16px;
 }
 .ob-card {
   width: min(560px, 100%);
   max-height: 90vh; overflow: auto;
-  background: var(--bg-panel, #1b1d22);
-  border: 1px solid var(--border, #2c2f36);
-  border-radius: 14px;
+  background: var(--c-surface);
+  color: var(--c-text);
+  border: 1px solid var(--c-line);
+  border-radius: var(--r-lg);
   padding: 22px 24px 18px;
-  box-shadow: 0 20px 60px rgba(0,0,0,.5);
+  box-shadow: var(--sh-4);
 }
-.ob-steps { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--muted, #9aa0a6); margin-bottom: 14px; }
-.ob-step.active { color: var(--accent, #5b9cff); font-weight: 600; }
+.ob-steps { display: flex; align-items: center; gap: var(--sp-2); font-size: var(--fs-md); color: var(--c-text-2); margin-bottom: 14px; }
+.ob-step.active { color: var(--c-primary); font-weight: 600; }
 .ob-sep { opacity: .5; }
-.ob-title { margin: 0 0 4px; font-size: 20px; color: var(--text, #e8eaed); }
-.ob-sub { margin: 0 0 18px; font-size: 13px; color: var(--muted, #9aa0a6); }
+.ob-title { margin: 0 0 4px; font-size: var(--fs-xl); color: var(--c-text); }
+.ob-sub { margin: 0 0 18px; font-size: var(--fs-md); color: var(--c-text-2); }
 .ob-body { min-height: 180px; }
 .ob-lang-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; }
 .ob-lang {
-  padding: 14px; border-radius: 10px; cursor: pointer;
-  background: var(--bg-input, #14161a); color: var(--text, #e8eaed);
-  border: 1px solid var(--border, #2c2f36); font-size: 15px; text-align: center;
+  padding: 14px; border-radius: var(--r-md); cursor: pointer;
+  background: var(--c-surface-2); color: var(--c-text);
+  border: 1px solid var(--c-line); font-size: var(--fs-lg); text-align: center;
 }
-.ob-lang.sel { border-color: var(--accent, #5b9cff); box-shadow: 0 0 0 2px rgba(91,156,255,.25); color: var(--accent, #5b9cff); }
-.ob-tip { font-size: 13px; color: var(--muted, #9aa0a6); margin: 0 0 10px; }
+.ob-lang.sel { border-color: var(--c-primary); box-shadow: 0 0 0 3px var(--c-primary-soft); color: var(--c-primary); }
+.ob-tip { font-size: var(--fs-md); color: var(--c-text-2); margin: 0 0 10px; }
 .ob-path-list { list-style: none; margin: 0 0 10px; padding: 0; }
-.ob-path-list li { display: flex; align-items: center; gap: 8px; padding: 6px 0; border-bottom: 1px dashed var(--border, #2c2f36); }
-.ob-path-list .pp { flex: 1; }
+.ob-path-list li { display: flex; align-items: center; gap: var(--sp-2); padding: 6px 0; border-bottom: 1px dashed var(--c-line); }
+/* 路径文字显式定色：此前未设 color，浅色主题下会继承到深色正文色而看不见 */
+.ob-path-list .pp { flex: 1; min-width: 0; color: var(--c-text); font-size: var(--fs-md); }
 .ob-foot { display: flex; align-items: center; gap: 10px; margin-top: 18px; }
 .ob-foot .grow { flex: 1; }
 
-.hstack { display: flex; gap: 8px; }
+.hstack { display: flex; gap: var(--sp-2); }
 .hstack input {
-  flex: 1; padding: 9px 10px; border-radius: 8px;
-  background: var(--bg-input, #14161a); color: var(--text, #e8eaed);
-  border: 1px solid var(--border, #2c2f36);
+  flex: 1; min-width: 0; padding: 9px 10px; border-radius: var(--r-sm);
+  background: var(--c-surface-2); color: var(--c-text);
+  border: 1px solid var(--c-line);
 }
 .btn {
-  padding: 9px 14px; border-radius: 8px; cursor: pointer;
-  background: var(--bg-input, #14161a); color: var(--text, #e8eaed);
-  border: 1px solid var(--border, #2c2f36); white-space: nowrap;
+  padding: 9px 14px; border-radius: var(--r-sm); cursor: pointer;
+  background: var(--c-surface-2); color: var(--c-text);
+  border: 1px solid var(--c-line); white-space: nowrap;
 }
-.btn.primary { background: var(--accent, #5b9cff); color: #fff; border-color: transparent; }
+.btn.primary { background: var(--c-primary); color: #fff; border-color: transparent; }
+.btn.primary:hover { background: var(--c-primary-h); }
 .btn.ghost { background: transparent; }
-.btn.tiny { padding: 4px 8px; font-size: 12px; }
+.btn.tiny { padding: 4px 8px; font-size: var(--fs-sm); }
 .btn:disabled { opacity: .5; cursor: not-allowed; }
-.muted { color: var(--muted, #9aa0a6); }
-.pad { padding: 16px; }
+.muted { color: var(--c-text-2); }
+.pad { padding: var(--sp-4); }
 .ellipsis { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .ob-browse-mask {
   position: fixed; inset: 0; z-index: 1100;
-  background: rgba(0,0,0,.6); display: flex; align-items: center; justify-content: center; padding: 16px;
+  background: var(--c-overlay); display: flex; align-items: center; justify-content: center; padding: 16px;
 }
-.ob-browse { width: min(480px, 100%); background: var(--bg-panel, #1b1d22); border: 1px solid var(--border, #2c2f36); border-radius: 12px; overflow: hidden; }
-.ob-browse-head { display: flex; align-items: center; gap: 8px; padding: 10px 12px; border-bottom: 1px solid var(--border, #2c2f36); }
-.ob-browse-head .ellipsis { flex: 1; color: var(--text, #e8eaed); }
+.ob-browse {
+  width: min(480px, 100%); background: var(--c-surface); color: var(--c-text);
+  border: 1px solid var(--c-line); border-radius: var(--r-md); overflow: hidden;
+}
+.ob-browse-head { display: flex; align-items: center; gap: var(--sp-2); padding: 10px 12px; border-bottom: 1px solid var(--c-line); }
+.ob-browse-head .ellipsis { flex: 1; min-width: 0; color: var(--c-text); }
 .ob-browse-body { max-height: 320px; overflow: auto; padding: 6px 0; }
-.ob-dir { display: flex; align-items: center; gap: 8px; padding: 9px 14px; cursor: pointer; color: var(--text, #e8eaed); }
-.ob-dir:hover { background: var(--bg-input, #14161a); }
-.ob-browse-foot { display: flex; justify-content: flex-end; gap: 8px; padding: 10px 12px; border-top: 1px solid var(--border, #2c2f36); }
+.ob-dir { display: flex; align-items: center; gap: var(--sp-2); padding: 9px 14px; cursor: pointer; color: var(--c-text); }
+.ob-dir:hover { background: var(--c-surface-3); }
+.ob-browse-foot { display: flex; justify-content: flex-end; gap: var(--sp-2); padding: 10px 12px; border-top: 1px solid var(--c-line); }
 </style>

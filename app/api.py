@@ -11,6 +11,7 @@ import platform
 import string
 import subprocess
 import threading
+import time
 import json
 import sys
 import hashlib
@@ -372,15 +373,39 @@ def fetch_one_actress_profile_api(actress_id: int) -> Dict[str, Any]:
         row = query_one(conn, "SELECT id, name FROM actresses WHERE id=?", (actress_id,))
         if not row:
             raise HTTPException(404, "女优不存在")
-        changed = _apply_actress_plugins(conn, row["id"], row["name"], profile_plugins, cfg)
+        # 单女优是用户手动触发的重试，绕过负缓存，否则点了没反应
+        changed = _apply_actress_plugins(conn, row["id"], row["name"], profile_plugins, cfg,
+                                         use_cache=False)
     return {"ok": True, "changed": changed, "actress_id": actress_id}
 
 
+#: 插件 capability -> 它能填的数据库字段
+_CAP_FIELDS = {
+    "height": ("height",),
+    "measurements": ("bust", "waist", "hip", "cup"),
+    "cup": ("cup",),
+    "birthday": ("birthday",),
+    "birthplace": ("birthplace",),
+    "hobby": ("hobby",),
+    "profile": ("profile",),
+}
+
+#: 「查无此人」负缓存：(插件 id, 女优名) -> 时间戳。批量补全时女优数量多、
+#: 查不到的往往占多数，而「查不到」恰恰最慢（要把直取与候选全试一遍）。
+#: 不缓存的话每点一次按钮都会把同样的失败重跑一遍。
+_ACTRESS_MISS_CACHE: Dict[Any, float] = {}
+_ACTRESS_MISS_TTL = 6 * 3600  # 6 小时内不再重复试探
+
+
 def _apply_actress_plugins(conn, actress_id: int, name: str,
-                          plugin_list, cfg: Dict[str, Any]) -> bool:
+                          plugin_list, cfg: Dict[str, Any],
+                          use_cache: bool = True) -> bool:
     """用一组资料插件拉取女优档案并合并落库（已有字段不覆盖）。
 
     返回是否对数据库产生了实际变更。头像若插件返回 avatar_url 且本地无头像则落盘。
+
+    use_cache：是否启用「查无此人」负缓存。批量任务用 True；单个女优手动重试时
+    传 False，否则用户点了重试却因缓存被跳过。
     """
     # 当前库中该女优已有字段
     cur = query_one(conn,
@@ -388,14 +413,31 @@ def _apply_actress_plugins(conn, actress_id: int, name: str,
                     "FROM actresses WHERE id=?", (actress_id,))
     sets: Dict[str, Any] = {}
     has_local_avatar = bool(cur and cur["avatar"])
+    now = time.time()
 
     for p in plugin_list:
+        # 短路：该插件能提供的字段库里都已齐全（头像也有了），就没必要再联网
+        caps = set(getattr(p, "capabilities", ()) or ())
+        need_avatar = "avatar" in caps and not has_local_avatar
+        need_fields = [f for c in caps for f in _CAP_FIELDS.get(c, ())
+                       if not ((cur or {}).get(f) or "" if isinstance((cur or {}).get(f), str)
+                               else (cur or {}).get(f))]
+        if not need_avatar and not need_fields:
+            continue
+        # 负缓存命中：上次已经确认这个插件查不到此人，直接跳过
+        mkey = (getattr(p, "id", "") or type(p).__name__, name)
+        if use_cache and now - _ACTRESS_MISS_CACHE.get(mkey, 0) < _ACTRESS_MISS_TTL:
+            continue
         try:
             result = p.fetch(name, cfg)
         except Exception:
+            _ACTRESS_MISS_CACHE[mkey] = now
             continue
         if not result:
+            _ACTRESS_MISS_CACHE[mkey] = now
             continue
+        # 抓到了：清掉该键的负缓存，避免后续误判
+        _ACTRESS_MISS_CACHE.pop(mkey, None)
         for fld in ("height", "bust", "waist", "hip", "cup", "birthday",
                     "birthplace", "hobby", "profile"):
             val = (result.get(fld) or "").strip() if isinstance(result.get(fld), str) \
@@ -539,7 +581,14 @@ def _run_actress_fetch(mode: str, limit: int, cfg: Dict[str, Any]) -> None:
                 job.finish("无可用资料插件")
                 return
             with db() as conn:
-                rows = query_all(conn, "SELECT id, name FROM actresses ORDER BY id")
+                # 只处理确实缺资料的女优。原来不加过滤会全表重跑，
+                # 资料已完整的女优也要白白联网一遍（批量任务慢的主因之一）。
+                rows = query_all(
+                    conn,
+                    "SELECT id, name FROM actresses WHERE "
+                    "(height IS NULL OR height='') OR (bust IS NULL OR bust='') "
+                    "OR (cup IS NULL OR cup='') OR (birthday IS NULL OR birthday='') "
+                    "OR (avatar IS NULL OR avatar='') ORDER BY id")
                 if limit and limit > 0:
                     rows = rows[:limit]
                 job.update(total=len(rows), phase="fetching")

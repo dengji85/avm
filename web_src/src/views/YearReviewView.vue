@@ -186,55 +186,55 @@ onMounted(load)
 <style scoped>
 .year-review { padding: 18px 20px 60px; max-width: 980px; margin: 0 auto; }
 .yr-head { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; margin-bottom: 18px; }
-.yr-title { font-size: 22px; margin: 0; color: var(--text, #e8eaed); }
+.yr-title { font-size: 22px; margin: 0; color: var(--c-text); }
 .yr-year-pick { display: flex; flex-wrap: wrap; gap: 6px; }
 .yr-year {
   padding: 5px 11px; border-radius: 999px; cursor: pointer; font-size: 13px;
-  background: var(--bg-input, #14161a); color: var(--muted, #9aa0a6);
-  border: 1px solid var(--border, #2c2f36);
+  background: var(--c-surface-2); color: var(--c-text-2);
+  border: 1px solid var(--c-line);
 }
-.yr-year.sel { background: var(--accent, #5b9cff); color: #fff; border-color: transparent; }
-.yr-loading { padding: 40px; text-align: center; color: var(--muted, #9aa0a6); }
+.yr-year.sel { background: var(--c-primary); color: #fff; border-color: transparent; }
+.yr-loading { padding: 40px; text-align: center; color: var(--c-text-2); }
 .yr-section { margin-bottom: 26px; }
-.yr-h2 { font-size: 15px; color: var(--muted, #9aa0a6); margin: 0 0 12px; font-weight: 600; }
+.yr-h2 { font-size: 15px; color: var(--c-text-2); margin: 0 0 12px; font-weight: 600; }
 .yr-cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
 .yr-card {
-  background: var(--bg-panel, #1b1d22); border: 1px solid var(--border, #2c2f36);
+  background: var(--c-surface); border: 1px solid var(--c-line);
   border-radius: 12px; padding: 16px; text-align: center;
 }
-.yr-num { font-size: 24px; font-weight: 700; color: var(--text, #e8eaed); }
-.yr-lab { font-size: 12px; color: var(--muted, #9aa0a6); margin-top: 4px; }
+.yr-num { font-size: 24px; font-weight: 700; color: var(--c-text); }
+.yr-lab { font-size: 12px; color: var(--c-text-2); margin-top: 4px; }
 
 .yr-heat { display: flex; align-items: flex-end; gap: 6px; height: 140px; padding: 0 4px; }
 .yr-heat-col { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: flex-end; height: 100%; }
-.yr-heat-bar { width: 70%; background: linear-gradient(180deg, var(--accent, #5b9cff), #3a6fc4); border-radius: 4px 4px 0 0; min-height: 2px; transition: height .3s; }
-.yr-heat-m { font-size: 11px; color: var(--muted, #9aa0a6); margin-top: 4px; }
+.yr-heat-bar { width: 70%; background: linear-gradient(180deg, var(--c-primary), var(--c-primary-d)); border-radius: 4px 4px 0 0; min-height: 2px; transition: height .3s; }
+.yr-heat-m { font-size: 11px; color: var(--c-text-2); margin-top: 4px; }
 
 .yr-grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
 .yr-rank { list-style: none; margin: 0; padding: 0; }
-.yr-rank li { display: flex; align-items: center; gap: 10px; padding: 7px 0; border-bottom: 1px dashed var(--border, #2c2f36); }
-.yr-rank-i { width: 20px; height: 20px; line-height: 20px; text-align: center; border-radius: 50%; background: var(--bg-input, #14161a); font-size: 12px; color: var(--accent, #5b9cff); }
-.yr-rank-n { flex: 1; color: var(--text, #e8eaed); }
-.yr-rank-c { color: var(--muted, #9aa0a6); font-size: 13px; }
+.yr-rank li { display: flex; align-items: center; gap: 10px; padding: 7px 0; border-bottom: 1px dashed var(--c-line); }
+.yr-rank-i { width: 20px; height: 20px; line-height: 20px; text-align: center; border-radius: 50%; background: var(--c-surface-2); font-size: 12px; color: var(--c-primary); }
+.yr-rank-n { flex: 1; color: var(--c-text); }
+.yr-rank-c { color: var(--c-text-2); font-size: 13px; }
 .yr-tags { display: flex; flex-wrap: wrap; gap: 8px; }
-.yr-tag { padding: 6px 12px; border-radius: 999px; background: var(--bg-input, #14161a); color: var(--text, #e8eaed); border: 1px solid var(--border, #2c2f36); font-size: 13px; }
-.yr-tag b { color: var(--accent, #5b9cff); margin-left: 4px; }
+.yr-tag { padding: 6px 12px; border-radius: 999px; background: var(--c-surface-2); color: var(--c-text); border: 1px solid var(--c-line); font-size: 13px; }
+.yr-tag b { color: var(--c-primary); margin-left: 4px; }
 
 .yr-rating { display: flex; flex-direction: column; gap: 8px; }
 .yr-rating-row { display: flex; align-items: center; gap: 10px; }
-.yr-rating-lab { width: 36px; color: var(--text, #e8eaed); font-size: 13px; }
+.yr-rating-lab { width: 36px; color: var(--c-text); font-size: 13px; }
 .yr-star { color: #f5c542; }
-.yr-rating-track { flex: 1; height: 12px; border-radius: 6px; background: var(--bg-input, #14161a); overflow: hidden; }
+.yr-rating-track { flex: 1; height: 12px; border-radius: 6px; background: var(--c-surface-2); overflow: hidden; }
 .yr-rating-fill { height: 100%; background: linear-gradient(90deg, #f5c542, #e89b2d); }
-.yr-rating-num { width: 30px; text-align: right; color: var(--muted, #9aa0a6); font-size: 13px; }
+.yr-rating-num { width: 30px; text-align: right; color: var(--c-text-2); font-size: 13px; }
 
 .yr-best-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
-.yr-best { cursor: pointer; background: var(--bg-panel, #1b1d22); border: 1px solid var(--border, #2c2f36); border-radius: 10px; overflow: hidden; }
-.yr-best-cover { height: 120px; background-size: cover; background-position: center; background-color: var(--bg-input, #14161a); display: flex; align-items: center; justify-content: center; }
-.yr-best-ph { color: var(--muted, #9aa0a6); font-size: 12px; }
+.yr-best { cursor: pointer; background: var(--c-surface); border: 1px solid var(--c-line); border-radius: 10px; overflow: hidden; }
+.yr-best-cover { height: 120px; background-size: cover; background-position: center; background-color: var(--c-surface-2); display: flex; align-items: center; justify-content: center; }
+.yr-best-ph { color: var(--c-text-2); font-size: 12px; }
 .yr-best-meta { padding: 8px 10px; }
-.yr-best-title { font-size: 13px; color: var(--text, #e8eaed); }
+.yr-best-title { font-size: 13px; color: var(--c-text); }
 .yr-best-rate { font-size: 12px; color: #f5c542; margin-top: 2px; }
-.yr-empty { color: var(--muted, #9aa0a6); font-size: 13px; padding: 8px 0; }
+.yr-empty { color: var(--c-text-2); font-size: 13px; padding: 8px 0; }
 .ellipsis { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 </style>
