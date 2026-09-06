@@ -32,7 +32,7 @@ class ActressPlugin:
     description: str = ""
     #: 能力列表：['avatar', 'measurements', 'birthday', 'height', ...]
     capabilities: List[str] = []
-    #: 是否需要联网（决定默认是否启用；需要联网的默认关闭）
+    #: 是否需要联网（仅作信息展示：供设置页提示用户该插件会发起网络请求）
     needs_network: bool = True
 
     def fetch(self, name: str, cfg: Dict[str, Any]) -> Dict[str, Any]:
@@ -86,8 +86,10 @@ def enabled_plugins(cfg: Dict[str, Any]) -> List[ActressPlugin]:
     enabled_map = (cfg.get("plugins") or {}).get("enabled") or {}
     out: List[ActressPlugin] = []
     for pid, plugin in _REGISTRY.items():
-        # 默认启用规则：不联网插件默认开，联网插件默认关
-        default = not plugin.needs_network
+        # 默认全部启用。原先按 needs_network 默认关闭联网插件，但内置的女优资料
+        # 插件都要联网（wiki/avwiki/gfriends 无一例外），结果就是开箱状态下
+        # 「女优资料抓取」因没有任何可用插件而直接报错，用户必须先进设置逐个开启。
+        default = True
         if enabled_map.get(pid, default):
             out.append(plugin)
     return out

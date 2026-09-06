@@ -265,6 +265,7 @@ export default {
     loop: 'ループ再生（最後まで再生すると先頭に戻る）',
     loopBtn: 'ループ',
     loopRestart: 'ループして先頭に戻りました',
+    detail: '詳細を見る',
   },
   actress: {
     filterInGallery: 'ライブラリで絞り込む',

@@ -274,6 +274,7 @@ export default {
     loop: '循环播放（播完自动回到第一部）',
     loopBtn: '循环',
     loopRestart: '已循环回到第一部',
+    detail: '查看详情',
   },
   actress: {
     filterInGallery: '在影片库中筛选',

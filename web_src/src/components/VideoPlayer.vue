@@ -98,8 +98,20 @@ async function saveProgress(force = false) {
   } catch (e) { /* 静默 */ }
 }
 
+// 每部影片只自动降级一次：video.js 可能对同一次故障连续派发多个 error 事件，
+// 不防重会反复拉起系统播放器。切换影片时随播放器重建而重置。
+let autoExternalDone = false
+
 function onError() {
   failed.value = true
+  // 网页端解码/拉流失败时自动改用系统播放器。绝大多数失败其实是浏览器不支持该
+  // 编码（HEVC、DTS 音轨等），文件本身是好的，系统播放器能直接播，
+  // 没必要让用户再手动点一次按钮。
+  // 远程访问时不自动拉起：系统播放器只会开在服务端机器上，访问者看不到。
+  if (!isRemote && !autoExternalDone) {
+    autoExternalDone = true
+    openExternal()
+  }
 }
 
 function onEnded() {
@@ -558,9 +570,18 @@ function setupPreviewHover() {
 
 saveTimer = setInterval(() => saveProgress(false), 10000)
 
-onMounted(() => { nextTick(initPlayer) })
+// 外部请求暂停（如连播途中打开影片详情抽屉，画面被盖住时不应继续出声）
+function onPauseRequest() {
+  if (player && !player.paused()) player.pause()
+}
+
+onMounted(() => {
+  window.addEventListener('avm-pause-player', onPauseRequest)
+  nextTick(initPlayer)
+})
 
 onBeforeUnmount(() => {
+  window.removeEventListener('avm-pause-player', onPauseRequest)
   clearInterval(saveTimer)
   destroyPlayer()
 })
@@ -569,6 +590,7 @@ watch(() => props.movieId, () => {
   // 切换影片：结束上一个会话并销毁重建播放器
   destroyPlayer()
   failed.value = false
+  autoExternalDone = false
   ready.value = false
   lastSaved = 0
   sessionId = null

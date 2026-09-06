@@ -40,6 +40,7 @@ const aiBusy = ref(false)
 const sites = ref([])
 const topSites = computed(() => sites.value.slice(0, 3))
 const moreSites = computed(() => sites.value.slice(3))
+const sitesMoreOpen = ref(false)
 async function loadSites() {
   try {
     const cfg = await getConfig()
@@ -59,7 +60,10 @@ function renderSiteUrl(site, code) {
 function openSite(site) {
   const code = (mv.value && mv.value.code) || ''
   const final = renderSiteUrl(site, code)
-  if (final) window.open(final, '_blank', 'noopener')
+  if (final) {
+    window.open(final, '_blank', 'noopener')
+    sitesMoreOpen.value = false
+  }
 }
 
 async function checkAi() {
@@ -86,6 +90,22 @@ async function doAiTags() {
 
 const open = computed(() => !!state.currentId)
 const id = computed(() => state.currentId)
+// 片单连播是全屏层（--z-player），层级高于普通抽屉。连播途中打开详情时若不提升
+// 层级，抽屉会被播放层完全盖住，看起来像"点了没反应"。
+const overPlayer = computed(() => !!state.playQueue?.open)
+
+// 连播途中打开详情时暂停播放：抽屉几乎占满右侧，画面被完全盖住，
+// 声音却还在响会让人以为播放器失控。改用广播事件而不是组件间传 ref，
+// 详情抽屉不必知道当前是谁在播放（连播播放器 / 迷你条都可能）。
+// 注意：关闭详情后不自动续播——用户在详情里可能已切走或打算离开，
+// 交给播放器控件手动继续更可控。
+function pausePlayer() {
+  window.dispatchEvent(new CustomEvent('avm-pause-player'))
+}
+watch(
+  () => [overPlayer.value, open.value],
+  ([inPlayer, isOpen]) => { if (inPlayer && isOpen) pausePlayer() },
+)
 // 打开详情时加载常用站点配置（只取启用的）
 watch(open, (v) => { if (v) loadSites() })
 
@@ -102,6 +122,7 @@ const quality = computed(() => qualityTag(mv.value?.resolution))
 async function load() {
   if (!id.value) return
   loading.value = true
+  sitesMoreOpen.value = false
   tab.value = 'preview'
   playing.value = false
   previews.value = []
@@ -540,6 +561,7 @@ function onKey(e) {
   if (!open.value) return
   if (e.key === 'Escape') {
     if (actressModal.value) { actressModal.value = ''; return }
+    if (sitesMoreOpen.value) { sitesMoreOpen.value = false; return }
     lightbox.value ? (lightbox.value = '') : close()
   }
 }
@@ -549,8 +571,8 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', onKey) })
 
 <template>
   <Teleport to="body">
-    <div v-if="open" class="drawer-mask" @click="close"></div>
-    <aside class="drawer" :class="{ open }">
+    <div v-if="open" class="drawer-mask" :class="{ 'over-player': overPlayer }" @click="close"></div>
+    <aside class="drawer" :class="{ open, 'over-player': overPlayer }">
       <template v-if="mv">
         <!-- 头部 -->
         <header class="drawer-head">
@@ -562,6 +584,8 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', onKey) })
         </header>
 
         <div class="drawer-body">
+          <!-- 展开「更多站点」时，半透明遮罩盖住详情页其余内容，只露出站点面板 -->
+          <div v-if="sitesMoreOpen" class="sites-shade" @click="sitesMoreOpen = false"></div>
           <!-- 左侧主内容 -->
           <div class="dd-content">
             <!-- 播放器 -->
@@ -616,8 +640,8 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', onKey) })
                     >
                       <span class="i">🔗</span> {{ s.name || s.url }}
                     </button>
-                    <div v-if="moreSites.length" class="dd-sites-more">
-                      <button class="btn site-flat">
+                    <div v-if="moreSites.length" class="dd-sites-more" :class="{ open: sitesMoreOpen }">
+                      <button class="btn site-flat" :aria-expanded="sitesMoreOpen" @click.stop="sitesMoreOpen = !sitesMoreOpen">
                         <span class="i">🔗</span> {{ $t('detail.openSitesMore', { n: moreSites.length }) }}
                         <span class="caret">▾</span>
                       </button>
@@ -912,10 +936,15 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', onKey) })
 </template>
 
 <style scoped>
+/* 连播（全屏播放层）之上打开详情时，层级需高于 --z-player，否则会被完全盖住。
+   .drawer-mask / .drawer 的基础样式在 styles/layout.css，这里只覆盖层级。 */
+.drawer-mask.over-player { z-index: var(--z-drawer-over); }
+.drawer.over-player { z-index: calc(var(--z-drawer-over) + 1); }
+
 .dh-title { font-size: var(--fs-lg); font-weight: 600; flex: 1; min-width: 0; }
 
 /* 主体：左主区 + 右相似推荐侧栏，常驻并排 */
-.drawer-body { display: flex; flex-direction: row; overflow: hidden; flex: 1; min-height: 0; }
+.drawer-body { display: flex; flex-direction: row; overflow: hidden; flex: 1; min-height: 0; position: relative; }
 .dd-content { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; overflow-y: auto; }
 .dd-similar-rail {
   flex: none; width: 300px;
@@ -993,12 +1022,12 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', onKey) })
 .dd-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: var(--sp-2); }
 .dd-actions { display: flex; flex-wrap: wrap; gap: var(--sp-2); }
 .site-flat { white-space: nowrap; font-size: 12px; padding: 5px 9px; }
-.dd-sites-more { position: relative; }
+.dd-sites-more { position: relative; z-index: 41; }
 .dd-sites-more .caret { font-size: 10px; opacity: .7; margin-left: 2px; }
-/* 更多：鼠标移入展开，移出收起；用 padding-top 做透明桥，避免移动到面板时丢失 hover */
+/* 更多：点击展开，半透明遮罩（.sites-shade）盖住详情页其余内容，只露出站点面板 */
 .dd-sites-more .sites-pop { display: none; }
-.dd-sites-more:hover .sites-pop,
-.dd-sites-more .sites-pop:hover { display: flex; }
+.dd-sites-more.open .sites-pop { display: flex; }
+.sites-shade { position: absolute; inset: 0; z-index: 40; background: rgba(0,0,0,.34); }
 .sites-pop { position: absolute; top: 100%; left: 0; z-index: 60; min-width: 220px;
   background: var(--c-bg-pop); border: 1px solid var(--c-border); border-radius: 10px;
   box-shadow: 0 10px 30px rgba(0,0,0,.28); padding: 6px var(--sp-2) var(--sp-2); flex-direction: column; gap: 2px; }

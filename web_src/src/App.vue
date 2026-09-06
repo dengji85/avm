@@ -1,7 +1,7 @@
 <script setup>
 import { onMounted, onBeforeUnmount, watch, ref, computed } from 'vue'
 import { state, applyTheme } from './state.js'
-import { getFacets, getConfig, onNoToken } from './api.js'
+import { getFacets, getConfig, onNoToken, serverOffline } from './api.js'
 import { toast } from './utils.js'
 import { useTasks } from './composables/useTasks.js'
 
@@ -77,6 +77,12 @@ watch(() => state.view, () => {
   if (el) el.scrollTop = 0
 })
 
+/* 后端离线 / 恢复提示 */
+watch(serverOffline, (off, was) => {
+  if (off && !was) toast('无法连接服务器，请确认后端服务已启动', 'err', 4000)
+  else if (!off && was) toast('已重新连接服务器', 'ok', 2500)
+})
+
 onMounted(async () => {
   applyTheme()
   onNoToken(() => tokenGate.value && tokenGate.value.open())
@@ -96,6 +102,10 @@ function onFilterChange() { /* 由各视图自行响应 state 变化 */ }
 
 <template>
   <div class="app">
+    <!-- 后端离线常驻横幅：服务未启动 / 连接被拒时显示，恢复后自动消失 -->
+    <div v-if="serverOffline" class="offline-banner" role="alert">
+      ⚠ 无法连接服务器，请确认后端服务（avm）已启动，当前数据可能未刷新。
+    </div>
     <TopNav />
     <MobileNav />
 
@@ -118,3 +128,16 @@ function onFilterChange() { /* 由各视图自行响应 state 变化 */ }
     <OnboardingView v-if="state.config && !state.onboarded" />
   </div>
 </template>
+
+<style scoped>
+/* 后端离线常驻横幅：覆盖在顶部导航之上，恢复后由 v-if 自动移除 */
+.offline-banner {
+  position: fixed; top: 0; left: 0; right: 0; z-index: 900;
+  background: #e5484d; color: #fff;
+  text-align: center; padding: 9px 14px;
+  font-size: 13px; font-weight: 600; line-height: 1.4;
+  box-shadow: 0 2px 12px rgba(0,0,0,.35);
+  animation: offbar-in .2s ease;
+}
+@keyframes offbar-in { from { transform: translateY(-100%); } to { transform: translateY(0); } }
+</style>

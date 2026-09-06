@@ -265,6 +265,7 @@ export default {
     loop: 'Loop playback (restart from first when finished)',
     loopBtn: 'Loop',
     loopRestart: 'Looped back to the first movie',
+    detail: 'View details',
   },
   actress: {
     filterInGallery: 'Filter in library',

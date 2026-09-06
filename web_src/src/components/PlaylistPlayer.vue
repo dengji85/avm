@@ -147,6 +147,13 @@ function jumpFiltered(oi) {
   jumpTo(oi)
 }
 
+// 打开影片详情（右侧抽屉）。全局单例，设置 currentId 即唤起 DetailDrawer；
+// 组件自身不控制显隐，也无需关心层级——DetailDrawer 会检测连播层并自行提升。
+function openDetail(id) {
+  if (!id) return
+  state.currentId = id
+}
+
 function close() {
   syncGlobalIdx()
   closePlayQueue()
@@ -214,12 +221,16 @@ watch(() => state.playQueue.open, (open) => {
           <button v-if="isFiltering" class="pl-filter-clear" @click="searchQ = ''">✕</button>
         </div>
         <div class="pl-items">
-          <button
+          <div
             v-for="it in filteredQueue"
             :key="it.m.id"
             class="pl-item"
             :class="{ on: it.oi === displayedIdx, dim: !it.m.playable }"
+            role="button"
+            tabindex="0"
             @click="jumpFiltered(it.oi)"
+            @keydown.enter.prevent="jumpFiltered(it.oi)"
+            @keydown.space.prevent="jumpFiltered(it.oi)"
           >
             <span class="pl-thumb-wrap">
               <img v-if="it.m.id" :src="thumbUrl(it.m.id, 200)" class="pl-thumb" alt="" />
@@ -235,7 +246,16 @@ watch(() => state.playQueue.open, (open) => {
                 <span v-if="it.m.duration_seconds > 0" class="tabular muted">{{ Math.round(it.m.duration_seconds / 60) }}′</span>
               </div>
             </div>
-          </button>
+            <!-- 条目本身点击 = 切到这部；详情要 .stop 避免顺带切歌。
+                 条目容器用 div 而非 button：HTML 不允许 button 嵌套 button。 -->
+            <button
+              v-if="it.m.id"
+              class="pl-detail"
+              :data-tip="$t('playlist.detail')"
+              :aria-label="$t('playlist.detail')"
+              @click.stop="openDetail(it.m.id)"
+            >ⓘ</button>
+          </div>
           <div v-if="isFiltering && !filteredQueue.length" class="pl-filter-empty">{{ $t('playlist.filterNone') }}</div>
         </div>
         <div class="pl-side-foot">
@@ -248,7 +268,7 @@ watch(() => state.playQueue.open, (open) => {
 
 <style scoped>
 .pl-mask {
-  position: fixed; inset: 0; z-index: 200;
+  position: fixed; inset: 0; z-index: var(--z-player);
   background: #000;
   display: flex;
 }
@@ -307,9 +327,28 @@ watch(() => state.playQueue.open, (open) => {
 .pl-filter-empty { padding: var(--sp-4); text-align: center; color: var(--c-text-3); font-size: var(--fs-sm); }
 .pl-items { flex: 1; overflow-y: auto; padding: var(--sp-2); display: flex; flex-direction: column; gap: 4px; }
 .pl-item {
+  position: relative;
   display: flex; align-items: center; gap: var(--sp-3);
   padding: var(--sp-2); border-radius: var(--r-sm);
+  /* 右侧常驻留白给详情按钮，避免 hover 出现按钮时文字被挤压跳动 */
+  padding-right: 34px;
   background: transparent; border: 1px solid transparent; cursor: pointer; text-align: left;
+}
+/* 详情入口：默认隐藏，悬停/键盘聚焦时出现 */
+.pl-detail {
+  position: absolute; right: 6px; top: 50%; transform: translateY(-50%);
+  width: 24px; height: 24px; display: grid; place-items: center;
+  border-radius: 50%; border: 1px solid var(--c-line-strong, var(--c-line));
+  background: var(--c-surface-2); color: var(--c-text-2);
+  font-size: 13px; line-height: 1; cursor: pointer;
+  opacity: 0; transition: opacity var(--t-fast, .12s), color var(--t-fast, .12s), background var(--t-fast, .12s);
+}
+.pl-item:hover .pl-detail,
+.pl-item:focus-within .pl-detail { opacity: 1; }
+.pl-detail:hover { color: var(--c-text); background: var(--c-surface-3, var(--c-surface)); border-color: var(--c-accent, #4f8cff); }
+/* 触屏没有 hover，详情按钮常显，否则永远点不到 */
+@media (hover: none) {
+  .pl-detail { opacity: 1; }
 }
 .pl-item:hover { background: var(--c-surface-3, var(--c-surface)); }
 .pl-item.on { border-color: var(--c-accent, #4f8cff); background: color-mix(in srgb, var(--c-accent, #4f8cff) 14%, transparent); }

@@ -1,6 +1,9 @@
 // 统一 API 请求封装。开发期由 vite proxy 转发 /api 到后端。
+import { ref } from 'vue'
 const API = '/api'
 const TOKEN_KEY = 'avm_access_token'
+// 后端不可达（服务未启动 / 连接被拒）时的全局状态，供 UI 显示离线横幅
+export const serverOffline = ref(false)
 
 export function getToken() {
   try { return localStorage.getItem(TOKEN_KEY) || '' } catch (e) { return '' }
@@ -20,7 +23,19 @@ export async function api(path, options = {}) {
   }
   const tok = getToken()
   if (tok) opts.headers['X-Access-Token'] = tok
-  const res = await fetch(API + path, opts)
+  let res
+  try {
+    res = await fetch(API + path, opts)
+  } catch (e) {
+    // 网络层失败：通常是后端服务未启动或连接被拒绝
+    serverOffline.value = true
+    const err = new Error('无法连接服务器，请确认后端服务（avm）已启动')
+    err.code = 'NETWORK'
+    err.offline = true
+    throw err
+  }
+  // 能成功拿到响应即说明后端在线，清除离线标记
+  serverOffline.value = false
   let data = null
   try { data = await res.json() } catch (e) { data = null }
   if (!res.ok) {

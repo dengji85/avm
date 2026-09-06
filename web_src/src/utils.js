@@ -99,7 +99,13 @@ export function avatarFallback(e) {
 export const toasts = reactive([])
 let toastSeq = 0
 
+const _recentToasts = new Map()
 export function toast(msg, type = '', ms = 3000) {
+  const key = String(msg) + '|' + type
+  const now = Date.now()
+  // 短时间内相同文案去重，避免后端离线时大量并行请求疯狂弹 toast
+  if (_recentToasts.has(key) && now - _recentToasts.get(key) < 2500) return -1
+  _recentToasts.set(key, now)
   const id = ++toastSeq
   toasts.push({ id, msg: String(msg), type })
   setTimeout(() => {

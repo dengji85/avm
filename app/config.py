@@ -11,7 +11,7 @@ import json
 import sys
 import threading
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, List
 
 if getattr(sys, "frozen", False):
     # PyInstaller 打包后运行：数据目录放在 exe 同级（便于备份/迁移），
@@ -58,9 +58,25 @@ DEFAULT_UA = (
     "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
 )
 
+# 预置的常用在线站点。详情页「打开在线页面」直接用它，
+# 用户不必先去设置页添加并保存一次才有得点；可在设置页自由增删改。
+# lower=true 表示跳转前把 {code} 转为小写（JavBus / 123av 等路径用小写番号）。
+# 与前端 SettingsView 的 PRESET_SITES 保持一致。
+DEFAULT_ONLINE_SITES: List[Dict[str, Any]] = [
+    {"id": "preset_javbus", "name": "JavBus", "url": "https://javbus.com/{code}", "lower": True, "enabled": True},
+    {"id": "preset_javwiki", "name": "AV-Wiki", "url": "https://av-wiki.net/{code}/", "lower": False, "enabled": True},
+    {"id": "preset_javdb", "name": "JavDB", "url": "https://javdb.com/search?q={code}", "lower": True, "enabled": True},
+    {"id": "preset_javlibrary", "name": "JavLibrary",
+     "url": "https://www.javlibrary.com/cn/vl_searchbyid.php?keyword={code}", "lower": False, "enabled": True},
+    {"id": "preset_missav", "name": "123av", "url": "https://123av.com/cn/v/{code}", "lower": True, "enabled": True},
+    {"id": "preset_jable", "name": "Jable", "url": "https://jable.tv/videos/{code}/", "lower": True, "enabled": True},
+]
+
 DEFAULT_CONFIG: Dict[str, Any] = {
     # 预览图密度：smart=按时长自适应 / low=稀疏省空间 / high=精细（影响抽帧张数）
     "previews_quality": "smart",
+    # 常用在线站点：详情页一键打开该影片在各站的页面
+    "online_sites": copy.deepcopy(DEFAULT_ONLINE_SITES),
     "library": {
         # 需要扫描的根目录，例如 "D:/Media/Movies"
         "paths": [],
@@ -206,12 +222,10 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "fanart_download": True,
     },
     "plugins": {
-        # 女优资料插件开关：{插件id: true/false}
-        # 默认启用规则见 plugins/base.enabled_plugins（不联网插件默认开，联网插件默认关）
-        "enabled": {
-            "gfriends": False,
-            "wiki_actress": False,
-        },
+        # 女优资料插件开关：{插件id: true/false}。
+        # 留空 = 全部启用（详见 plugins/base.enabled_plugins），这样新增插件也开箱可用。
+        # 只有用户显式关掉的插件才会被写到这里（值为 false）。
+        "enabled": {},
     },
     # 女优资料插件（维基百科）配置
     "wiki": {
@@ -237,6 +251,28 @@ def ensure_dirs() -> None:
     # 仅创建固定默认目录；自定义 media 目录在运行时由 avatar_dir()/fanart_dir() 按需创建。
     for d in (DATA_DIR, COVER_DIR, AVATAR_DIR, FANART_DIR):
         d.mkdir(parents=True, exist_ok=True)
+
+
+def _migrate_online_sites(sites: Any) -> List[Dict[str, Any]]:
+    """补齐早期保存的预设站点缺失的 lower（番号大小写）字段。
+
+    最早一批预设没有 lower 字段，导致 JavBus / 123av / Jable 这类要求小写番号的
+    站点被拼成大写番号、打开即 404。这里按 id 比对预设表只补缺失字段，
+    不覆盖用户自定义的名称/链接/排序；非预设站点原样保留。
+    """
+    if not isinstance(sites, list):
+        return []
+    preset_lower = {s["id"]: bool(s.get("lower")) for s in DEFAULT_ONLINE_SITES}
+    out: List[Dict[str, Any]] = []
+    for s in sites:
+        if not isinstance(s, dict):
+            continue
+        item = dict(s)
+        pid = item.get("id")
+        if pid in preset_lower and "lower" not in item:
+            item["lower"] = preset_lower[pid]
+        out.append(item)
+    return out
 
 
 def _deep_merge(base: Any, patch: Any) -> Any:
@@ -267,6 +303,9 @@ def load_config(refresh: bool = False) -> Dict[str, Any]:
                     pass
                 data = {}
         merged = _deep_merge(DEFAULT_CONFIG, data)
+        # 常用站点：未配置过时由 DEFAULT_CONFIG 提供预设；已保存的走补齐逻辑。
+        # 用户若手动删空了站点列表（空数组），这里保持为空，不再填回预设。
+        merged["online_sites"] = _migrate_online_sites(merged.get("online_sites"))
         _CACHE = merged
         if not CONFIG_PATH.exists():
             _write(merged)

@@ -1959,11 +1959,42 @@ def health_check(conn: sqlite3.Connection) -> Dict[str, Any]:
         conn,
         "SELECT m.id, m.code, m.title, m.folder FROM movies m "
         "WHERE m.has_code=0 AND EXISTS(SELECT 1 FROM movie_files f WHERE f.movie_id=m.id AND f.missing=0)")
-    duplicates = query_all(
+    # 跨影片的"内容完全相同"文件（体检里叫重复影片）。
+    # 判定依据是内容指纹 quick_hash 相同，而不是 size 相等——不同文件体积恰好相同
+    # 是常态（尤其同一下载站拆出的等大分卷，如 FC2 的 xxx_1 / xxx_2），
+    # 仅凭 size 会把它们误报成重复。quick_hash = size + 首尾采样哈希，几乎不会碰撞。
+    #
+    # 只比 f1.movie_id < f2.movie_id 的跨影片配对：同一影片里的多个文件是
+    # 分卷/多版本，即使碰巧同体积也不算"跨片重复"。从未算过指纹的（quick_hash=0）
+    # 不判定，避免误报，交由去重面板的精确扫描兜底。
+    dup_rows = query_all(
         conn,
-        "SELECT f1.movie_id AS a, f2.movie_id AS b, f1.size, f1.path AS p1, f2.path AS p2 "
-        "FROM movie_files f1 JOIN movie_files f2 ON f1.size=f2.size AND f1.id<f2.id "
-        "AND f1.size>0 AND f1.missing=0 AND f2.missing=0 LIMIT 200")
+        "SELECT movie_id, size, quick_hash, path "
+        "FROM movie_files WHERE missing=0 AND quick_hash>0")
+    by_hash: Dict[tuple, List[tuple]] = {}
+    for r in dup_rows:
+        by_hash.setdefault((r["quick_hash"], r["size"]), []).append(
+            (r["movie_id"], r["path"]))
+    duplicates = []
+    for (qh, sz), items in by_hash.items():
+        if len(items) < 2:
+            continue
+        seen_movies = set()
+        uniq = []
+        for mid, p in items:
+            if mid in seen_movies:
+                continue  # 同一影片内部（分卷/多版本）不去重
+            seen_movies.add(mid)
+            uniq.append((mid, p))
+        # 取两两里最代表性的几对：按 movie_id 升序取首对，足够提醒用户
+        if len(uniq) >= 2:
+            a, b = uniq[0], uniq[1]
+            duplicates.append({
+                "a": a[0], "b": b[0], "size": sz,
+                "p1": a[1], "p2": b[1],
+            })
+        if len(duplicates) >= 200:
+            break
     # 分片不完整：有 part=1 但同片无 part=2 的多文件影片
     split_incomplete = query_all(
         conn,
