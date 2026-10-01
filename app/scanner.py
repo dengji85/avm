@@ -178,6 +178,11 @@ def run_scan(progress_cb=None, incremental=True, workers=None, hash_files=False,
     finally:
         conn.close()
 
+    # 4.5) 本地元数据导入：把同目录的 .nfo/.json 读进来（离线，含番号回写），
+    #      让「新加入的库」扫描完即带上本地整理好的信息，无需再手动刮削。
+    SCAN.update(phase="local_nfo", current="正在导入本地 NFO/JSON…")
+    local_nfo_hit = import_local_nfo_after_scan(progress_cb)
+
     # 5) 封面嗅探（单点执行，避免多线程竞争同一 movie 的封面）
     batch_local_covers(progress_cb)
 
@@ -190,13 +195,13 @@ def run_scan(progress_cb=None, incremental=True, workers=None, hash_files=False,
         cleaned = auto_cleanup_after_scan(alive, roots, progress_cb)
 
     SCAN.finish(
-        "扫描完成：新增 %d / 更新 %d / 跳过 %d / 缺失 %d / 清理 %d"
-        % (added, updated, skipped, len(removed),
+        "扫描完成：新增 %d / 更新 %d / 跳过 %d / 本地元数据 %d / 缺失 %d / 清理 %d"
+        % (added, updated, skipped, local_nfo_hit, len(removed),
            cleaned["files"] + cleaned["movies"] + sum(cleaned["orphans"].values()))
     )
     return {"total": enumerated, "added": added, "updated": updated,
             "unchanged": unchanged, "missing": len(removed), "errors": errors,
-            "cleaned": cleaned}
+            "local_nfo": local_nfo_hit, "cleaned": cleaned}
 
 
 def auto_cleanup_after_scan(alive_paths: set, roots: list, progress_cb=None):
@@ -259,6 +264,48 @@ def batch_local_covers(progress_cb=None):
         if done % 20 == 0:
             progress_cb(cover_done=done, cover_total=total)
     progress_cb(cover_done=total, cover_total=total)
+
+
+def import_local_nfo_after_scan(progress_cb=None):
+    """扫描后自动导入同目录的本地 NFO / JSON 元数据。
+
+    只处理「还没有番号」或「还没刮削过」的影片：这两类最需要本地元数据来补全
+    （已识别且已刮削的影片，其本地 NFO 更新由后续刮削按 local_nfo 优先级处理，
+    扫描阶段不重复读盘）。命中后不标记 scraped_at，保留在线源补齐缺失字段的机会。
+    返回成功导入的影片数。
+    """
+    from . import scraper
+    if progress_cb is None:
+        progress_cb = SCAN.update
+    cfg = load_config()
+    conn = connect()
+    try:
+        rows = conn.execute(
+            "SELECT DISTINCT m.id FROM movies m "
+            "WHERE EXISTS (SELECT 1 FROM movie_files f WHERE f.movie_id = m.id AND f.missing = 0) "
+            "AND (m.has_code = 0 OR m.scraped_at = '')"
+        ).fetchall()
+        ids = [r["id"] for r in rows]
+    finally:
+        conn.close()
+    total = len(ids)
+    if not total:
+        return 0
+    hit = 0
+    conn = connect()
+    try:
+        for i, mid in enumerate(ids):
+            try:
+                if scraper.import_local_nfo_one(conn, mid, cfg):
+                    hit += 1
+            except Exception:
+                pass
+            if (i + 1) % 20 == 0 or i == total - 1:
+                progress_cb(local_nfo_done=i + 1, local_nfo_total=total)
+        conn.commit()
+    finally:
+        conn.close()
+    return hit
 
 
 def remove_missing():

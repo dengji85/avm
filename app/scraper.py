@@ -72,8 +72,12 @@ def _classify_error(exc: BaseException) -> str:
 
 
 def apply_metadata(conn, movie_id: int, meta: Dict[str, Any], cfg: Dict[str, Any],
-                   overwrite: bool = False) -> Dict[str, Any]:
-    """把抓到的元数据写入影片，返回实际改动的字段。"""
+                   overwrite: bool = False, mark_scraped: bool = True) -> Dict[str, Any]:
+    """把抓到的元数据写入影片，返回实际改动的字段。
+
+    mark_scraped=False 时不写 scraped_at：用于「扫描后自动导入本地 NFO」——
+    只把本地整理的信息带进来，仍保留它被在线刮削补齐缺失字段的机会。
+    """
     current = store.movie_detail(conn, movie_id)
     if not current:
         return {"changed": []}
@@ -82,9 +86,21 @@ def apply_metadata(conn, movie_id: int, meta: Dict[str, Any], cfg: Dict[str, Any
     for field in _TEXT_FIELDS:
         if field in meta and not _is_bad_text(meta[field]) and (overwrite or _is_empty(current.get(field))):
             payload[field] = meta[field]
-    # 扫描阶段的标题只是从文件名猜的，遇到真标题应当替换
-    if meta.get("title") and not _is_bad_text(meta.get("title")) and current.get("title") in (current.get("code"), "", None):
-        payload["title"] = meta["title"]
+    # 扫描阶段的标题只是从文件名猜的，遇到真标题应当替换：
+    # - 标题为空或等于番号（只有番号可用）时，任何源的真标题都可替换；
+    # - 本地 NFO/JSON 是用户整理的权威数据，若该片还没正式刮削过
+    #   （scraped_at 为空），允许它覆盖扫描阶段从文件名猜出的标题。
+    if meta.get("title") and not _is_bad_text(meta.get("title")):
+        is_local = str(meta.get("source") or "").startswith("local_nfo")
+        if (current.get("title") in (current.get("code"), "", None)
+                or (is_local and not current.get("scraped_at"))):
+            payload["title"] = meta["title"]
+    # 本地 NFO / JSON 里的番号：仅当影片当前还没有番号时回写。
+    # 文件名解析不出番号、但同目录 NFO 里写着番号的影片，可借此自愈
+    # （store.update_movie 会同步把 has_code 置 1，后续在线刮削才能带上番号补齐）。
+    src_code = str(meta.get("code") or "").strip()
+    if src_code and not _is_bad_text(src_code) and not current.get("has_code"):
+        payload["code"] = src_code
 
     for field in ("runtime", "rating"):
         if field in meta and (overwrite or _is_empty(current.get(field))):
@@ -128,10 +144,11 @@ def apply_metadata(conn, movie_id: int, meta: Dict[str, Any], cfg: Dict[str, Any
     if prof_map:
         _save_actress_profiles(conn, prof_map, cfg)
 
-    conn.execute(
-        "UPDATE movies SET scraped_at = datetime('now','localtime'), scrape_source = ? WHERE id = ?",
-        (str(meta.get("source", ""))[:120], movie_id),
-    )
+    if mark_scraped:
+        conn.execute(
+            "UPDATE movies SET scraped_at = datetime('now','localtime'), scrape_source = ? WHERE id = ?",
+            (str(meta.get("source", ""))[:120], movie_id),
+        )
     changed = sorted(payload.keys()) + (["cover"] if cover_changed else []) + (["fanart"] if fanart_changed else [])
     return {"changed": changed, "source": meta.get("source", "")}
 
@@ -328,9 +345,14 @@ def scrape_one(conn, movie_id: int, providers: List[Any], cfg: Dict[str, Any],
     if SCRAPE.cancelled:
         return {"ok": False, "reason": "cancelled"}
 
+    # 无番号影片：在线源按番号查不到，只让本地 NFO 源参与（命中后会把番号回写）。
+    run_providers = providers
+    if not str(movie.get("code") or "").strip():
+        run_providers = [p for p in providers if p.name == "local_nfo"]
+
     primary_meta = None
     primary_name = None
-    for provider in providers:
+    for provider in run_providers:
         try:
             meta = provider.fetch(movie)
         except Exception as exc:
@@ -371,12 +393,16 @@ def scrape_one_parallel(movie: Dict[str, Any], providers: List[Any], cfg: Dict[s
     """
     if SCRAPE.cancelled:
         return {"cancelled": True, "movie_id": movie.get("id"), "code": movie.get("code")}
+    # 无番号影片：在线源按番号查不到，只让本地 NFO 源参与（命中后会把番号回写）。
+    run_providers = providers
+    if not str(movie.get("code") or "").strip():
+        run_providers = [p for p in providers if p.name == "local_nfo"]
     primary_meta = None
     primary_name = None
     net_err = False  # 是否存在「临时网络/服务端错误」或「反爬拦截」源（不进跳过名单）
     per_provider: List[Dict[str, Any]] = []  # 逐源明细，供失败面板诊断
     try:
-        for provider in providers:
+        for provider in run_providers:
             # 智能跳过：按收录范围预判，本源不可能收录的番号直接跳过（不发请求）
             try:
                 if not provider.can_handle(movie):
@@ -472,7 +498,68 @@ def sniff_local_cover(conn, movie_id: int, cfg: Dict[str, Any]) -> Optional[str]
     return None
 
 
+def import_local_nfo_one(conn, movie_id: int, cfg: Dict[str, Any]) -> bool:
+    """读取影片同目录的本地 NFO/JSON 并写库（供「扫描后自动导入」调用）。
+
+    与在线刮削的区别：
+    - 只跑 local_nfo 一个源，纯离线、零网络；
+    - 不标记 scraped_at（mark_scraped=False），这样随后点「刮削缺失」时仍会
+      带上在线源来补齐本地 NFO 缺失的字段；
+    - 仅补空字段（overwrite=False），不会覆盖已刮到或人工编辑过的内容；
+    - 扫描阶段不下载远程封面（本地 NFO 里的相对图片路径会被 local_nfo 还原为
+      本地绝对路径直接拷贝；写成 http(s) 的封面留给后续刮削去下载）。
+    命中本地元数据返回 True。
+    """
+    movie = store.movie_detail(conn, movie_id)
+    if not movie:
+        return False
+    from .providers.local_nfo import LocalNfoProvider
+    meta = LocalNfoProvider(cfg).fetch(movie)
+    if not meta:
+        return False
+    meta = dict(meta)
+    for k in ("cover", "fanart"):
+        if str(meta.get(k) or "").lower().startswith(("http://", "https://")):
+            meta[k] = ""
+    apply_metadata(conn, movie_id, meta, cfg, overwrite=False, mark_scraped=False)
+    return True
+
+
 # ----------------------------------------------------------------- 批量任务
+
+
+def _nfo_holder_ids(conn, skip_ids: Optional[set] = None,
+                    only_unscraped: bool = True) -> List[int]:
+    """返回「文件名解析不出番号、但同目录存在本地 NFO/JSON」的影片 id。
+
+    这些影片 has_code=0，会被常规的 has_code=1 过滤整体漏掉，本地 NFO 也就
+    永远读不到。单独捞出来交给 local_nfo 处理（命中后会把 NFO 里的番号回写）。
+    需要探测文件系统，故仅对候选影片逐个查同目录，不做全库遍历。
+    """
+    from . import nfo as nfo_mod
+    where = "m.has_code = 0"
+    if only_unscraped:
+        where += " AND m.scraped_at = ''"
+    rows = query_all(
+        conn,
+        f"SELECT m.id AS id, m.code AS code FROM movies m WHERE {where} "
+        "AND EXISTS (SELECT 1 FROM movie_files f WHERE f.movie_id = m.id AND f.missing = 0)",
+    )
+    out: List[int] = []
+    for r in rows:
+        mid = int(r["id"])
+        if skip_ids and mid in skip_ids:
+            continue
+        files = query_all(
+            conn,
+            "SELECT path FROM movie_files WHERE movie_id = ? AND missing = 0",
+            (mid,),
+        )
+        for f in files:
+            if nfo_mod.find_sidecar(f["path"], r["code"] or ""):
+                out.append(mid)
+                break
+    return out
 
 
 def _target_ids(conn, ids: Optional[List[int]], scope: str,
@@ -502,7 +589,14 @@ def _target_ids(conn, ids: Optional[List[int]], scope: str,
     else:  # missing：只处理还没抓过的（且不在跳过名单）
         sql = (f"SELECT movies.id AS mid FROM movies {skip_join} "
                f"WHERE has_code = 1 AND scraped_at = ''{skip_where} ORDER BY mid")
-    return [r["mid"] for r in query_all(conn, sql, params)]
+    base = [r["mid"] for r in query_all(conn, sql, params)]
+    # 无番号影片走不到上面的 has_code=1 过滤，会被整体漏掉；但它们的同目录里
+    # 往往有整理好的 NFO/JSON，local_nfo 命中后还能把番号回写，因此补进队列。
+    # all 范围连已刮过的也补，其余范围只补还没刮过的，避免每次全库探测文件系统。
+    extra = _nfo_holder_ids(conn, skip_ids, only_unscraped=(scope != "all"))
+    if extra:
+        return sorted(set(base) | set(extra))
+    return base
 
 
 def _extract_remaining_covers(conn, cfg: Dict[str, Any], total: int) -> int:

@@ -8,7 +8,9 @@ from typing import Any, Dict, List, Optional
 MetaResult = Dict[str, Any]
 
 FIELDS = (
-    "title", "original_title", "plot", "release_date", "runtime", "studio",
+    # code：本地 NFO/JSON 里的番号（num/id）。过去没有它，番号会在 normalize
+    # 阶段被丢弃，导致「文件名解析不出番号、NFO 里却写着番号」的影片无法自愈。
+    "title", "original_title", "code", "plot", "release_date", "runtime", "studio",
     "publisher", "series", "director", "rating", "cover", "fanart",
     "actresses", "genres", "tags", "actress_profiles",
 )
