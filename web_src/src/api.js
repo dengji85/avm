@@ -88,7 +88,8 @@ export const fanartUrl = (movieId) => `${API}/fanart/${movieId}`
 export const listMovies = (params) => get('/movies', params)
 export const getMovie = (id) => get(`/movies/${id}`)
 export const updateMovie = (id, patch) => put(`/movies/${id}`, patch)
-export const deleteMovie = (id, deleteFile = false) => del(`/movies/${id}`, { delete_file: deleteFile || undefined })
+export const deleteMovie = (id, deleteFile = false, trashFile = false) =>
+  del(`/movies/${id}`, { delete_file: deleteFile || undefined, trash_file: trashFile || undefined })
 export const toggleFlag = (id, field) => post(`/movies/${id}/toggle`, { field })
 export const playMovie = (id, body = {}) => post(`/movies/${id}/play`, body)
 export const markPlayed = (id) => post(`/movies/${id}/played`)
@@ -198,6 +199,7 @@ export const scrapeRetryNeterr = (body = {}) => post('/scrape/retry-neterr', bod
 export const scrapeRetryWithProvider = (body = {}) => post('/scrape/retry-with-provider', body)
 export const openFile = (path) => post('/open-file', { path })
 export const maintenanceSummary = () => get('/maintenance/summary')
+export const checkMissing = () => post('/maintenance/check-missing', {})
 export const reparseCodes = (body = {}) => post('/reparse-codes', body)
 export const matchSubtitles = (body) => post('/subtitles/match', body)
 export const alignSubtitles = (body) => post('/subtitles/align', body)

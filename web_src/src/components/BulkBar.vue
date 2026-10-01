@@ -1,7 +1,7 @@
 <script setup>
 import { ref, computed, watch, onBeforeUnmount } from 'vue'
 import { state } from '../state.js'
-import { batchMovies, startScrape, addToCollection, listCollections, listTags, createCollection } from '../api.js'
+import { batchMovies, startScrape, addToCollection, listCollections, listTags, createCollection, deleteMovie } from '../api.js'
 import { toast, confirmDialog } from '../utils.js'
 import { t } from '../i18n/index.js'
 
@@ -9,6 +9,7 @@ const emit = defineEmits(['done'])
 const busy = ref(false)
 const showTag = ref(false)
 const showColl = ref(false)
+const showRemove = ref(false)
 const tagText = ref('')
 const picked = ref([])          // 勾选的已有标签
 const allTags = ref([])         // 全库已有标签（与详情页一致）
@@ -57,6 +58,38 @@ async function scrapeSelected() {
     await startScrape({ ids: ids.value })
     state.taskPanelOpen = true
     toast(t('common.scrapeQueued'), 'ok')
+  } catch (e) { toast(e.message, 'err') } finally { busy.value = false }
+}
+
+// 覆盖重刮：单点详情页的「重新刮削」用的是 overwrite=true，而批量默认沿用
+// 配置里的 overwrite（多为 false，只补空缺），于是名称异常这类「已有字段」
+// 批量刮不动、只能一部部点。这里给批量也提供覆盖重刮入口。
+async function rescrapeSelected() {
+  if (!n.value) return
+  busy.value = true
+  try {
+    await startScrape({ ids: ids.value, overwrite: true })
+    state.taskPanelOpen = true
+    toast(t('common.scrapeQueued'), 'ok')
+  } catch (e) { toast(e.message, 'err') } finally { busy.value = false }
+}
+
+// 批量删除：trash=false 仅移出媒体库（保留磁盘文件）；trash=true 删除到系统回收站（可恢复）。
+async function removeSelected(trash) {
+  if (!n.value) return
+  showRemove.value = false
+  const ok = await confirmDialog(
+    trash ? t('bulk.removeTrash') : t('bulk.remove'),
+    trash ? t('bulk.removeTrashDesc', { n: n.value }) : t('bulk.removeDesc', { n: n.value }),
+    { danger: true, okText: trash ? t('bulk.removeTrash') : t('bulk.remove') },
+  )
+  if (!ok) return
+  busy.value = true
+  try {
+    for (const id of ids.value) await deleteMovie(id, false, !!trash)
+    toast(t('bulk.removed', { n: n.value }), 'ok')
+    clear()
+    emit('done')
   } catch (e) { toast(e.message, 'err') } finally { busy.value = false }
 }
 
@@ -125,6 +158,8 @@ async function submitColl() {
     <button class="btn tiny ghost" :disabled="busy" @click="openTag">{{ $t('bulk.tag') }}</button>
     <button class="btn tiny ghost" :disabled="busy" @click="openColl">{{ $t('bulk.addToColl') }}</button>
     <button class="btn tiny ghost" :disabled="busy" @click="scrapeSelected">{{ $t('bulk.scrape') }}</button>
+    <button class="btn tiny ghost" :disabled="busy" @click="rescrapeSelected">{{ $t('bulk.rescrape') }}</button>
+    <button class="btn tiny ghost" :disabled="busy" @click="showRemove = !showRemove">{{ $t('bulk.remove') }}</button>
 
     <div class="divider vert"></div>
     <button class="btn tiny ghost" @click="clear">{{ $t('common.cancel') }}</button>
@@ -153,6 +188,13 @@ async function submitColl() {
       <input v-model="newCollName" :placeholder="$t('bulk.newCollPlaceholder')" class="coll-new" />
       <button class="btn tiny primary" :disabled="busy" @click="submitColl">{{ $t('bulk.join') }}</button>
       <button class="btn tiny ghost" @click="showColl = false">✕</button>
+    </div>
+
+    <!-- 删除方式：仅移出库 / 删除到回收站 -->
+    <div v-if="showRemove" class="bb-pop remove-pop">
+      <button class="btn tiny" :disabled="busy" @click="removeSelected(false)">{{ $t('bulk.remove') }}</button>
+      <button class="btn tiny danger" :disabled="busy" @click="removeSelected(true)">{{ $t('bulk.removeTrash') }}</button>
+      <button class="btn tiny ghost" @click="showRemove = false">✕</button>
     </div>
   </div>
 </template>
@@ -196,4 +238,5 @@ async function submitColl() {
 .tag-input-row input { width: 100%; height: 28px; }
 .coll-sel { width: 160px; height: 28px; }
 .coll-new { width: 130px; height: 28px; }
+.remove-pop { flex-direction: column; align-items: stretch; gap: var(--sp-2); }
 </style>

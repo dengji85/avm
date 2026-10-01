@@ -1,7 +1,7 @@
 <script setup>
 import { ref, reactive, computed, onMounted } from 'vue'
 import { state } from '../../state.js'
-import { getStorage, getIntegrity, getHealthCheck, getDedup, resolveDedup, getQuality, sniffCovers, getSoftwareStorage, cleanSoftwareStorage } from '../../api.js'
+import { getStorage, getIntegrity, getHealthCheck, getDedup, resolveDedup, getQuality, sniffCovers, getSoftwareStorage, cleanSoftwareStorage, checkMissing } from '../../api.js'
 import { toast, confirmDialog, fmtSize } from '../../utils.js'
 import { t } from '../../i18n/index.js'
 import PageHead from '../../components/PageHead.vue'
@@ -37,6 +37,16 @@ async function load() {
   } catch (e) { toast(e.message, 'err') } finally { loading.value = false }
 }
 async function runHealth() { healthLoading.value = true; try { health.value = await getHealthCheck(); toast(t('maint.healthDone'), 'ok') } catch (e) { toast(e.message, 'err') } finally { healthLoading.value = false } }
+// 快速核对缺失：只检查已入库路径是否还在（不遍历目录），比全盘扫描快得多
+const checkMissingLoading = ref(false)
+async function runCheckMissing() {
+  checkMissingLoading.value = true
+  try {
+    const r = await checkMissing()
+    toast(t('maint.checkMissingDone', { n: r.checked || 0, m: r.marked || 0 }), 'ok')
+    await load()
+  } catch (e) { toast(e.message, 'err') } finally { checkMissingLoading.value = false }
+}
 async function runDedup() { dedupLoading.value = true; try { dedup.value = await getDedup(); toast(t('maint.detectDone'), 'ok') } catch (e) { toast(e.message, 'err') } finally { dedupLoading.value = false } }
 async function runQuality() { qualityLoading.value = true; try { quality.value = await getQuality(); toast(t('maint.qualityDone'), 'ok') } catch (e) { toast(e.message, 'err') } finally { qualityLoading.value = false } }
 
@@ -234,6 +244,7 @@ onMounted(() => { load(); loadSoftware() })
         {{ $t('maint.healthCheck') }}
         <span class="sub">{{ $t('maint.healthCheckSub') }}</span>
         <div class="spacer"></div>
+        <button class="btn tiny" :disabled="checkMissingLoading" @click="runCheckMissing">{{ checkMissingLoading ? $t('maint.checking') : $t('maint.checkMissing') }}</button>
         <button class="btn tiny primary" :disabled="healthLoading" @click="runHealth">{{ healthLoading ? $t('maint.checking') : (health ? $t('maint.rerunHealth') : $t('maint.runHealth')) }}</button>
       </div>
       <div class="panel-body">

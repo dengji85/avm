@@ -89,22 +89,47 @@ def edit_movie(movie_id: int, payload: Dict[str, Any] = Body(default={})) -> Dic
         return store.movie_detail(conn, movie_id)
 
 
+def _send_to_trash(path: str) -> bool:
+    """把文件移入系统回收站（跨平台）。失败返回 False，由调用方决定回退策略。"""
+    try:
+        from send2trash import send2trash
+        send2trash(path)
+        return True
+    except Exception:
+        return False
+
+
 @router.delete("/movies/{movie_id}")
-def remove_movie(movie_id: int, delete_file: bool = False) -> Dict[str, Any]:
+def remove_movie(movie_id: int, delete_file: bool = False, trash_file: bool = False) -> Dict[str, Any]:
+    """移除影片（三种语义）。
+
+    - delete_file=true：永久删除磁盘文件，不可恢复；
+    - trash_file=true ：移入系统回收站，可恢复；回收站不可用时**不删文件**（宁可不删）；
+    - 两者都 false    ：仅从库中移除记录，磁盘文件原样保留。
+    """
     with db() as conn:
         movie = store.movie_detail(conn, movie_id)
         if not movie:
             raise HTTPException(404, "影片不存在")
         deleted: List[str] = []
+        trashed: List[str] = []
+        failed: List[str] = []
         if delete_file:
             for f in movie["files"]:
                 try:
                     os.remove(f["path"])
                     deleted.append(f["path"])
                 except OSError:
-                    pass
+                    failed.append(f["path"])
+        elif trash_file:
+            for f in movie["files"]:
+                if _send_to_trash(f["path"]):
+                    trashed.append(f["path"])
+                else:
+                    failed.append(f["path"])
         store.delete_movie(conn, movie_id)
-        return {"ok": True, "deleted_files": deleted}
+        return {"ok": True, "deleted_files": deleted,
+                "trashed_files": trashed, "failed_files": failed}
 
 
 @router.post("/movies/{movie_id}/toggle")
@@ -152,9 +177,12 @@ def play_movie(movie_id: int, payload: Dict[str, Any] = Body(default={})) -> Dic
         movie = store.movie_detail(conn, movie_id)
         if not movie or not movie["files"]:
             raise HTTPException(404, "找不到可播放的文件")
-        target = movie["files"][0]
+        # 优先选仍然存在的文件：移动/改名后旧记录会被标记 missing，
+        # 直接取第一条可能拿到已失效的旧路径，表现为「文件已不存在」而无法播放。
+        usable = [f for f in movie["files"] if not f.get("missing")] or movie["files"]
+        target = usable[0]
         if file_id:
-            target = next((f for f in movie["files"] if f["id"] == int(file_id)), target)
+            target = next((f for f in usable if f["id"] == int(file_id)), target)
         if not os.path.exists(target["path"]):
             raise HTTPException(404, f"文件已不存在：{target['path']}")
         try:
@@ -1124,6 +1152,18 @@ def scrape_tasks(limit: int = 50) -> Dict[str, Any]:
             (limit,),
         )
         return {"items": rows}
+
+
+@router.post("/maintenance/check-missing")
+def check_missing() -> Dict[str, Any]:
+    """快速核对缺失：只检查库里已入库的路径是否还存在（不遍历目录）。
+
+    比全盘扫描快得多，可随手点一次；发现消失的文件即标记缺失并开始宽限期计时。
+    """
+    with db() as conn:
+        result = store.check_missing_files(conn)
+        conn.commit()
+    return {"ok": True, **result}
 
 
 @router.get("/maintenance/summary")

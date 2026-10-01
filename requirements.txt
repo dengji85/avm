@@ -4,3 +4,4 @@ requests>=2.31.0
 beautifulsoup4>=4.12.0
 python-multipart>=0.0.9
 qrcode>=7.0
+Send2Trash>=1.8.0

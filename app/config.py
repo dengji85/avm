@@ -88,6 +88,14 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "min_size_mb": 100,
         # 扫描完成后自动清理失效记录（磁盘已删的文件 / 空影片 / 孤儿元数据）
         "auto_cleanup": True,
+        # 「文件在磁盘上消失」后的宽限天数：先标记缺失并保留记录，超过这个天数才在
+        # 清理时真正删除。避免外置盘/网络盘临时掉线、下载器临时移走文件导致误删数据。
+        # 0 = 不保留（扫描发现即清理，即旧行为）。
+        "missing_grace_days": 30,
+        # 删除影片文件时是否移入系统回收站（可恢复）。false = 永久删除，不可恢复。
+        "delete_to_recycle_bin": True,
+        # 扫描时忽略的临时/未完成文件后缀（下载器边下边写，避免把半成品入库）
+        "ignore_suffixes": [".part", ".tmp", ".!qb", ".aria2", ".crdownload", ".downloading", ".partial"],
         # 自动扫描间隔（分钟）。0=关闭，后台会按间隔增量扫描媒体库。
         "auto_scan_interval": 0,
         "ignore_keywords": ["sample", "trailer", "预告", "花絮", "特典"],

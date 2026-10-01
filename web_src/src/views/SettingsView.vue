@@ -28,7 +28,7 @@ const tab = ref('library')
 
 /* 预置结构，避免异步加载前模板访问 undefined */
 const cfg = reactive({
-  library: { paths: [], min_size_mb: 0, ignore_keywords: [], video_extensions: [] },
+  library: { paths: [], min_size_mb: 0, ignore_keywords: [], video_extensions: [], missing_grace_days: 30, delete_to_recycle_bin: true },
   cover: { auto_local: false, download: false },
   media: { avatar_dir: 'avatars', fanart_dir: 'fanarts', avatar_download: false, fanart_download: true },
   scraper: {
@@ -73,7 +73,7 @@ async function load() {
   try {
     const c = await getConfig()
     Object.assign(cfg, c)
-    cfg.library = Object.assign({ paths: [], min_size_mb: 0, ignore_keywords: [], video_extensions: [], auto_scan_interval: 0 }, c.library)
+    cfg.library = Object.assign({ paths: [], min_size_mb: 0, ignore_keywords: [], video_extensions: [], auto_scan_interval: 0, missing_grace_days: 30, delete_to_recycle_bin: true }, c.library)
     autoScan.value = Number(cfg.library.auto_scan_interval) > 0
     autoScanInterval.value = Number(cfg.library.auto_scan_interval) > 0 ? Number(cfg.library.auto_scan_interval) : 10
     cfg.cover = Object.assign({ auto_local: false, download: false }, c.cover)
@@ -102,9 +102,17 @@ async function load() {
     htmlText.value = JSON.stringify(cfg.scraper.http_html || {}, null, 2)
 
     const pv = await listProviders()
-    providers.available = pv.available || []
+    // 按用户已保存的 order 重排数据源。否则每次打开设置页都回到后端注册顺序，
+    // 用户调整过的优先级（例如把本地 NFO 拖到最前）看起来就像没保存成功。
+    const orderList = cfg.scraper.order || []
+    const orderIdx = new Map(orderList.map((id, i) => [id, i]))
+    providers.available = (pv.available || []).slice().sort((a, b) => {
+      const ia = orderIdx.has(a.id) ? orderIdx.get(a.id) : Number.MAX_SAFE_INTEGER
+      const ib = orderIdx.has(b.id) ? orderIdx.get(b.id) : Number.MAX_SAFE_INTEGER
+      return ia - ib
+    })
     providers.active = pv.active || []
-    providers.available.forEach((p) => { provOn[p.id] = (cfg.scraper.order || []).includes(p.id) })
+    providers.available.forEach((p) => { provOn[p.id] = orderList.includes(p.id) })
     state.config = cfg
   } catch (e) { toast(e.message, 'err') } finally { loading.value = false }
 }
@@ -125,6 +133,8 @@ async function saveLibrary() {
         video_extensions: extText.value.split(/[,，]/).map((s) => s.trim().toLowerCase())
           .filter(Boolean).map((s) => (s.startsWith('.') ? s : '.' + s)),
         auto_scan_interval: autoScan.value ? Math.max(1, Number(autoScanInterval.value) || 10) : 0,
+        missing_grace_days: Math.max(0, Number(cfg.library.missing_grace_days) || 0),
+        delete_to_recycle_bin: !!cfg.library.delete_to_recycle_bin,
       },
       cover: { auto_local: !!cfg.cover.auto_local, download: !!cfg.cover.download },
       media: {
@@ -317,6 +327,34 @@ async function saveScraper() {
     toast(t('settings.sourceSaved'), 'ok')
     await load()
   } catch (e) { toast(e.message, 'err') } finally { saving.value = false }
+}
+
+/* ---------------- AI 增强 ---------------- */
+// 此前该面板只画了 UI：模板里的 @click="save" 与 aiOk 在脚本中都未定义，
+// 点保存没有任何反应（刷新后依旧显示关闭）。这里补齐真正的保存逻辑。
+const aiOk = ref(null)
+async function save() {
+  saving.value = true
+  aiOk.value = null
+  try {
+    await putConfig({
+      ai: {
+        enabled: !!cfg.ai.enabled,
+        base_url: (cfg.ai.base_url || '').trim(),
+        api_key: cfg.ai.api_key || '',
+        model: (cfg.ai.model || '').trim(),
+        temperature: Number(cfg.ai.temperature) || 0,
+      },
+    })
+    aiOk.value = true
+    toast(t('settings.aiSaved'), 'ok')
+    await load()
+  } catch (e) {
+    aiOk.value = false
+    toast(e.message, 'err')
+  } finally {
+    saving.value = false
+  }
 }
 
 function moveProvider(id, dir) {
@@ -665,6 +703,21 @@ onMounted(async () => { await load(); await loadServerInfo(); loadPlugins() })
                 <input type="number" v-model="autoScanInterval" min="1" style="width:120px" @change="saveLibrary" />
                 <span class="muted">{{ $t('settings.minutes') }}</span>
               </div>
+            </div>
+            <div class="field-row">
+              <label>{{ $t('settings.missingGrace') }}</label>
+              <div class="hstack">
+                <input type="number" v-model="cfg.library.missing_grace_days" min="0" style="width:120px" @change="saveLibrary" />
+                <span class="muted">{{ $t('settings.missingGraceSub') }}</span>
+              </div>
+              <span class="hint">{{ $t('settings.missingGraceHint') }}</span>
+            </div>
+            <div class="field">
+              <label class="toggle">
+                <input type="checkbox" v-model="cfg.library.delete_to_recycle_bin" @change="saveLibrary" /><span class="track"></span>
+              </label>
+              <span>{{ $t('settings.delToTrashDefault') }}</span>
+              <span class="hint">{{ $t('settings.delToTrashHint') }}</span>
             </div>
           </div>
           <div class="panel-foot">

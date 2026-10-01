@@ -20,7 +20,9 @@ async function loadTasks() {
 async function loadLogs() {
   loading.value = true; err.value = ''
   try {
-    const r = await scrapeLogs(q.task_id, { status: q.status, code: q.code, page: q.page, size: q.size })
+    // scrapeLogs 只接受一个查询对象参数；早前误写成 (task_id, options)，
+    // 导致第一个字符串参数被当成查询对象，筛选与分页全部失效。
+    const r = await scrapeLogs({ task_id: q.task_id, status: q.status, code: q.code, page: q.page, size: q.size })
     logs.value = r.items; total.value = r.total
   } catch (e) { err.value = e.message || t('maint.loadFail') } finally { loading.value = false }
 }

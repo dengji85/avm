@@ -209,18 +209,25 @@ async function doNfo() {
   catch (e) { toast(e.message, 'err') }
 }
 
-async function doDelete(withFile) {
+// mode: 'db' 仅移出库（保留文件） / 'trash' 删除到系统回收站（可恢复） / 'permanent' 永久删除
+async function doDelete(mode) {
+  const isTrash = mode === 'trash'
+  const isPermanent = mode === 'permanent'
+  const path = mainFile.value?.path || ''
   const ok = await confirmDialog(
-    withFile ? t('detail.delWithFile') : t('detail.delFromDb'),
-    withFile
-      ? t('detail.delWithFileDesc', { path: mainFile.value?.path || '' })
-      : t('detail.delFromDbDesc'),
-    { danger: true, okText: withFile ? t('detail.permanent') : t('detail.remove') },
+    isPermanent ? t('detail.delWithFile') : isTrash ? t('detail.delToTrash') : t('detail.delFromDb'),
+    isPermanent
+      ? t('detail.delWithFileDesc', { path })
+      : isTrash
+        ? t('detail.delToTrashDesc', { path })
+        : t('detail.delFromDbDesc'),
+    { danger: true, okText: isPermanent ? t('detail.permanent') : isTrash ? t('detail.delToTrash') : t('detail.remove') },
   )
   if (!ok) return
   try {
-    await deleteMovie(id.value, withFile)
-    toast(t('detail.deleted'), 'ok')
+    const r = await deleteMovie(id.value, isPermanent, isTrash)
+    const failed = (r && r.failed_files) || []
+    toast(t('detail.deleted'), failed.length ? 'warn' : 'ok')
     close()
     window.dispatchEvent(new CustomEvent('avm-refresh'))
   } catch (e) { toast(e.message, 'err') }
@@ -864,8 +871,9 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', onKey) })
                 <div class="danger-zone">
                   <b>{{ $t('detail.dangerZone') }}</b>
                   <div class="hstack">
-                    <button class="btn tiny" @click="doDelete(false)">{{ $t('detail.delFromDbBtn') }}</button>
-                    <button class="btn tiny danger" @click="doDelete(true)">{{ $t('detail.delWithFileBtn') }}</button>
+                    <button class="btn tiny" @click="doDelete('db')">{{ $t('detail.delFromDbBtn') }}</button>
+                    <button class="btn tiny" @click="doDelete('trash')">{{ $t('detail.delToTrashBtn') }}</button>
+                    <button class="btn tiny danger" @click="doDelete('permanent')">{{ $t('detail.delWithFileBtn') }}</button>
                   </div>
                 </div>
               </template>

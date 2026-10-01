@@ -67,6 +67,7 @@ CREATE TABLE IF NOT EXISTS movie_files (
     mtime     REAL    DEFAULT 0,
     part      INTEGER DEFAULT 1,
     missing   INTEGER DEFAULT 0,
+    missing_since TEXT  DEFAULT '',         -- 首次标记为「磁盘上已消失」的时间，用于宽限期清理
     quick_hash INTEGER DEFAULT 0            -- 内容指纹：size 与首尾采样哈希的 64 位摘要，用于精确去重
 );
 
@@ -247,6 +248,8 @@ def _migrate(conn: sqlite3.Connection) -> None:
     file_cols = {r[1] for r in conn.execute("PRAGMA table_info(movie_files)").fetchall()}
     if "quick_hash" not in file_cols:
         conn.execute("ALTER TABLE movie_files ADD COLUMN quick_hash INTEGER DEFAULT 0")
+    if "missing_since" not in file_cols:
+        conn.execute("ALTER TABLE movie_files ADD COLUMN missing_since TEXT DEFAULT ''")
     # 依赖新列的索引统一在迁移阶段补齐（此时列已存在），避免旧库 executescript 时报错
     conn.execute("CREATE INDEX IF NOT EXISTS idx_files_hash ON movie_files(quick_hash)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_movies_res ON movies(resolution)")

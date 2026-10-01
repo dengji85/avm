@@ -132,6 +132,39 @@ def get_relations(conn: sqlite3.Connection, movie_id: int, kind: str) -> List[st
 # ----------------------------------------------------------------- 扫描入库
 
 
+def _find_moved_file(conn: sqlite3.Connection, movie_id: int, parsed: Dict[str, Any],
+                     size: int, quick_hash: int) -> Optional[Dict[str, Any]]:
+    """在「同一影片」的缺失记录里，找出本次扫描文件对应的旧记录（移动/改名识别）。
+
+    匹配优先级：
+    1. 内容指纹 + 体积：最可靠，能覆盖「改名后移动」（需要扫描时计算指纹）；
+    2. 文件名相同：只换了目录、没改名，最常见；
+    3. 该影片只有唯一一条缺失记录：几乎可以确定就是它被移动/改名了。
+    找不到返回 None（当作真正的全新文件）。
+    """
+    if quick_hash:
+        r = query_one(
+            conn,
+            "SELECT * FROM movie_files WHERE movie_id=? AND missing=1 "
+            "AND quick_hash=? AND size=? LIMIT 1",
+            (movie_id, quick_hash, size))
+        if r:
+            return r
+    r = query_one(
+        conn,
+        "SELECT * FROM movie_files WHERE movie_id=? AND missing=1 AND filename=? LIMIT 1",
+        (movie_id, parsed["filename"]))
+    if r:
+        return r
+    rows = query_all(
+        conn,
+        "SELECT * FROM movie_files WHERE movie_id=? AND missing=1 LIMIT 2",
+        (movie_id,))
+    if len(rows) == 1:
+        return rows[0]
+    return None
+
+
 def upsert_scanned_file(conn: sqlite3.Connection, parsed: Dict[str, Any],
                         path: str, size: int, mtime: float, quick_hash: int = 0) -> str:
     """把一个扫描到的视频文件写入库，返回 'added' / 'updated' / 'unchanged'。"""
@@ -166,17 +199,32 @@ def upsert_scanned_file(conn: sqlite3.Connection, parsed: Dict[str, Any],
 
     existing = query_one(conn, "SELECT * FROM movie_files WHERE path = ?", (path,))
     if existing is None:
-        conn.execute(
-            """INSERT INTO movie_files(movie_id, path, filename, ext, size, mtime, part, missing, quick_hash)
-               VALUES(?,?,?,?,?,?,?,0,?)""",
-            (movie_id, path, parsed["filename"], parsed["ext"], size, mtime,
-             parsed["part"], quick_hash),
-        )
-        result = "added"
+        # 先判断是否「移动 / 改名」：同一影片下已有一条 missing 的旧记录。
+        # 命中则原地更新路径，避免「新增一条 + 旧记录残留 missing」——
+        # 后者会让详情 / 播放仍指向旧路径，表现为「提示文件不存在、无法播放」。
+        moved = _find_moved_file(conn, movie_id, parsed, size, quick_hash)
+        if moved:
+            conn.execute(
+                """UPDATE movie_files SET path = ?, filename = ?, ext = ?, part = ?,
+                       size = ?, mtime = ?, missing = 0, missing_since = '', quick_hash = ?
+                   WHERE id = ?""",
+                (path, parsed["filename"], parsed["ext"], parsed["part"],
+                 size, mtime, quick_hash, moved["id"]),
+            )
+            result = "updated"
+        else:
+            conn.execute(
+                """INSERT INTO movie_files(movie_id, path, filename, ext, size, mtime, part, missing, quick_hash)
+                   VALUES(?,?,?,?,?,?,?,0,?)""",
+                (movie_id, path, parsed["filename"], parsed["ext"], size, mtime,
+                 parsed["part"], quick_hash),
+            )
+            result = "added"
     elif abs(float(existing["size"] or 0) - size) > 0.5 or abs(float(existing["mtime"] or 0) - mtime) > 1 \
             or existing["missing"] or int(existing.get("quick_hash") or 0) != quick_hash:
         conn.execute(
-            "UPDATE movie_files SET size = ?, mtime = ?, missing = 0, movie_id = ?, quick_hash = ? WHERE id = ?",
+            "UPDATE movie_files SET size = ?, mtime = ?, missing = 0, missing_since = '', "
+            "movie_id = ?, quick_hash = ? WHERE id = ?",
             (size, mtime, movie_id, quick_hash, existing["id"]),
         )
         result = "updated"
@@ -198,22 +246,86 @@ def refresh_aggregate(conn: sqlite3.Connection, movie_id: int) -> None:
     )
 
 
-def prune_missing(conn: sqlite3.Connection, alive_paths: set[str], roots: Sequence[str]) -> int:
-    """删除位于扫描根目录下、但磁盘上已不存在的文件记录，并清理空影片。"""
+def _days_since(ts: str) -> float:
+    """返回时间戳距今天数；解析失败返回 0（视为刚发生，宁可多保留）。"""
+    from datetime import datetime
+    s = (ts or "").strip()
+    if not s:
+        return 0.0
+    for fmt, cut in (("%Y-%m-%d %H:%M:%S", 19), ("%Y-%m-%d", 10)):
+        try:
+            return (datetime.now() - datetime.strptime(s[:cut], fmt)).total_seconds() / 86400.0
+        except Exception:
+            continue
+    return 0.0
+
+
+def prune_missing(conn: sqlite3.Connection, alive_paths: set[str], roots: Sequence[str],
+                  grace_days: int = 0) -> int:
+    """清理「磁盘上确已消失」的文件记录，并连带清理空影片。
+
+    grace_days > 0 时只清理「标记缺失已超过宽限期」的记录：文件刚消失（或外置盘
+    临时掉线）只保留为 missing，留给用户插回磁盘 / 搬回文件恢复的机会，避免误删。
+    grace_days = 0 时保持旧行为（发现即清理）。
+    """
     if not roots:
         return 0
     removed = 0
     lowered_roots = [r.replace("\\", "/").lower().rstrip("/") for r in roots]
-    for row in conn.execute("SELECT id, path, movie_id FROM movie_files").fetchall():
+    rows = conn.execute(
+        "SELECT id, path, movie_id, missing, missing_since FROM movie_files").fetchall()
+    for row in rows:
         p = row["path"].replace("\\", "/").lower()
         if not any(p.startswith(r + "/") or p == r for r in lowered_roots):
             continue
         if row["path"] in alive_paths:
             continue
+        if int(row["missing"] or 0) == 0:
+            # 未被标记为缺失（例如直接调用清理）：保守跳过，交由扫描先标记。
+            continue
+        if grace_days > 0:
+            since = row["missing_since"] or ""
+            # 没有首次缺失时间（旧库遗留）的，视为刚发现，等下次扫描再判定。
+            if not since or _days_since(since) < grace_days:
+                continue
         conn.execute("DELETE FROM movie_files WHERE id = ?", (row["id"],))
         removed += 1
     conn.execute("DELETE FROM movies WHERE id NOT IN (SELECT DISTINCT movie_id FROM movie_files)")
     return removed
+
+
+def check_missing_files(conn: sqlite3.Connection) -> Dict[str, Any]:
+    """快速核对：只检查库里已有路径是否还存在（不遍历目录）。
+
+    比全盘扫描快得多，可随手点一次。发现消失的文件就标记 missing 并记录
+    首次缺失时间（宽限期清理据此计算）。返回核对与新增缺失的数量。
+    """
+    rows = query_all(
+        conn,
+        "SELECT id, path FROM movie_files WHERE COALESCE(missing,0)=0",
+    )
+    checked = 0
+    marked = 0
+    for r in rows:
+        checked += 1
+        p = str(r["path"] or "")
+        if not p or os.path.exists(p):
+            continue
+        conn.execute(
+            "UPDATE movie_files SET missing = 1, missing_since = ? "
+            "WHERE id = ? AND COALESCE(missing,0) = 0",
+            (datetime_now(), r["id"]),
+        )
+        marked += 1
+    if marked:
+        conn.execute("DELETE FROM movies WHERE id NOT IN (SELECT DISTINCT movie_id FROM movie_files)")
+    return {"checked": checked, "marked": marked}
+
+
+def datetime_now() -> str:
+    """本地时间字符串（与 SQLite datetime('now','localtime') 格式一致）。"""
+    from datetime import datetime
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
 # ----------------------------------------------------------------- 检索
@@ -443,8 +555,11 @@ def movie_sessions(conn: sqlite3.Connection, movie_id: int, limit: int = 60) -> 
 
 
 def movie_primary_file(conn: sqlite3.Connection, movie_id: int):
+    # 只挑仍然存在的文件：缺 missing 过滤时，移动/改名后残留的旧记录会排在前面，
+    # 导致流式播放 404「视频文件不存在」。
     row = query_one(conn,
-        "SELECT path FROM movie_files WHERE movie_id=? ORDER BY part ASC, size DESC LIMIT 1",
+        "SELECT path FROM movie_files WHERE movie_id=? AND missing=0 "
+        "ORDER BY part ASC, size DESC LIMIT 1",
         (int(movie_id),))
     return row['path'] if row else None
 
@@ -906,7 +1021,7 @@ def movie_detail(conn: sqlite3.Connection, movie_id: int) -> Optional[Dict[str, 
     row["files"] = query_all(
         conn,
         "SELECT id, path, filename, ext, size, mtime, part, missing FROM movie_files "
-        "WHERE movie_id = ? ORDER BY part, filename",
+        "WHERE movie_id = ? ORDER BY missing ASC, part, filename",
         (movie_id,),
     )
     row["progress"] = movie_progress(conn, movie_id)

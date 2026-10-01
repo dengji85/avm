@@ -9,8 +9,12 @@ from .jobs import SCAN
 from .parser import parse_file
 
 
-def iter_video_files(roots, exts):
-    """用 os.scandir 递归枚举视频文件（比 os.walk 更快，直接拿 entry 信息）。"""
+def iter_video_files(roots, exts, ignore_suffixes=()):
+    """用 os.scandir 递归枚举视频文件（比 os.walk 更快，直接拿 entry 信息）。
+
+    ignore_suffixes：下载器临时/未完成文件后缀，命中直接跳过，避免半成品入库。
+    """
+    ignores = tuple(str(s).lower() for s in (ignore_suffixes or ()))
     for root in roots:
         if not os.path.isdir(root):
             continue
@@ -24,6 +28,9 @@ def iter_video_files(roots, exts):
                             if entry.is_dir(follow_symlinks=False):
                                 stack.append(entry.path)
                             elif entry.is_file(follow_symlinks=False):
+                                low = entry.name.lower()
+                                if ignores and low.endswith(ignores):
+                                    continue
                                 ext = Path(entry.name).suffix.lower().lstrip(".")
                                 if ext in exts:
                                     yield entry.path
@@ -60,8 +67,9 @@ def quick_scan(progress_cb=None):
     cfg = load_config()
     exts = {e.lower().lstrip(".") for e in video_exts(cfg)}
     roots = roots_to_scan(cfg)
+    ignores = cfg.get("library", {}).get("ignore_suffixes") or []
     total = 0
-    for _ in iter_video_files(roots, exts):
+    for _ in iter_video_files(roots, exts, ignores):
         total += 1
     return total
 
@@ -105,8 +113,9 @@ def run_scan(progress_cb=None, incremental=True, workers=None, hash_files=False,
         conn.close()
 
     to_process, alive, enumerated, skipped = [], set(), 0, 0
+    ignores = cfg.get("library", {}).get("ignore_suffixes") or []
     SCAN.update(phase="enumerating", total=0, done=0, current="正在遍历目录…")
-    for path in iter_video_files(roots, exts):
+    for path in iter_video_files(roots, exts, ignores):
         try:
             st = os.stat(path)
         except OSError:
@@ -129,13 +138,27 @@ def run_scan(progress_cb=None, incremental=True, workers=None, hash_files=False,
         SCAN.update(total=enumerated,
                     current=f"正在遍历目录（已发现 {enumerated} 个视频）")
 
-    # 2) 标记已从磁盘消失的文件（仅在本次扫描的 root 集合内判定）
-    removed = set(existing.keys()) - alive
+    # 2) 标记已从磁盘消失的文件：只在「本次扫描的 root 集合内」判定。
+    #    原实现直接 set(existing) - alive，会把未参与本次扫描的目录（例如
+    #    未挂载的磁盘、临时移出的库路径）里的文件整体误标为缺失。
+    lowered_roots = [r.replace("\\", "/").lower().rstrip("/") for r in roots]
+    removed = set()
+    for p in existing.keys():
+        lp = p.replace("\\", "/").lower()
+        if not any(lp.startswith(r + "/") or lp == r for r in lowered_roots):
+            continue
+        if p not in alive:
+            removed.add(p)
     if removed:
         c2 = connect()
         try:
-            c2.executemany("UPDATE movie_files SET missing = 1 WHERE path = ?",
-                           [(p,) for p in removed])
+            # 记录「首次被发现缺失」的时间供宽限期清理判断；已有时间戳保留，
+            # 这样宽限期从第一次发现算起，而不是每次扫描都刷新。
+            c2.executemany(
+                "UPDATE movie_files SET missing = 1, missing_since = "
+                "CASE WHEN COALESCE(missing,0) = 0 OR COALESCE(missing_since,'') = '' "
+                "THEN datetime('now','localtime') ELSE missing_since END WHERE path = ?",
+                [(p,) for p in removed])
             c2.commit()
         finally:
             c2.close()
@@ -215,9 +238,12 @@ def auto_cleanup_after_scan(alive_paths: set, roots: list, progress_cb=None):
     from . import store
     if progress_cb is None:
         progress_cb = SCAN.update
+    # 宽限期：文件消失后先保留记录，超过设定天数才真正清理（0=发现即清理）
+    _cfg = load_config()
+    grace_days = max(0, int(_cfg.get("library", {}).get("missing_grace_days", 0) or 0))
     conn = connect()
     try:
-        removed_files = store.prune_missing(conn, alive_paths, roots)
+        removed_files = store.prune_missing(conn, alive_paths, roots, grace_days=grace_days)
         orphans = store.cleanup_orphans(conn)
         conn.commit()
     finally:
