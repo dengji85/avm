@@ -16,8 +16,17 @@
 """
 import re
 import os
+import sys
 import datetime
 import PyInstaller.__main__
+
+# Windows CI 的控制台默认可能是 cp1252 等非 UTF-8 编码，脚本里的中文 print 会抛
+# UnicodeEncodeError。这里把标准输出统一切到 UTF-8（环境不支持时静默跳过）。
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
 
 API_PY = os.path.join("app", "api.py")
 BUILD_DATE_RE = re.compile(r'(BUILD_DATE\s*=\s*)"[^"]*"')

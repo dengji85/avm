@@ -15,6 +15,10 @@ permissions:
 jobs:
   windows-exe:
     runs-on: windows-latest
+    env:
+      # Windows 控制台默认非 UTF-8（可能是 cp1252），构建脚本含中文输出，强制 UTF-8 模式
+      PYTHONUTF8: "1"
+      PYTHONIOENCODING: "utf-8"
 
     steps:
       - name: Checkout
