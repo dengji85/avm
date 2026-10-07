@@ -49,7 +49,9 @@ def _rewrite_build_date():
     new_src = BUILD_DATE_RE.sub(r'\g<1>"%s"' % today, src, count=1)
     with open(API_PY, "w", encoding="utf-8") as f:
         f.write(new_src)
-    print("[build] BUILD_DATE 已写入: %s" % today)
+    # 输出保持纯 ASCII：CI（尤其 Windows runner）控制台编码可能是 cp1252，
+    # 打印中文会抛 UnicodeEncodeError 直接中断构建。
+    print("[build] BUILD_DATE written: %s" % today)
     return src
 
 
@@ -59,7 +61,7 @@ def _restore_build_date(original_src):
         return
     with open(API_PY, "w", encoding="utf-8") as f:
         f.write(original_src)
-    print("[build] 已还原 %s" % API_PY)
+    print("[build] restored %s" % API_PY)
 
 
 _original_api = _rewrite_build_date()
