@@ -1,0 +1,10 @@
+# 容器内的 shell 脚本必须是 LF，避免 Windows 检出后带 CRLF 导致无法执行
+*.sh text eol=lf
+
+# 图片等二进制不要做换行转换
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.svg text eol=lf
