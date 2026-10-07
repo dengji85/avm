@@ -1,0 +1,45 @@
+# 片匣（AVM）容器编排示例
+#
+#   docker compose up -d --build
+#
+# 首次访问需要访问令牌：查看容器日志 `docker compose logs avm` 里的
+# 「远程访问令牌」，或用下面的 AVM_ACCESS_TOKEN 预设一个固定值。
+services:
+  avm:
+    # 默认使用 GitHub Actions 自动构建的多架构镜像（NAS 免编译，推荐）
+    #   docker compose pull && docker compose up -d
+    # 如需本地构建：注释掉下面的 image，取消 build 段注释
+    image: ghcr.io/dengji85/avm:latest
+    # build:
+    #   context: .
+    #   args:
+    #     # 1=内置 chromium（av-wiki 的 CDP 抓取可用，镜像更大）
+    #     # 0=精简，不含 chromium（其余数据源不受影响）
+    #     INSTALL_CHROMIUM: "1"
+    container_name: avm
+    restart: unless-stopped
+    environment:
+      TZ: Asia/Shanghai
+      # 与宿主机文件属主对齐（NAS 上常见 1000，群晖常见实际用户 UID）
+      PUID: "1000"
+      PGID: "1000"
+      AVM_DATA_DIR: /data
+      # 可选：预设访问令牌，避免每次从日志里找
+      # AVM_ACCESS_TOKEN: "change-me-please"
+    ports:
+      - "8770:8770"
+    volumes:
+      # 配置 / 数据库 / 封面 / 头像 / 预览图（务必持久化）
+      - ./data:/data
+      # 媒体库：路径按你的实际目录修改；建议只读挂载
+      - /path/to/your/media:/media:ro
+    # Chromium 依赖较大的 /dev/shm，给小了容易崩
+    shm_size: "256m"
+    tmpfs:
+      - /tmp
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8770/api/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 25s

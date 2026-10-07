@@ -248,6 +248,10 @@ class ChromeManager:
                     "--disable-sync",
                     "--remote-allow-origins=*",
                 ]
+                # 容器 / 受限环境可追加参数，如 --no-sandbox --disable-dev-shm-usage
+                _extra = os.environ.get("AVM_CHROME_ARGS", "").split()
+                if _extra:
+                    args.extend(_extra)
                 self.proc = subprocess.Popen(
                     args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                     creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0,

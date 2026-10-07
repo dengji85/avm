@@ -30,6 +30,9 @@ const pvLoading = ref(false)
 const similar = ref([])
 const pendingAutoplay = ref(false)
 const hasPlayable = computed(() => !!(mv.value && mv.value.files && mv.value.files.some(f => !f.missing)))
+// 容器 / NAS 无桌面环境时，这两个入口无效，按运行能力隐藏
+const canExternal = computed(() => state.capabilities?.external_player !== false)
+const canReveal = computed(() => state.capabilities?.reveal_folder !== false)
 const editing = ref(false)
 const draft = ref({})
 const lightbox = ref('')
@@ -628,8 +631,8 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', onKey) })
                   >
                     {{ playing ? $t('detail.collapsePlayer') : (progressPct > 0 ? $t('detail.continue', { p: progressPct }) : $t('detail.onlinePlay')) }}
                   </button>
-                  <button class="btn" :disabled="!hasPlayable" @click="play">{{ $t('player.external') }}</button>
-                  <button class="btn" @click="openFolder" :data-tip="$t('detail.revealFolderTip')">{{ $t('detail.revealFolder') }}</button>
+                  <button v-if="canExternal" class="btn" :disabled="!hasPlayable" @click="play">{{ $t('player.external') }}</button>
+                  <button v-if="canReveal" class="btn" @click="openFolder" :data-tip="$t('detail.revealFolderTip')">{{ $t('detail.revealFolder') }}</button>
                   <button class="btn icon" :class="{ active: mv.favorite }" @click="flip('favorite')" :data-tip="$t('flag.favorite')">{{ mv.favorite ? '♥' : '♡' }}</button>
                   <button class="btn icon" :class="{ active: mv.watchlist }" @click="flip('watchlist')" :data-tip="$t('flag.watchlist')">⌚</button>
                   <button class="btn icon" :class="{ active: mv.watched }" @click="flip('watched')" :data-tip="$t('flag.watched')">{{ mv.watched ? '●' : '○' }}</button>

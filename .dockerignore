@@ -1,0 +1,33 @@
+# 版本控制与 CI
+.git
+.gitignore
+.github
+
+# Python 产物
+__pycache__/
+*.py[cod]
+*.spec
+
+# 本地构建产物（镜像内会重新构建）
+build/
+dist/
+dist_build/
+web_dist/
+web_src/node_modules/
+web_src/dist/
+
+# 运行期数据 / 本地数据（容器内用卷挂载）
+data/
+*.db
+_cdp_profile/
+.npmcache/
+
+# 打包 / 发布物
+*.exe
+*.zip
+AVM-*-win64/
+generated-images/
+tools/
+
+# 文档配图（无需进镜像）
+docs/assets/

@@ -17,6 +17,7 @@ import argparse
 import csv
 import io
 import json
+import os
 import sys
 import threading
 import webbrowser
@@ -169,14 +170,22 @@ def cmd_organize(args) -> int:
 
 def cmd_serve(args) -> int:
     from .main import app
-    from .config import update_config
+    from .config import update_config, ensure_access_token, load_config, DATA_DIR
     import uvicorn
     app.state.bind_host = args.host
     # 将本次实际监听地址写回配置，供设置页/接口准确展示
-    update_config({"server": {"host": args.host}})
+    update_config({"server": {"host": args.host, "port": args.port}})
     url = f"http://{args.host}:{args.port}/"
     print(f"片匣已启动： {url}")
     print("浏览器已自动打开；如需手动访问，复制上面的地址到浏览器。")
+    # 容器 / NAS 部署时来源 IP 不是本机、无法豁免令牌，这里直接打印方便首次登录
+    # （也可用环境变量 AVM_ACCESS_TOKEN 预设一个固定令牌）
+    try:
+        print(f"数据目录： {DATA_DIR}")
+        if load_config().get("server", {}).get("require_token_remote", True):
+            print(f"远程访问令牌： {ensure_access_token()}")
+    except Exception:
+        pass
     print("按 Ctrl+C 退出服务。")
     if not args.no_browser:
         threading.Timer(1.5, lambda: webbrowser.open(url)).start()
@@ -200,8 +209,9 @@ def build_parser() -> argparse.ArgumentParser:
     po.add_argument("--template", default="{studio}/{code} {title}", help="目录模板，支持 {studio}/{code}/{title}/{prefix}")
     po.add_argument("--apply", action="store_true", help="真正移动文件（默认仅预览）")
     pv = sub.add_parser("serve", help="启动 Web 服务（控制台模式）")
-    pv.add_argument("--host", default="127.0.0.1")
-    pv.add_argument("--port", type=int, default=8770)
+    # 默认值支持环境变量：容器 / NAS 下用 AVM_HOST=0.0.0.0 直接对外监听
+    pv.add_argument("--host", default=os.environ.get("AVM_HOST", "127.0.0.1"))
+    pv.add_argument("--port", type=int, default=int(os.environ.get("AVM_PORT", "8770")))
     pv.add_argument("--no-browser", action="store_true", help="不自动打开浏览器")
     pv.add_argument("--reload", action="store_true", help="开发模式自动重载")
     return p
@@ -222,4 +232,7 @@ def main(argv=None) -> int:
     if args.cmd == "serve":
         return cmd_serve(args)
     # 默认行为：启动 Web 服务
-    return cmd_serve(argparse.Namespace(host="127.0.0.1", port=8770))
+    return cmd_serve(argparse.Namespace(
+        host=os.environ.get("AVM_HOST", "127.0.0.1"),
+        port=int(os.environ.get("AVM_PORT", "8770")),
+    ))

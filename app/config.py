@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 import sys
 import threading
 from pathlib import Path
@@ -22,7 +23,9 @@ if getattr(sys, "frozen", False):
 else:
     BASE_DIR = Path(__file__).resolve().parent.parent
     WEB_DIR = BASE_DIR / "web_dist"
-DATA_DIR = BASE_DIR / "data"
+# 数据目录：默认项目根 / exe 同级的 data/；容器 / NAS 部署用 AVM_DATA_DIR 指向挂载卷。
+_env_data_dir = os.environ.get("AVM_DATA_DIR", "").strip()
+DATA_DIR = Path(_env_data_dir).expanduser() if _env_data_dir else BASE_DIR / "data"
 COVER_DIR = DATA_DIR / "covers"
 AVATAR_DIR = DATA_DIR / "avatars"
 FANART_DIR = DATA_DIR / "fanarts"
@@ -347,7 +350,12 @@ def ensure_access_token() -> str:
     """启动时确保存在一个访问令牌：若配置为空则生成一个随机令牌并落盘。
 
     返回当前生效的令牌。本地 127.0.0.1 访问始终豁免，远程访问需携带此令牌。
+
+    容器 / NAS 部署可用环境变量 AVM_ACCESS_TOKEN 预设，避免首次启动还要翻日志找令牌。
     """
+    env_tok = os.environ.get("AVM_ACCESS_TOKEN", "").strip()
+    if env_tok:
+        return env_tok
     cfg = load_config()
     tok = (cfg.get("server", {}).get("access_token") or "").strip()
     if not tok:

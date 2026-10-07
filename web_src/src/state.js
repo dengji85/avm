@@ -13,6 +13,10 @@ export const state = reactive({
   // ---- 路由 / 视图 ----
   view: 'home',
 
+  // 运行环境能力（来自 /server/info）：容器 / NAS 无桌面环境时，
+  // 「用系统播放器」「在文件夹中显示」等入口据此隐藏。
+  capabilities: { external_player: true, reveal_folder: true },
+
   // ---- 维护中心子标签 ----
   maintTab: 'overview',
 

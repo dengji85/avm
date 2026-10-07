@@ -1818,6 +1818,12 @@ def server_info() -> Dict[str, Any]:
         "app_version": APP_VERSION,
         "build_date": _build_date(),
         "update_feed": cfg.get("server", {}).get("update_feed", ""),
+        # 容器 / 无桌面环境下「用系统播放器」「在文件夹中显示」不可用，
+        # 前端据此隐藏按钮（Docker 镜像会设置 AVM_CONTAINER=1）。
+        "capabilities": {
+            "external_player": not os.environ.get("AVM_CONTAINER"),
+            "reveal_folder": not os.environ.get("AVM_CONTAINER"),
+        },
     }
 
 

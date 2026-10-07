@@ -1,7 +1,7 @@
 <script setup>
 import { onMounted, onBeforeUnmount, watch, ref, computed } from 'vue'
 import { state, applyTheme } from './state.js'
-import { getFacets, getConfig, onNoToken, serverOffline } from './api.js'
+import { getFacets, getConfig, getServerInfo, onNoToken, serverOffline } from './api.js'
 import { toast } from './utils.js'
 import { useTasks } from './composables/useTasks.js'
 
@@ -66,6 +66,14 @@ async function loadConfig() {
   } catch (e) { /* 非致命 */ }
 }
 
+/* 运行环境能力：容器 / NAS 下隐藏「用系统播放器」「在文件夹中显示」等无效入口 */
+async function loadServerCaps() {
+  try {
+    const info = await getServerInfo()
+    if (info && info.capabilities) state.capabilities = info.capabilities
+  } catch (e) { /* 非致命 */ }
+}
+
 function onGlobalRefresh() {
   loadFacets()
   window.dispatchEvent(new CustomEvent('avm-reload-view'))
@@ -86,7 +94,7 @@ watch(serverOffline, (off, was) => {
 onMounted(async () => {
   applyTheme()
   onNoToken(() => tokenGate.value && tokenGate.value.open())
-  await Promise.all([loadFacets(), loadConfig()])
+  await Promise.all([loadFacets(), loadConfig(), loadServerCaps()])
   tasks.start()
   window.addEventListener('avm-refresh', onGlobalRefresh)
 })
