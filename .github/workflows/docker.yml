@@ -47,9 +47,9 @@ jobs:
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
-            type=raw,value=latest,enable={{is_default_branch}}
+            # latest 只在正式打 v* 标签时指向该版本，避免被 main 的临时构建覆盖
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
             type=ref,event=branch
-            type=ref,event=tag
 
       - name: Build and push (linux/amd64, linux/arm64)
         uses: docker/build-push-action@v5

@@ -1,0 +1,63 @@
+name: Release (Windows exe)
+
+# 打 v* 标签时自动：构建前端 → PyInstaller 打包单文件 exe → 生成 SHA256 →
+# 创建 / 更新 GitHub Release 并附加产物。
+# 与 docker.yml 并行执行、互不依赖（一条 tag 同时产出 exe 与多架构镜像）。
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  windows-exe:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: web_src/package-lock.json
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # build.py 只是打包，需要先把前端产物构建到仓库根的 web_dist/
+      - name: Build frontend
+        working-directory: web_src
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build
+
+      - name: Install Python deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller
+
+      - name: Build single-file exe
+        run: python build.py
+
+      - name: Generate SHA256 checksum
+        shell: pwsh
+        run: |
+          Get-ChildItem dist\AVM-*.exe | ForEach-Object {
+            "$((Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower())  $($_.Name)"
+          } | Set-Content -Encoding ascii dist\SHA256.txt
+          Get-Content dist\SHA256.txt
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          body_path: RELEASE_NOTES.md
+          files: |
+            dist/AVM-*.exe
+            dist/SHA256.txt
+          fail_on_unmatched_files: true

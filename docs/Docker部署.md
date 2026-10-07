@@ -163,18 +163,43 @@ docker compose up -d --build
 > 从 Windows 版迁移旧库时要注意：数据库里保存的是 Windows 绝对路径（`D:\...`），
 > 在容器内不可访问，需要重新扫描建库，或先把媒体文件按新路径整理后用「重解析」校正。
 
-## 11. 镜像自动构建（CI）
+## 11. 自动构建（CI）
 
-工作流：`.github/workflows/docker.yml`
+### 11.1 容器镜像 `.github/workflows/docker.yml`
 
 | 触发 | 产出标签 |
 | --- | --- |
 | 推送 `v*` 标签（如 `v1.13.0`） | `1.13.0`、`1.13`、`latest` |
-| 推送 `main` 分支 | `main`（或分支名）、`latest` |
+| 推送 `main` 分支 | `main` |
 | 手动触发（Actions → Run workflow） | 按当前分支规则 |
 
 * 平台：`linux/amd64` + `linux/arm64`（ARM NAS 直接用 arm64 镜像）；
 * 构建缓存用 GitHub Actions Cache（`type=gha`），二次构建明显加速；
-* 默认 `--build-arg INSTALL_CHROMIUM=1`（含 av-wiki 的 CDP 抓取）；若想减体积，可改工作流里的该参数为 `0`。
+* 默认 `--build-arg INSTALL_CHROMIUM=1`（含 av-wiki 的 CDP 抓取），可改为 `0` 减体积。
 
-发版流程因此简化为：**改版本号 → 提交 → 打 tag 推送**，镜像自动产出，NAS 端 `docker compose pull && docker compose up -d` 即完成升级。
+> `latest` 只在正式打 `v*` 标签时更新，避免被 `main` 的临时构建覆盖。
+
+### 11.2 Windows 单文件 exe `.github/workflows/release.yml`
+
+打 `v*` 标签时自动：构建前端 → PyInstaller 打包 → 生成 `SHA256.txt` → 创建 / 更新 GitHub Release 并附加产物（Release 正文取自 `RELEASE_NOTES.md`）。
+
+### 11.3 发布流程
+
+```
+改版本号（app/__init__.py、web_src/package.json）
+  → 更新 CHANGELOG.md / RELEASE_NOTES.md
+  → 提交、推送
+  → git tag vX.Y.Z && git push origin vX.Y.Z
+```
+
+一条 tag 同时产出：**Windows exe + SHA256**（GitHub Release）与 **amd64/arm64 镜像**（GHCR）。
+NAS 端升级：`docker compose pull && docker compose up -d`。
+
+### 11.4 为什么不做 macOS / Linux 原生二进制
+
+| 平台 | 方案 | 说明 |
+| --- | --- | --- |
+| Windows | 单文件 exe | 桌面用户主力，PyInstaller 打包简单、收益高 |
+| Linux / NAS / ARM | 多架构容器镜像 | 已覆盖全部 Linux 场景，且免去发行版碎片化问题 |
+| macOS | ❌ 默认不做 | 未签名/公证会被 Gatekeeper 拦截，需 Apple 开发者账号与公证流程，成本高收益低 |
+| 源码 | GitHub 自动提供 zip/tar | 无需额外工作 |
