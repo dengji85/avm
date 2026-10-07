@@ -124,6 +124,36 @@
 2. 解壓到任意目錄（如 `D:\AVM\`），雙擊 `AVM.exe` 啟動，自動開啟瀏覽器進入 Web UI。
 3. 資料（庫 / 封面 / 設定）在 `data/` 目錄，**整體拷貝即備份遷移**。
 
+**Docker / NAS 部署（群暉 · 威聯通 · Unraid · TrueNAS）**
+
+映像由 GitHub Actions 自動建置並推送至 GHCR（`linux/amd64` + `linux/arm64`），NAS 上**無需編譯**：
+
+```bash
+docker run -d --name avm \
+  -p 8770:8770 \
+  -e TZ=Asia/Shanghai \
+  -e PUID=1000 -e PGID=1000 \
+  -v /path/to/data:/data \
+  -v /path/to/media:/media:ro \
+  --shm-size=256m \
+  --restart unless-stopped \
+  ghcr.io/dengji85/avm:latest
+```
+
+或使用專案根目錄提供的 `docker-compose.yml`：
+
+```bash
+docker compose pull && docker compose up -d
+```
+
+* **首次存取需要權杖**：`docker compose logs avm | grep "远程访问令牌"`，或以環境變數 `AVM_ACCESS_TOKEN` 預設。
+* 媒體庫在「設定 → 媒體庫」填**容器內路徑**（如 `/media`）。
+* 資料（設定 / 資料庫 / 封面 / 頭像 / 預覽）全在 `/data` 卷，升級只需換映像。
+* 映像預設內建 `ffmpeg` 與 `chromium`；自建時可用 `--build-arg INSTALL_CHROMIUM=0` 精簡。
+* 容器內無桌面環境，「用系統播放器 / 在資料夾中顯示」會自動隱藏，刪除預設為「僅移出媒體庫」。
+
+> 完整說明（NAS 各平台、環境變數、反向代理、升級、FAQ）見 **[docs/Docker部署.md](docs/Docker部署.md)**。
+
 ---
 
 ## 🚀 快速開始

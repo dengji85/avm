@@ -49,10 +49,42 @@
   </a>
 </p>
 
-1. 到 **[Releases](https://github.com/dengji85/avm/releases)** 下载单个 `AVM-<版本号>.exe`（如 `AVM-1.12.0.exe`）。
+**方式一：Windows 免安装单文件 exe（推荐）**
+
+1. 到 **[Releases](https://github.com/dengji85/avm/releases)** 下载单个 `AVM-<版本号>.exe`（如 `AVM-1.13.0.exe`）。
 2. 放到任意目录（如 `D:\AVM\`），双击启动，自动打开浏览器进入 Web UI。
 3. 升级时**把新 `AVM-*.exe` 放到同目录、删掉旧 exe 即可**——数据（`data/` 库/封面/配置）在同目录自动保留，无需手动替换前端资源。
 4. 备份迁移：`AVM-*.exe` 与 `data/` 一起拷贝即可。
+
+**方式二：Docker / NAS 部署（群晖 · 威联通 · Unraid · TrueNAS）**
+
+镜像由 GitHub Actions 自动构建并推送到 GHCR（`linux/amd64` + `linux/arm64`），NAS 上**无需编译**：
+
+```bash
+docker run -d --name avm \
+  -p 8770:8770 \
+  -e TZ=Asia/Shanghai \
+  -e PUID=1000 -e PGID=1000 \
+  -v /path/to/data:/data \
+  -v /path/to/media:/media:ro \
+  --shm-size=256m \
+  --restart unless-stopped \
+  ghcr.io/dengji85/avm:latest
+```
+
+或使用仓库根目录提供的 `docker-compose.yml`：
+
+```bash
+docker compose pull && docker compose up -d
+```
+
+* **首次访问需要令牌**：`docker compose logs avm | grep 远程访问令牌`，也可用环境变量 `AVM_ACCESS_TOKEN` 预设；
+* 媒体库在「设置 → 媒体库」里填**容器内路径**（如 `/media`）；
+* 数据（配置 / 数据库 / 封面 / 头像 / 预览）全在 `/data` 卷，升级只换镜像、库自动迁移；
+* 镜像默认内置 `ffmpeg`（抽帧/预览）与 `chromium`（av-wiki 抓取）；自建时可用 `--build-arg INSTALL_CHROMIUM=0` 精简；
+* 容器内无桌面环境，「用系统播放器 / 在文件夹中显示」会自动隐藏，删除文件默认「仅移出媒体库」。
+
+> 完整说明（NAS 各平台、环境变量、反向代理、升级、FAQ）见 **[docs/Docker部署.md](docs/Docker部署.md)**。
 
 ---
 

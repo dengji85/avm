@@ -124,6 +124,36 @@
 2. 任意のディレクトリ（例 `D:\AVM\`）に展開し、`AVM.exe` をダブルクリックで起動——自動でブラウザが開き Web UI へ。
 3. データ（ライブラリ／表紙／設定）は `data/` ディレクトリにあり、**フォルダごとコピーでバックアップ・移行完了**。
 
+**Docker / NAS（Synology・QNAP・Unraid・TrueNAS）**
+
+イメージは GitHub Actions により自動ビルドされ GHCR に公開されます（`linux/amd64` + `linux/arm64`）。NAS 側でのビルドは不要です：
+
+```bash
+docker run -d --name avm \
+  -p 8770:8770 \
+  -e TZ=Asia/Shanghai \
+  -e PUID=1000 -e PGID=1000 \
+  -v /path/to/data:/data \
+  -v /path/to/media:/media:ro \
+  --shm-size=256m \
+  --restart unless-stopped \
+  ghcr.io/dengji85/avm:latest
+```
+
+または同梱の `docker-compose.yml` を利用：
+
+```bash
+docker compose pull && docker compose up -d
+```
+
+* **初回アクセスにはアクセストークンが必要**：`docker compose logs avm | grep "远程访问令牌"` で確認、または `AVM_ACCESS_TOKEN` で事前設定。
+* メディアパスは「設定 → ライブラリ」で**コンテナ内パス**（例 `/media`）を指定。
+* データ（設定／DB／表紙／アバター／プレビュー）は `/data` ボリュームに保存。アップグレードはイメージ差し替えのみ。
+* イメージには `ffmpeg` と `chromium` を同梱。`--build-arg INSTALL_CHROMIUM=0` で軽量ビルドも可能。
+* コンテナ内にデスクトップはないため「外部プレイヤーで開く／フォルダを表示」は非表示、削除は既定で「ライブラリから削除のみ」。
+
+> 詳細（NAS 各プラットフォーム、環境変数、リバースプロキシ、アップグレード、FAQ）：**[docs/Docker部署.md](docs/Docker部署.md)**。
+
 ---
 
 ## 🚀 クイックスタート

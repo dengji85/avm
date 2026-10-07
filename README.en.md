@@ -124,6 +124,36 @@ Don't want to build it yourself? Download the release package directly (Windows 
 2. Extract to any directory (e.g. `D:\AVM\`), double-click `AVM.exe` to launch — it auto-opens your browser into the Web UI.
 3. Data (library / covers / config) lives in the `data/` directory — **copy the whole folder to back up or migrate**.
 
+**Docker / NAS (Synology · QNAP · Unraid · TrueNAS)**
+
+Images are built automatically by GitHub Actions and published to GHCR (`linux/amd64` + `linux/arm64`) — no compilation needed on your NAS:
+
+```bash
+docker run -d --name avm \
+  -p 8770:8770 \
+  -e TZ=Asia/Shanghai \
+  -e PUID=1000 -e PGID=1000 \
+  -v /path/to/data:/data \
+  -v /path/to/media:/media:ro \
+  --shm-size=256m \
+  --restart unless-stopped \
+  ghcr.io/dengji85/avm:latest
+```
+
+Or use the bundled `docker-compose.yml`:
+
+```bash
+docker compose pull && docker compose up -d
+```
+
+* **An access token is required on first visit** — read it via `docker compose logs avm | grep "远程访问令牌"`, or preset it with `AVM_ACCESS_TOKEN`.
+* Set the media path to the **container path** (e.g. `/media`) in Settings → Library.
+* Everything (config / DB / covers / avatars / previews) lives in the `/data` volume; upgrading only swaps the image.
+* The image bundles `ffmpeg` and `chromium`; use `--build-arg INSTALL_CHROMIUM=0` for a slimmer build.
+* No desktop inside a container — "open external player / reveal folder" are hidden and deletion defaults to "remove from library".
+
+> Full guide (NAS platforms, env vars, reverse proxy, upgrade, FAQ): **[docs/Docker部署.md](docs/Docker部署.md)**.
+
 ---
 
 ## 🚀 Quick start
