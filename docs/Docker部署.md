@@ -181,7 +181,13 @@ docker compose up -d --build
 
 ### 11.2 Windows 单文件 exe `.github/workflows/release.yml`
 
-打 `v*` 标签时自动：构建前端 → PyInstaller 打包 → 生成 `SHA256.txt` → 创建 / 更新 GitHub Release 并附加产物（Release 正文取自 `RELEASE_NOTES.md`）。
+| 触发 | 行为 |
+| --- | --- |
+| 推送 `v*` 标签 | 构建前端 → PyInstaller 打包 → `SHA256.txt` → 创建 / 更新 GitHub Release（正文取 `RELEASE_NOTES.md`） |
+| 手动触发（Actions → Run workflow） | 只构建并上传为 Actions 工件，**不创建 Release**（用于零打扰验证打包链路） |
+
+> **发布节奏**：纯构建 / CI 类改动不建议单独发版——用户看不到功能变化，容易觉得"更新了个寂寞"。
+> 更规范的做法是随下一个有实际内容的版本一起发布；期间用「手动触发」验证打包是否正常。
 
 ### 11.3 发布流程
 
