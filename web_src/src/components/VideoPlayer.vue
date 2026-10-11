@@ -2,7 +2,7 @@
 import { ref, onMounted, onBeforeUnmount, watch, nextTick } from 'vue'
 import videojs from 'video.js'
 import 'video.js/dist/video-js.css'
-import { streamUrl, setProgress, playMovie, markPlayed, startSession, updateSession, endSession, getPreviews, genPreviews } from '../api.js'
+import { streamUrl, setProgress, playMovie, markPlayed, startSession, updateSession, endSession, getPreviews, genPreviews, playbackInfo, prepareStream, prepareStreamStatus } from '../api.js'
 import { toast, fmtClock } from '../utils.js'
 import { t } from '../i18n/index.js'
 
@@ -53,6 +53,12 @@ function onLoaded() {
   // 这里强制设为较小音量，避免一打开声音过大）
   if (player) { player.muted(false); player.volume(0.3) }
   dur.value = v.duration || 0
+  // 重封装后重新加载：只恢复播放进度，不重复计数、不重复开会话
+  if (reloading) {
+    reloading = false
+    if (props.startAt > 0 && props.startAt < (v.duration || 0) - 5) v.currentTime = props.startAt
+    return
+  }
   if (props.startAt > 0 && props.startAt < (v.duration || 0) - 5) {
     v.currentTime = props.startAt
     toast(t('player.jumpedTo', { time: fmtClock(props.startAt) }), '', 2200)
@@ -101,13 +107,86 @@ async function saveProgress(force = false) {
 // 每部影片只自动降级一次：video.js 可能对同一次故障连续派发多个 error 事件，
 // 不防重会反复拉起系统播放器。切换影片时随播放器重建而重置。
 let autoExternalDone = false
+// 是否已尝试过「重封装后网页播放」（每部影片只试一次，避免失败后死循环）
+let remuxTried = false
+// 重封装完成后重设视频源时置真：让 onLoaded 跳过重复计数/重复开会话
+let reloading = false
 
-function onError() {
+const preparing = ref(false)
+const preparePercent = ref(0)
+const prepareMsg = ref('')
+
+/**
+ * 网页播放失败时的降级链：
+ *   ① 视频是 H.264、只是容器/音轨不兼容 → 后端快速重封装为 MP4（-c:v copy）后再播；
+ *   ② 否则（HEVC 等浏览器解不了）→ 回退系统播放器。
+ * 重封装只复制视频流、不重新编码，耗时受磁盘 IO 限制，弱 CPU 的 NAS 也能胜任。
+ */
+async function onError() {
   failed.value = true
-  // 网页端解码/拉流失败时自动改用系统播放器。绝大多数失败其实是浏览器不支持该
-  // 编码（HEVC、DTS 音轨等），文件本身是好的，系统播放器能直接播，
-  // 没必要让用户再手动点一次按钮。
-  // 远程访问时不自动拉起：系统播放器只会开在服务端机器上，访问者看不到。
+  if (remuxTried) { fallbackExternal(); return }
+  try {
+    const info = await playbackInfo(props.movieId)
+    if (info && info.auto_remux && info.remuxable) {
+      remuxTried = true
+      preparing.value = true
+      preparePercent.value = info.prepared ? 100 : (info.percent || 0)
+      prepareMsg.value = info.message || ''
+      if (!info.prepared) {
+        await prepareStream(props.movieId)
+        const ok = await pollPrepare()
+        preparing.value = false
+        if (!ok) { fallbackExternal(); return }
+      } else {
+        preparing.value = false
+      }
+      failed.value = false
+      reloadSource()
+      return
+    }
+  } catch (e) { /* 忽略，继续回退系统播放器 */ }
+  preparing.value = false
+  fallbackExternal()
+}
+
+/** 轮询重封装进度，完成返回 true（最长等 5 分钟） */
+async function pollPrepare() {
+  const deadline = Date.now() + 5 * 60 * 1000
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 1200))
+    try {
+      const st = await prepareStreamStatus(props.movieId)
+      if (st.percent) preparePercent.value = st.percent
+      if (st.message) prepareMsg.value = st.message
+      if (st.status === 'done') return true
+      if (st.status === 'failed' || st.status === 'unsupported') {
+        prepareMsg.value = st.message || ''
+        return false
+      }
+    } catch (e) { /* 网络抖动，继续轮询 */ }
+  }
+  return false
+}
+
+/** 重封装完成后，把播放器源切到已就绪的流，并恢复播放位置 */
+function reloadSource() {
+  nextTick(() => {
+    if (!player) return
+    const v = videoEl
+    const pos = v && v.currentTime > 1 ? v.currentTime : (props.startAt || 0)
+    reloading = true
+    player.trigger('resize')
+    player.src({ src: streamUrl(props.movieId) + '?r=' + Date.now(), type: 'video/mp4' })
+    player.one('loadedmetadata', () => {
+      const el = videoEl
+      if (el && pos > 0 && pos < (el.duration || 0) - 5) el.currentTime = pos
+    })
+    player.play().catch(() => {})
+  })
+}
+
+/** 回退系统播放器（远程访问不自动拉起：只会开在服务端机器上） */
+function fallbackExternal() {
   if (!isRemote && !autoExternalDone) {
     autoExternalDone = true
     openExternal()
@@ -591,6 +670,11 @@ watch(() => props.movieId, () => {
   destroyPlayer()
   failed.value = false
   autoExternalDone = false
+  remuxTried = false
+  reloading = false
+  preparing.value = false
+  preparePercent.value = 0
+  prepareMsg.value = ''
   ready.value = false
   lastSaved = 0
   sessionId = null
@@ -603,7 +687,15 @@ watch(() => props.movieId, () => {
   <div class="player">
     <div v-show="!failed" ref="containerEl" class="vjs-wrap"></div>
 
-    <div v-if="failed" class="p-fail">
+    <!-- 浏览器不兼容的容器/音轨：正在快速重封装为 MP4（只复制视频流，不重编码） -->
+    <div v-if="preparing" class="p-fail">
+      <div class="icon">⏳</div>
+      <div class="title">{{ $t('player.preparing') }}</div>
+      <p class="desc">{{ prepareMsg || $t('player.preparingDesc') }}<span v-if="preparePercent"> · {{ preparePercent }}%</span></p>
+      <div class="p-bar"><i :style="{ width: Math.max(3, preparePercent) + '%' }"></i></div>
+    </div>
+
+    <div v-if="failed && !preparing" class="p-fail">
       <div class="icon">▶</div>
       <div class="title">{{ $t('player.cannotDecode') }}</div>
       <p class="desc">{{ $t('player.cannotDecodeDesc') }}</p>
@@ -733,6 +825,20 @@ watch(() => props.movieId, () => {
   color: var(--c-text-3);
 }
 .p-fail .icon { font-size: 34px; opacity: .3; }
+/* 重封装进度条 */
+.p-bar {
+  width: min(360px, 70%);
+  height: 6px;
+  border-radius: 999px;
+  background: var(--c-surface-3, rgba(255,255,255,.12));
+  overflow: hidden;
+}
+.p-bar > i {
+  display: block;
+  height: 100%;
+  background: var(--c-primary);
+  transition: width .3s ease;
+}
 .p-fail .title { font-size: var(--fs-lg); color: var(--c-text-2); }
 .p-fail .desc { max-width: 400px; font-size: var(--fs-md); }
 /* 系统原生全屏态：根元素 .video-js 铺满视口 */

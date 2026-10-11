@@ -5,7 +5,7 @@ import {
   getConfig, putConfig, listProviders, testScraper as apiTest,
   parsePreview as apiParse, fsList, sniffCovers, extractAllCovers, csvUrl, cacheAvatars,
   fillActressAvatars, rescanLocalCovers, fetchActressProfile, getServerInfo, resetToken, checkUpdate,
-  listPlugins, togglePlugin, regenAllPreviews,
+  listPlugins, togglePlugin, regenAllPreviews, streamCacheStats, clearStreamCache,
 } from '../api.js'
 import { toast, confirmDialog } from '../utils.js'
 import { useTasks } from '../composables/useTasks.js'
@@ -42,6 +42,7 @@ const cfg = reactive({
   ffmpeg_path: '',
   previews_quality: 'smart',
   ai: { enabled: false, base_url: 'https://api.openai.com/v1', api_key: '', model: 'gpt-4o-mini', temperature: 0.4 },
+  stream: { auto_remux: true, remux_cache_mb: 4096 },
   wiki: { languages: ['ja', 'zh'] },
   online_sites: [],
 })
@@ -77,6 +78,7 @@ async function load() {
     autoScan.value = Number(cfg.library.auto_scan_interval) > 0
     autoScanInterval.value = Number(cfg.library.auto_scan_interval) > 0 ? Number(cfg.library.auto_scan_interval) : 10
     cfg.cover = Object.assign({ auto_local: false, download: false }, c.cover)
+    cfg.stream = Object.assign({ auto_remux: true, remux_cache_mb: 4096 }, c.stream)
     cfg.media = Object.assign(
       { avatar_dir: 'avatars', fanart_dir: 'fanarts', avatar_download: false, fanart_download: true },
       c.media,
@@ -113,6 +115,7 @@ async function load() {
     })
     providers.active = pv.active || []
     providers.available.forEach((p) => { provOn[p.id] = orderList.includes(p.id) })
+    loadStreamCache()
     state.config = cfg
   } catch (e) { toast(e.message, 'err') } finally { loading.value = false }
 }
@@ -136,6 +139,10 @@ async function saveLibrary() {
         missing_grace_days: Math.max(0, Number(cfg.library.missing_grace_days) || 0),
         delete_to_recycle_bin: !!cfg.library.delete_to_recycle_bin,
       },
+      stream: {
+        auto_remux: !!cfg.stream.auto_remux,
+        remux_cache_mb: Math.max(0, Number(cfg.stream.remux_cache_mb) || 0),
+      },
       cover: { auto_local: !!cfg.cover.auto_local, download: !!cfg.cover.download },
       media: {
         avatar_dir: (cfg.media.avatar_dir || 'avatars').toString().trim() || 'avatars',
@@ -148,6 +155,24 @@ async function saveLibrary() {
     toast(t('settings.libSaved'), 'ok')
     await load()
   } catch (e) { toast(e.message, 'err') } finally { saving.value = false }
+}
+
+/* ---------------- 网页播放兼容（浏览器不认的容器 → 快速重封装） ---------------- */
+const cacheMb = ref(0)
+const clearingCache = ref(false)
+async function loadStreamCache() {
+  try {
+    const r = await streamCacheStats()
+    cacheMb.value = Math.round((r.bytes || 0) / 1024 / 1024)
+  } catch (e) { /* 非致命 */ }
+}
+async function clearCacheNow() {
+  clearingCache.value = true
+  try {
+    const r = await clearStreamCache()
+    toast(t('settings.playCleared', { n: r.removed || 0 }), 'ok')
+    await loadStreamCache()
+  } catch (e) { toast(e.message, 'err') } finally { clearingCache.value = false }
 }
 
 /* 按当前密度档位重新生成全部预览图（改档后刷新已生成影片） */
@@ -722,6 +747,27 @@ onMounted(async () => { await load(); await loadServerInfo(); loadPlugins() })
           </div>
           <div class="panel-foot">
             <button class="btn primary" :disabled="saving" @click="saveLibrary">{{ $t('common.save') }}</button>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-head">{{ $t('settings.playTitle') }}</div>
+          <div class="panel-body">
+            <div class="field">
+              <label class="toggle">
+                <input type="checkbox" v-model="cfg.stream.auto_remux" @change="saveLibrary" /><span class="track"></span>
+              </label>
+              <span>{{ $t('settings.playAutoRemux') }}</span>
+              <span class="hint">{{ $t('settings.playAutoRemuxHint') }}</span>
+            </div>
+            <div class="field-row">
+              <label>{{ $t('settings.playCache') }}</label>
+              <div class="hstack">
+                <span class="muted">{{ cacheMb }} MB</span>
+                <button class="btn tiny" :disabled="clearingCache" @click="clearCacheNow">{{ $t('settings.playClear') }}</button>
+              </div>
+              <span class="hint">{{ $t('settings.playCacheHint') }}</span>
+            </div>
           </div>
         </div>
 

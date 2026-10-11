@@ -29,6 +29,8 @@ DATA_DIR = Path(_env_data_dir).expanduser() if _env_data_dir else BASE_DIR / "da
 COVER_DIR = DATA_DIR / "covers"
 AVATAR_DIR = DATA_DIR / "avatars"
 FANART_DIR = DATA_DIR / "fanarts"
+# 浏览器播放兼容层的重封装产物（-c:v copy 快速转封装为 MP4），可安全删除
+REMUX_DIR = DATA_DIR / "remux"
 DB_PATH = DATA_DIR / "library.db"
 CONFIG_PATH = DATA_DIR / "config.json"
 
@@ -118,6 +120,14 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "timeout": 20,
         # 没有封面时用番号生成占位图
         "placeholder": True,
+    },
+    "stream": {
+        # 浏览器播放失败时，自动用 ffmpeg 重封装为 MP4 再试：
+        # 视频流直接复制（-c:v copy，零重编码、几乎不耗 CPU），仅音轨转 AAC。
+        # 仅当视频编码本身可被浏览器解码（H.264）时才重封装；HEVC 等直接走系统播放器。
+        "auto_remux": True,
+        # 重封装缓存目录（data/remux）大小上限 MB；超出后按最久未访问清理，0=不限制
+        "remux_cache_mb": 4096,
     },
     "scraper": {
         "enabled": True,
@@ -260,7 +270,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
 def ensure_dirs() -> None:
     # 注意：不能调用 load_config()（否则会再次触发 ensure_dirs 造成递归）。
     # 仅创建固定默认目录；自定义 media 目录在运行时由 avatar_dir()/fanart_dir() 按需创建。
-    for d in (DATA_DIR, COVER_DIR, AVATAR_DIR, FANART_DIR):
+    for d in (DATA_DIR, COVER_DIR, AVATAR_DIR, FANART_DIR, REMUX_DIR):
         d.mkdir(parents=True, exist_ok=True)
 
 

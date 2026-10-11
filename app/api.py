@@ -1692,17 +1692,93 @@ def watch_analytics():
 
 @router.get("/stream/{movie_id}")
 def stream_movie(movie_id: int, request: Request):
-    """流式播放主视频文件（支持 Range 断点续传）；浏览器无法解码的格式（如 MKV）会失败，此时请用系统播放器。"""
+    """流式播放主视频文件（支持 Range 断点续传）。
+
+    若该片已被「播放兼容层」重封装（MKV 容器 / AC3·DTS 音轨等浏览器不兼容的情况），
+    优先返回重封装产物，从而在网页内直接播放。
+    """
     with db() as conn:
         path = store.movie_primary_file(conn, movie_id)
     if not path or not os.path.exists(path):
         raise HTTPException(status_code=404, detail="视频文件不存在或未入库")
+    from . import remux as remux_mod
+    if remux_mod.is_ready(movie_id, path):
+        path = str(remux_mod.remuxed_path(movie_id))
     ext = os.path.splitext(path)[1].lower().lstrip(".")
     media = {"mp4": "video/mp4", "webm": "video/webm", "ogg": "video/ogg",
              "mov": "video/quicktime", "mkv": "video/x-matroska", "avi": "video/x-msvideo",
              "m4v": "video/mp4", "ts": "video/mp2t", "flv": "video/x-flv"}.get(
         ext, "application/octet-stream")
     return FileResponse(path, media_type=media, filename=os.path.basename(path))
+
+
+@router.get("/movies/{movie_id}/playback-info")
+def playback_info(movie_id: int) -> Dict[str, Any]:
+    """播放兼容性信息：能否直接播、是否值得重封装、当前准备进度。
+
+    前端在网页播放失败时调用，据此决定「重封装后再试」还是「改用系统播放器」。
+    """
+    cfg = load_config(refresh=True)
+    with db() as conn:
+        path = store.movie_primary_file(conn, movie_id)
+    if not path or not os.path.exists(path):
+        raise HTTPException(404, "视频文件不存在或未入库")
+    from . import remux as remux_mod
+    st = remux_mod.status(movie_id)
+    return {
+        "auto_remux": bool((cfg.get("stream") or {}).get("auto_remux", True)),
+        "prepared": remux_mod.is_ready(movie_id, path),
+        "status": st.get("status"),
+        "percent": st.get("percent", 0),
+        "message": st.get("message", ""),
+        **remux_mod.analyze(path, cfg),
+    }
+
+
+@router.post("/movies/{movie_id}/prepare-stream")
+def prepare_stream(movie_id: int) -> Dict[str, Any]:
+    """启动「重封装为 MP4」（异步、零重编码），返回当前进度。"""
+    cfg = load_config(refresh=True)
+    if not bool((cfg.get("stream") or {}).get("auto_remux", True)):
+        raise HTTPException(400, "播放兼容层未启用")
+    with db() as conn:
+        path = store.movie_primary_file(conn, movie_id)
+    if not path or not os.path.exists(path):
+        raise HTTPException(404, "视频文件不存在或未入库")
+    from . import remux as remux_mod
+    if remux_mod.is_ready(movie_id, path):
+        return {"ok": True, "status": "done", "percent": 100, "message": "已就绪"}
+    info = remux_mod.analyze(path, cfg)
+    if not info.get("remuxable"):
+        return {"ok": False, "status": "unsupported",
+                "message": info.get("reason") or "该片需要转码，建议用系统播放器"}
+    return {"ok": True, **remux_mod.start(movie_id, path, cfg)}
+
+
+@router.get("/movies/{movie_id}/prepare-stream/status")
+def prepare_stream_status(movie_id: int) -> Dict[str, Any]:
+    """查询重封装进度（前端轮询）。"""
+    with db() as conn:
+        path = store.movie_primary_file(conn, movie_id)
+    from . import remux as remux_mod
+    st = remux_mod.status(movie_id)
+    if path and remux_mod.is_ready(movie_id, path) and st.get("status") != "running":
+        return {"status": "done", "percent": 100, "message": st.get("message") or "已就绪"}
+    return st
+
+
+@router.get("/stream-cache")
+def stream_cache_stats() -> Dict[str, Any]:
+    """重封装缓存占用（供设置页展示）。"""
+    from . import remux as remux_mod
+    return remux_mod.cache_stats()
+
+
+@router.post("/stream-cache/clear")
+def stream_cache_clear() -> Dict[str, Any]:
+    """清空重封装缓存（可随时重建，只是下次播放要再等一次重封装）。"""
+    from . import remux as remux_mod
+    return {"ok": True, "removed": remux_mod.clear_cache()}
 
 
 @router.get("/export/csv")
