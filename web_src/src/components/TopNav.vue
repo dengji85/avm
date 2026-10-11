@@ -63,6 +63,9 @@ async function submit() {
     semanticActive.value = false
   }
   state.page = 1
+  // 首页（或其它视图）里回车搜索：自动切到影片库展示结果。
+  // 原先只更新 state.q、不切视图，停在首页看不到任何变化，表现为「搜索框没反应」。
+  if (state.view !== 'gallery') state.view = 'gallery'
   emit('search')
 }
 function clearKw() {

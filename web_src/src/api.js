@@ -8,9 +8,32 @@ export const serverOffline = ref(false)
 export function getToken() {
   try { return localStorage.getItem(TOKEN_KEY) || '' } catch (e) { return '' }
 }
+
+/**
+ * 令牌同时写入 Cookie。
+ * <img> / <video> / <a download> 这些由浏览器自主发起的请求**无法携带自定义请求头**，
+ * 只靠 X-Access-Token 会全部 401（表现为远程访问时「设置页能保存，但封面、头像、
+ * 播放全部看不到」）。Cookie 会被浏览器自动带上，后端已同步支持校验。
+ */
+const TOKEN_COOKIE = 'avm_token'
+function syncTokenCookie(t) {
+  try {
+    if (t) {
+      document.cookie = `${TOKEN_COOKIE}=${encodeURIComponent(t)}; path=/; max-age=31536000; SameSite=Lax`
+    } else {
+      document.cookie = `${TOKEN_COOKIE}=; path=/; max-age=0; SameSite=Lax`
+    }
+  } catch (e) { /* 隐私模式等场景忽略 */ }
+}
+
 export function setToken(t) {
   try { if (t) localStorage.setItem(TOKEN_KEY, t); else localStorage.removeItem(TOKEN_KEY) } catch (e) {}
+  syncTokenCookie(t)
 }
+
+// 旧版本只把令牌存在 localStorage：这里补写一次 Cookie，
+// 避免升级后打开页面时图片与播放仍然 401。
+syncTokenCookie(getToken())
 // 远程访问被拒时由 App 注册的回调触发登录模态
 let _onNoToken = null
 export function onNoToken(cb) { _onNoToken = cb }
@@ -73,6 +96,13 @@ export const coverUrl = (id) => `${API}/cover/${id}`
 export const coverThumbUrl = (id, w = 360) => `${API}/cover/${id}?w=${w}`
 export const previewUrl = (movieId, fname) => `${API}/covers/preview/${movieId}/${encodeURIComponent(fname)}`
 export const streamUrl = (id) => `${API}/stream/${id}`
+
+/* ---------------- 播放兼容：浏览器不认的容器/音轨 → 重封装为 MP4 后再播 ---------------- */
+export const playbackInfo = (id) => get(`/movies/${id}/playback-info`)
+export const prepareStream = (id) => post(`/movies/${id}/prepare-stream`, {})
+export const prepareStreamStatus = (id) => get(`/movies/${id}/prepare-stream/status`)
+export const streamCacheStats = () => get('/stream-cache')
+export const clearStreamCache = () => post('/stream-cache/clear', {})
 export const csvUrl = () => `${API}/export/csv`
 
 /* ---------------- 服务/访问控制 ---------------- */

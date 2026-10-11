@@ -18,15 +18,12 @@ function close() { visible.value = false }
 function submit() {
   const v = token.value.trim()
   setToken(v)
-  if (v) {
-    close()
-    toast(t('token.saved'))
-    // 触发一次全局刷新，让被拦截的请求重新发起
-    window.dispatchEvent(new CustomEvent('avm-refresh'))
-  } else {
-    close()
-    toast(t('token.cleared'))
-  }
+  close()
+  toast(v ? t('token.saved') : t('token.cleared'))
+  // 页面里已经加载过的 <img>/<video> 用的是「无令牌」的旧请求，失败后浏览器不会
+  // 自动重试；只派发 avm-refresh 也未必重新拉图。整页刷新一次最可靠，
+  // 保证封面、头像、播放等资源立刻带上新 Cookie 重新请求。
+  setTimeout(() => window.location.reload(), 400)
 }
 
 defineExpose({ open })

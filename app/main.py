@@ -35,6 +35,16 @@ def _is_local(scope: Scope) -> bool:
     return host in _LOCAL_ADDRS
 
 
+def _cookie_token(raw: str) -> str:
+    """从 Cookie 头里取出 avm_token（前端登录后写入，供浏览器自主请求使用）。"""
+    from urllib.parse import unquote
+    for part in (raw or "").split(";"):
+        key, _, val = part.strip().partition("=")
+        if key == "avm_token":
+            return unquote(val)
+    return ""
+
+
 def _token_valid(scope: Scope, cfg_token: str) -> bool:
     if not cfg_token:
         return True  # 未启用令牌，等同于关闭保护
@@ -43,11 +53,17 @@ def _token_valid(scope: Scope, cfg_token: str) -> bool:
     provided = hmap.get("x-access-token")
     if not provided:
         # 兼容 ?token=xxx
+        from urllib.parse import unquote
         qs = scope.get("query_string", b"").decode("latin-1")
         for pair in qs.split("&"):
             if pair.startswith("token="):
-                provided = pair.split("=", 1)[1]
+                provided = unquote(pair.split("=", 1)[1])
                 break
+    if not provided:
+        # 兼容 Cookie：<img> / <video> / <a download> 等由浏览器自主发起的请求
+        # 无法携带自定义请求头（X-Access-Token），只能靠 Cookie 通过校验。
+        # 否则远程访问下会出现「设置页能保存、封面与播放却 401」。
+        provided = _cookie_token(hmap.get("cookie") or "")
     return provided == cfg_token
 
 

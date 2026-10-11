@@ -64,6 +64,11 @@ docker build -t avm:latest .
 | `AVM_ACCESS_TOKEN` | 空 | 预设访问令牌；留空则自动生成并打印在日志 |
 | `AVM_CONTAINER` | `1` | 标记容器环境，前端据此隐藏桌面相关入口 |
 | `AVM_CHROME_ARGS` | `--no-sandbox --disable-dev-shm-usage` | 传给内置 Chromium 的附加参数 |
+| `HTTP_PROXY` / `HTTPS_PROXY` | 空 | 刮削 / 下载走代理时填写。**容器不会继承宿主机的代理设置**，必须显式声明；推荐同时设 `NO_PROXY=localhost,127.0.0.1`，避免容器内部请求也被绕进代理 |
+| `NO_PROXY` | 空 | 不走代理的地址列表（建议至少包含 `localhost,127.0.0.1`） |
+
+> **刮削走代理**：若 NAS 访问外网需要代理，请在 compose 里取消注释 `HTTP_PROXY` / `HTTPS_PROXY`，
+> 例如企业内网或大陆网络环境（javdb / javbus 等站点常需代理）。修改后 `docker compose up -d` 重建容器生效。
 
 ## 3. 卷
 
