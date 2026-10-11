@@ -146,6 +146,16 @@ Or use the bundled `docker-compose.yml`:
 docker compose pull && docker compose up -d
 ```
 
+**Which image tag to use**:
+
+| Tag | Meaning | Best for |
+| --- | --- | --- |
+| `latest` | Latest stable release | Everyday use (recommended) |
+| `main` | Newest build from the `main` branch, including fixes not yet released | Trying new fixes early / reporting issues |
+| `1.13.0` | Pinned version, never changes | Version-pinned deployments |
+
+> Note: `latest` is only updated when a new release is published — it is **never overwritten** by `main` builds. Pull `main` if you want fixes early.
+
 * **An access token is required on first visit** — read it via `docker compose logs avm | grep "远程访问令牌"`, or preset it with `AVM_ACCESS_TOKEN`.
 * Set the media path to the **container path** (e.g. `/media`) in Settings → Library.
 * Everything (config / DB / covers / avatars / previews) lives in the `/data` volume; upgrading only swaps the image.
