@@ -152,7 +152,7 @@ docker compose pull && docker compose up -d
 | --- | --- | --- |
 | `latest` | Latest stable release | Everyday use (recommended) |
 | `main` | Newest build from the `main` branch, including fixes not yet released | Trying new fixes early / reporting issues |
-| `1.13.0` | Pinned version, never changes | Version-pinned deployments |
+| `1.13.1` | Pinned version, never changes | Version-pinned deployments |
 
 > Note: `latest` is only updated when a new release is published — it is **never overwritten** by `main` builds. Pull `main` if you want fixes early.
 
