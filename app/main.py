@@ -7,7 +7,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.types import Scope, Receive, Send
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import __version__, auth
@@ -30,18 +30,29 @@ if _cors_origins:
         allow_headers=["Content-Type", "X-Access-Token", "X-Requested-With"],
     )
 
-_LOCAL_ADDRS = {"127.0.0.1", "::1", "localhost", "testclient"}
+# 公开的静态资源目录（前缀匹配，路径由 Vite 构建产物决定）
+_PUBLIC_PREFIXES = ("/assets", "/icons", "/favicon", "/logo")
 
-# 无需登录即可访问的路径：静态资源、首页、健康检查、登录与会话状态查询。
+# 无需登录即可访问的**精确**路径：首页、健康检查、登录 / 登出 / 会话状态查询。
+# 必须精确匹配 —— 早先写成前缀匹配时，`/api/auth/session` 会顺带放行
+# `/api/auth/sessions`（会话与设备列表、含 IP）和 `/api/auth/logout-all`（一次登出所有设备）。
 # 注意：/api/docs 与 /api/openapi.json 不再默认公开（见 server.expose_docs）。
-_PUBLIC_PREFIXES = (
-    "/assets", "/icons", "/favicon", "/logo",
+_PUBLIC_PATHS = {
+    "/", "/index.html",
     "/api/health",
     "/api/auth/login", "/api/auth/logout", "/api/auth/session",
-)
+}
 
-# 隐私锁定期间仍可访问的路径（否则页面与解锁接口本身会被自己挡住）
-_LOCK_ALLOWED = ("/api/privacy/", "/api/auth/")
+# 隐私锁定期间仍可访问的路径（否则页面与解锁接口本身会被自己挡住）。
+# 注意**不能**图省事整段放行 /api/auth/ —— 否则锁定状态下仍可调用
+# /api/auth/set-pin（覆盖式改简单密码，无需旧密码）、/api/auth/sessions（列出设备与 IP）、
+# /api/auth/audit（读登录记录），等于绕过了锁定本身。
+# 登录 / 登出 / 会话状态查询已在 _PUBLIC_PREFIXES 中，不受锁定影响。
+_LOCK_ALLOWED = (
+    "/api/privacy/",           # state / unlock / lock
+    "/api/auth/pin-status",    # 前端据此决定是否回退到「访问令牌」解锁
+    "/api/auth/verify-pin",    # 简单密码解锁
+)
 
 
 def _cookie_token(raw: str) -> str:
@@ -51,6 +62,16 @@ def _cookie_token(raw: str) -> str:
         key, _, val = part.strip().partition("=")
         if key == auth.COOKIE_TOKEN:
             return unquote(val)
+    return ""
+
+
+def _query_token(scope: Scope) -> str:
+    """取出 URL 查询串里的 token=xxx（兼容脚本、旧客户端与扫码链接）。"""
+    from urllib.parse import unquote
+    qs = scope.get("query_string", b"").decode("latin-1")
+    for pair in qs.split("&"):
+        if pair.startswith("token="):
+            return unquote(pair.split("=", 1)[1])
     return ""
 
 
@@ -66,12 +87,7 @@ def _token_valid(scope: Scope, cfg_token: str) -> bool:
     hmap = auth.http_headers(scope)
     provided = hmap.get("x-access-token")
     if not provided:
-        from urllib.parse import unquote
-        qs = scope.get("query_string", b"").decode("latin-1")
-        for pair in qs.split("&"):
-            if pair.startswith("token="):
-                provided = unquote(pair.split("=", 1)[1])
-                break
+        provided = _query_token(scope)
     if not provided:
         # <img> / <video> / <a download> 等浏览器自主发起的请求无法携带自定义头，
         # 登录后的 HttpOnly 会话 Cookie 已覆盖该场景，这里仅兼容历史 Cookie。
@@ -101,39 +117,56 @@ class AccessTokenMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         path = request.url.path
         server = load_config().get("server") or {}
-        if (path.startswith(_PUBLIC_PREFIXES) or path == "/" or path == "/index.html"
+        ip = auth.client_ip(request.scope, server.get("trusted_proxies") or ["127.0.0.1", "::1"])
+        request.scope["avm_client_ip"] = ip
+        ua = request.headers.get("user-agent", "")
+
+        # 0) 用带 ?token= 的链接打开首页（扫码 / 分享）：令牌有效时换一次会话，再 302 到干净地址。
+        #    令牌留在 URL 里会被浏览器历史、反向代理 access log 与 Referer 记录；
+        #    换成 HttpOnly 会话 Cookie 后，后续请求（含 <img>/<video>）自动通过，也不必每次带参数。
+        #    必须放在下面的公开白名单**之前** —— 首页本身是公开的，放后面这段永远不会执行。
+        if (path in ("/", "/index.html") and _query_token(request.scope)
+                and _token_valid(request.scope, (server.get("access_token") or "").strip())):
+            idle, _absd = _session_limits(server)
+            sid, _info = auth.new_session(ip, ua, idle, _absd)
+            auth.audit("login", ip, ua, "通过 URL 令牌换取会话", ok=True)
+            resp = RedirectResponse("/", status_code=302)
+            resp.headers.append("Set-Cookie", auth.session_cookie(sid, auth.is_https(request.scope), idle))
+            resp.headers.append("Set-Cookie",
+                                "%s=; Path=/; Max-Age=0; SameSite=Lax" % auth.COOKIE_TOKEN)
+            return resp
+
+        if (path.startswith(_PUBLIC_PREFIXES) or path in _PUBLIC_PATHS
                 or (bool(server.get("expose_docs"))
                     and path.startswith(("/api/docs", "/api/openapi.json")))):
             return await call_next(request)
-        if not server.get("require_token_remote", True):
-            return await call_next(request)
 
-        ip = auth.client_ip(request.scope, server.get("trusted_proxies") or ["127.0.0.1", "::1"])
-        request.scope["avm_client_ip"] = ip
-
-        allowed = False
-        # 1) 会话 Cookie（登录后签发；默认仅内存，server.session_persist 可落盘）
-        sid = auth.cookie_value(request.scope, auth.SESSION_COOKIE)
-        if sid:
-            idle, absd = _session_limits(server)
-            if auth.touch_session(sid, idle, absd):
+        if server.get("require_token_remote", True):
+            allowed = False
+            # 1) 会话 Cookie（登录后签发；默认仅内存，server.session_persist 可落盘）
+            sid = auth.cookie_value(request.scope, auth.SESSION_COOKIE)
+            if sid:
+                idle, absd = _session_limits(server)
+                if auth.touch_session(sid, idle, absd):
+                    allowed = True
+            # 2) 访问令牌（兼容脚本 / 旧客户端）
+            if not allowed and _token_valid(request.scope, (server.get("access_token") or "").strip()):
                 allowed = True
-        # 2) 访问令牌（兼容脚本 / 旧客户端）
-        if not allowed and _token_valid(request.scope, (server.get("access_token") or "").strip()):
-            allowed = True
-        # 3) 本机豁免（容器内默认关闭：端口映射与同机反代无法区分「真本机」）
-        if not allowed and bool(server.get("local_bypass", True)) and auth.is_local_ip(ip):
-            allowed = True
+            # 3) 本机豁免（容器内默认关闭：端口映射与同机反代无法区分「真本机」）
+            if not allowed and bool(server.get("local_bypass", True)) and auth.is_local_ip(ip):
+                allowed = True
 
-        if not allowed:
-            auth.audit("deny", ip, request.headers.get("user-agent", ""), path, ok=False)
-            return JSONResponse(
-                status_code=401,
-                content={"detail": "需要访问令牌", "code": "NO_TOKEN"},
-            )
+            if not allowed:
+                auth.audit("deny", ip, ua, path, ok=False)
+                return JSONResponse(
+                    status_code=401,
+                    content={"detail": "需要访问令牌", "code": "NO_TOKEN"},
+                )
 
         # 4) 隐私锁定（状态在服务端）：除解锁相关接口外一律拒绝。
         #    锁定状态不存前端，所以刷新页面 / 重开标签页 / 直接调接口都拿不到内容。
+        #    这一段刻意放在 require_token_remote 判断**之外**：关掉访问保护做本机调试时，
+        #    锁定仍须生效，否则「锁定」在关闭访问控制后就形同虚设。
         if auth.privacy_locked() and not path.startswith(_LOCK_ALLOWED):
             return JSONResponse(
                 status_code=423,
@@ -143,9 +176,13 @@ class AccessTokenMiddleware(BaseHTTPMiddleware):
         return await call_next(request)
 
 
-# 前端为本地打包资源，无第三方 CDN：CSP 收紧脚本来源，图片额外允许 https（远程封面）
+# 前端为本地打包资源，无第三方 CDN：CSP 收紧脚本来源。
+# 注意两处放宽不能少：
+#   font-src data:   —— video.js 的图标字体是内联 data URI，缺了它播放/暂停等按钮图标会全部消失
+#   img-src https:   —— 远程封面 / 头像
 _CSP = (
     "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+    "font-src 'self' data:; "
     "img-src 'self' data: blob: https:; media-src 'self' blob:; connect-src 'self'; "
     "frame-ancestors 'self'; object-src 'none'; base-uri 'self'"
 )

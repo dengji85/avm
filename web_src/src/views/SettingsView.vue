@@ -9,7 +9,7 @@ import {
   listSessions, revokeSession, getAudit, logout as apiLogout, logoutAll as apiLogoutAll,
   setPin, pinStatus,
 } from '../api.js'
-import { toast, confirmDialog, fmtAgo } from '../utils.js'
+import { toast, confirmDialog, fmtAgo, setSiteTitle } from '../utils.js'
 import { useTasks } from '../composables/useTasks.js'
 import { LANGUAGES, i18nState, setLang } from '../i18n'
 import { t } from '../i18n/index.js'
@@ -55,6 +55,7 @@ const cfg = reactive({
   privacy: {
     idle_lock_minutes: 10, lock_unlock: 'token', panic_key: 'Ctrl+Shift+H',
     neutral_title: true, pause_when_hidden: true, lock_on_start: false,
+    site_subtitle: '',
   },
 })
 
@@ -140,6 +141,7 @@ async function load() {
       {
         idle_lock_minutes: 10, lock_unlock: 'token', panic_key: 'Ctrl+Shift+H',
         neutral_title: true, pause_when_hidden: true, lock_on_start: false,
+        site_subtitle: '',
       },
       c.privacy,
     )
@@ -260,8 +262,11 @@ async function savePrivacy(silent = true) {
         neutral_title: !!cfg.privacy.neutral_title,
         pause_when_hidden: !!cfg.privacy.pause_when_hidden,
         lock_on_start: !!cfg.privacy.lock_on_start,
+        site_subtitle: String(cfg.privacy.site_subtitle || '').trim(),
       },
     })
+    // 标题后缀改动立即生效（无需刷新）
+    setSiteTitle(cfg.privacy.site_subtitle)
     // 让遮挡层立即重新读取配置（无需整页刷新）
     window.dispatchEvent(new CustomEvent('avm-privacy-changed'))
     if (!silent) toast(t('settings.secSaved'), 'ok')
@@ -292,6 +297,7 @@ function onUnlockModeChange() {
 
 /* 隐私解锁「简单密码」：明文只在提交瞬间传一次，服务端只保存 PBKDF2 哈希 */
 const pinInput = ref('')
+const showPin = ref(false) // 简单密码输入框的明文 / 密文切换
 const hasPin = ref(false)
 const savingPin = ref(false)
 
@@ -1179,7 +1185,7 @@ onMounted(async () => { await load(); await loadServerInfo(); loadPlugins() })
             </div>
             <div class="field">
               <label>API Key</label>
-              <input v-model="cfg.ai.api_key" type="password" :placeholder="$t('settings.aiKeyPh')" />
+              <input v-model="cfg.ai.api_key" type="password" name="avm-code" autocomplete="new-password" autocapitalize="off" spellcheck="false" data-lpignore="true" data-1p-ignore data-bwignore :placeholder="$t('settings.aiKeyPh')" />
             </div>
             <div class="field">
               <label>{{ $t('settings.aiModel') }}</label>
@@ -1336,7 +1342,8 @@ onMounted(async () => { await load(); await loadServerInfo(); loadPlugins() })
             <div class="field col">
               <label>{{ $t('privacy.unlockPin') }}</label>
               <div class="hstack">
-                <input class="inp mono" v-model="pinInput" type="password" :placeholder="$t('privacy.pinSetPh')" style="max-width:280px" />
+                <input class="inp mono" v-model="pinInput" :type="showPin ? 'text' : 'password'" name="avm-code" autocomplete="new-password" autocapitalize="off" spellcheck="false" data-lpignore="true" data-1p-ignore data-bwignore :placeholder="$t('privacy.pinSetPh')" style="max-width:280px" />
+                <button class="btn tiny ghost" @click="showPin = !showPin">{{ showPin ? '🙈' : '👁' }}</button>
                 <button class="btn tiny" :disabled="savingPin" @click="savePin">{{ $t('privacy.pinSet') }}</button>
                 <button class="btn tiny ghost" :disabled="savingPin || !hasPin" @click="clearPin">{{ $t('privacy.pinClear') }}</button>
                 <span class="muted sm">{{ hasPin ? $t('privacy.pinHas') : $t('privacy.pinNone') }}</span>
@@ -1350,6 +1357,11 @@ onMounted(async () => { await load(); await loadServerInfo(); loadPlugins() })
               </label>
               <span>{{ $t('privacy.neutralTitle') }}</span>
               <span class="hint">{{ $t('privacy.neutralTitleHint') }}</span>
+            </div>
+            <div class="field col">
+              <label>{{ $t('privacy.siteSubtitle') }}</label>
+              <input class="inp" v-model="cfg.privacy.site_subtitle" :placeholder="$t('privacy.siteSubtitlePh')" style="max-width:320px" @input="scheduleSavePrivacy()" />
+              <span class="hint">{{ $t('privacy.siteSubtitleHint') }}</span>
             </div>
             <div class="field">
               <label class="toggle">
@@ -1528,7 +1540,7 @@ onMounted(async () => { await load(); await loadServerInfo(); loadPlugins() })
             <div class="field col">
               <label>{{ $t('settings.accessToken') }}</label>
               <div class="tok-row">
-                <input class="inp mono" v-model="tokInput" :type="showTok ? 'text' : 'password'" :placeholder="$t('settings.tokenPh')" @keyup.enter="saveToken" />
+                <input class="inp mono" v-model="tokInput" :type="showTok ? 'text' : 'password'" name="avm-code" autocomplete="new-password" autocapitalize="off" spellcheck="false" data-lpignore="true" data-1p-ignore data-bwignore :placeholder="$t('settings.tokenPh')" @keyup.enter="saveToken" />
                 <button class="btn tiny ghost" @click="showTok = !showTok">{{ showTok ? '🙈' : '👁' }}</button>
                 <button class="btn tiny ghost" @click="copyTok" :disabled="serverInfo.token_masked || !serverInfo.access_token">{{ $t('settings.copy') }}</button>
                 <button class="btn tiny" :disabled="savingTok || serverInfo.token_masked" @click="saveToken">{{ savingTok ? $t('settings.saving') : $t('settings.saveFeed') }}</button>

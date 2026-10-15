@@ -1807,9 +1807,31 @@ def export_csv() -> StreamingResponse:
 # ------------------------------------------------------------------ 配置/文件浏览
 
 
+def _require_local(request: Request) -> str:
+    """校验请求来自本机（127.0.0.1 / ::1），否则 403；返回客户端 IP。
+
+    用于「会交出长期令牌」的能力（完整令牌 / 含令牌的二维码）：远程即使已登录
+    也不给，否则拿走令牌即可绕过会话的过期、登出与踢设备。
+    """
+    from . import auth
+    server = load_config().get("server") or {}
+    ip = auth.client_ip(request.scope, server.get("trusted_proxies") or ["127.0.0.1", "::1"])
+    if not auth.is_local_ip(ip):
+        auth.audit("deny", ip, request.headers.get("user-agent", ""), "远程请求本机专属能力", ok=False)
+        raise HTTPException(403, "该操作会返回长期有效的访问令牌，仅限本机执行")
+    return ip
+
+
 @router.get("/config")
 def get_config() -> Dict[str, Any]:
-    return load_config(refresh=True)
+    cfg = load_config(refresh=True)
+    # 安全：privacy.pin_hash 是可离线爆破的凭据材料（4 位纯数字的 PBKDF2 哈希几分钟内
+    # 即可还原），任何情况下都不下发。前端只需知道「是否已设置」——
+    # 遮挡层读 /api/privacy/state 的 has_pin，设置页读 /api/auth/pin-status。
+    privacy = cfg.get("privacy")
+    if isinstance(privacy, dict) and privacy.get("pin_hash"):
+        privacy.pop("pin_hash", None)
+    return cfg
 
 
 @router.put("/config")
@@ -2042,12 +2064,16 @@ def check_update(channel: str = Query("stable")) -> Dict[str, Any]:
 
 
 @router.get("/server/qr")
-def server_qr(addr: str = "", size: int = 220) -> Response:
+def server_qr(request: Request, addr: str = "", size: int = 220) -> Response:
     """生成访问二维码（含 token 的局域网地址），返回 PNG。
 
     addr 可为空（默认取首个局域网地址）、主机名/IP，或完整 URL。
+
+    安全：二维码里带的是**长期有效**的访问令牌，因此仅本机可生成；
+    远程（含反代过来的请求）一律拒绝，避免会话的过期 / 登出 / 踢设备被令牌绕过。
     """
     from .config import ensure_access_token
+    _require_local(request)
     cfg = load_config(refresh=True)
     port = cfg.get("server", {}).get("port", 8770)
     tok = ensure_access_token()

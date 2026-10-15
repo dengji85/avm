@@ -310,6 +310,9 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "panic_key": "Ctrl+Shift+H",
         # 页面标题中性化：标题固定为品牌名，不显示影片信息
         "neutral_title": True,
+        # 浏览器标题的自定义后缀（混淆 / 防窥）：最终标题为「片匣 - <后缀>」，
+        # 留空则只显示品牌名。用于任务栏 / 标签页被旁人扫到时不起疑。
+        "site_subtitle": "",
         # 切换到其他标签页 / 最小化时自动暂停播放，避免声音外泄
         "pause_when_hidden": True,
         # 启动即遮挡：打开页面先显示遮挡层，需手动解锁

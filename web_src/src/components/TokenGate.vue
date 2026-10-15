@@ -51,6 +51,13 @@ defineExpose({ open })
         <input
           :type="showToken ? 'text' : 'password'"
           v-model="token"
+          name="avm-code"
+          autocomplete="new-password"
+          autocapitalize="off"
+          spellcheck="false"
+          data-lpignore="true"
+          data-1p-ignore
+          data-bwignore
           :placeholder="t('common.token.placeholder')"
           @keyup.enter="submit"
           autofocus

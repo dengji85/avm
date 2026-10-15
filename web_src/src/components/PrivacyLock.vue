@@ -35,6 +35,7 @@ const locked = ref(false)          // 服务端锁定的本地镜像
 const reason = ref('idle')         // idle / panic / start / server
 const unlockMode = ref('token')    // click / pin / token（按服务端状态计算，pin 未设置时回退 token）
 const secret = ref('')
+const showSecret = ref(false) // 解锁输入框的明文 / 密文切换
 const err = ref('')
 const busy = ref(false)
 
@@ -54,9 +55,35 @@ function videoPlaying() {
   return false
 }
 
-function pauseAll() {
+/* 被锁定暂停的播放记录：解锁后原样恢复，保留播放器与播放进度 */
+let pausedByLock = []
+
+/* 全局锁定标志：锁定时媒体流会被服务端 423 拒绝，播放器据此忽略
+   "加载失败"事件，避免误触发降级（转封装 / 系统播放器） */
+function markLocked(on) {
+  try { window.__avmLocked = !!on } catch (e) { /* 忽略 */ }
+}
+
+function pauseAll(record = false) {
   document.querySelectorAll('video').forEach((v) => {
+    if (v.paused) return
     try { v.pause() } catch (e) { /* 忽略 */ }
+    if (record) {
+      pausedByLock.push({ el: v, muted: v.muted })
+      v.muted = true // 兜底：防止锁定瞬间还有声音漏出
+    }
+  })
+}
+
+/** 解锁后恢复被锁定时暂停的播放（不整页刷新，播放位置与播放器状态都保留） */
+function resumePlayback() {
+  const list = pausedByLock
+  pausedByLock = []
+  list.forEach(({ el, muted }) => {
+    try {
+      el.muted = muted
+      el.play().catch(() => { /* 用户可能已手动暂停，忽略 */ })
+    } catch (e) { /* 忽略 */ }
   })
 }
 
@@ -69,9 +96,21 @@ function applyState(st) {
   if (st.locked && !locked.value) {
     locked.value = true
     reason.value = st.reason || 'idle'
-    pauseAll()
+    markLocked(true)
+    pauseAll(true)
   } else if (!st.locked) {
-    locked.value = false
+    if (locked.value) {
+      markLocked(false)
+      locked.value = false
+      // 其它标签页 / 其它设备解锁时，本页同步解除遮挡：把锁定期间被暂停、静音的视频
+      // 恢复回来，并刷新视图（锁定期间内容接口返回 423，视图数据是空的）。
+      // 原先只置 locked=false，会出现「遮挡层没了，但播放器一直停着」的状态。
+      secret.value = ''
+      resumePlayback()
+      window.dispatchEvent(new CustomEvent('avm-refresh'))
+    } else {
+      locked.value = false
+    }
   }
 }
 
@@ -85,8 +124,10 @@ async function lockNow(why) {
   reason.value = why
   locked.value = true      // 先本地遮挡（即时反馈），再落服务端状态
   secret.value = ''
+  showSecret.value = false // 每次遮挡都回到密文，避免明文残留在屏幕上
   err.value = ''
-  pauseAll()
+  pauseAll(true)   // 记录播放状态，解锁后恢复
+  markLocked(true) // 让播放器忽略 423 触发的加载失败，避免误触发降级
   try { await privacyLock(why) } catch (e) { /* 离线时至少已本地遮挡 */ }
 }
 
@@ -95,11 +136,13 @@ async function doUnlock(credential) {
   await privacyUnlock(credential)
   locked.value = false
   secret.value = ''
-  // 记住"本次浏览器会话已解锁"：否则开了「启动即遮挡」时，
-  // 解锁后的整页刷新会立刻再次遮挡，导致永远进不去设置页。
+  // 记住"本次浏览器会话已解锁"：否则开了「启动即遮挡」时，刷新后会立刻再次遮挡
   try { sessionStorage.setItem(UNLOCKED_KEY, '1') } catch (e) { /* 忽略 */ }
-  // 锁定期间内容接口都被 423 拒绝，解锁后整页刷新以重新加载数据
-  window.location.reload()
+  // 不整页刷新：保留播放器、播放进度与播放队列，只恢复播放，
+  // 并广播刷新让视图重新拉取数据（锁定期间内容接口返回 423）。
+  markLocked(false)
+  resumePlayback()
+  window.dispatchEvent(new CustomEvent('avm-refresh'))
 }
 
 async function tryUnlock() {
@@ -172,7 +215,8 @@ async function loadCfg() {
     const c = await getConfig()
     cfg.value = Object.assign({ ...DEFAULT_CFG }, (c && c.privacy) || {})
     hotkey = parseHotkey(cfg.value.panic_key)
-    if (cfg.value.neutral_title) document.title = t('nav.brand')
+    // 注意：标题由 App.vue 统一设置（品牌名 + privacy.site_subtitle 后缀），
+    // 这里不要覆盖，否则会把用户自定义的混淆后缀冲掉。
   } catch (e) { /* 锁定或离线时沿用默认值（不影响解锁） */ }
 }
 
@@ -201,7 +245,8 @@ onMounted(async () => {
 
 function pausedSync() {
   locked.value = true
-  pauseAll()
+  markLocked(true)
+  pauseAll(true)
 }
 
 onBeforeUnmount(() => {
@@ -228,14 +273,30 @@ onBeforeUnmount(() => {
 
       <template v-else>
         <div class="pv-unlock">
-          <input
-            v-model="secret"
-            type="password"
-            :placeholder="unlockMode === 'pin' ? $t('privacy.pinPh') : $t('privacy.unlockPh')"
-            @keyup.enter="tryUnlock"
-            autofocus
-          />
-          <button class="btn primary" :disabled="busy" @click="tryUnlock">{{ $t('privacy.unlockBtn') }}</button>
+          <div class="pv-input">
+            <input
+              v-model="secret"
+              :type="showSecret ? 'text' : 'password'"
+              name="avm-code"
+              autocomplete="new-password"
+              autocapitalize="off"
+              spellcheck="false"
+              data-lpignore="true"
+              data-1p-ignore
+              data-bwignore
+              :placeholder="unlockMode === 'pin' ? $t('privacy.pinPh') : $t('privacy.unlockPh')"
+              @keyup.enter="tryUnlock"
+              autofocus
+            />
+            <button
+              type="button"
+              class="pv-eye"
+              :title="$t(showSecret ? 'privacy.hideSecret' : 'privacy.showSecret')"
+              :aria-label="$t(showSecret ? 'privacy.hideSecret' : 'privacy.showSecret')"
+              @click="showSecret = !showSecret"
+            >{{ showSecret ? '🙈' : '👁' }}</button>
+          </div>
+          <button class="btn primary large block" :disabled="busy" @click="tryUnlock">{{ $t('privacy.unlockBtn') }}</button>
         </div>
         <p v-if="err" class="pv-err">{{ err }}</p>
         <p class="pv-hint">{{ unlockMode === 'pin' ? $t('privacy.pinHint') : $t('privacy.unlockHint') }}</p>
@@ -256,16 +317,31 @@ onBeforeUnmount(() => {
 }
 @keyframes pv-in { from { opacity: 0; } to { opacity: 1; } }
 .pv-box {
-  width: min(420px, 88vw); text-align: center; padding: 28px 24px;
+  width: min(420px, 88vw); text-align: center; padding: 30px 26px 24px;
   background: var(--c-surface, #16181d);
   border: 1px solid var(--c-line, rgba(255,255,255,.12));
   border-radius: 16px; box-shadow: 0 20px 60px rgba(0,0,0,.5);
 }
-.pv-icon { font-size: 30px; }
-.pv-title { font-size: var(--fs-lg, 17px); font-weight: 700; margin: 8px 0 4px; }
-.pv-desc { color: var(--c-text-2, #9aa3af); font-size: var(--fs-sm, 13px); margin: 0 0 14px; }
-.pv-unlock { display: flex; gap: 8px; }
-.pv-unlock input { flex: 1; }
-.pv-err { color: var(--c-danger, #e5484d); font-size: var(--fs-sm, 13px); margin: 8px 0 0; }
-.pv-hint { color: var(--c-text-3, #6b7280); font-size: 12px; margin: 10px 0 0; }
+.pv-icon { font-size: 32px; line-height: 1; }
+.pv-title { font-size: var(--fs-lg, 17px); font-weight: 700; margin: 10px 0 6px; }
+.pv-desc { color: var(--c-text-2, #9aa3af); font-size: var(--fs-sm, 13px); line-height: 1.65; margin: 0 0 18px; }
+
+/* 解锁区：控件一律整行、同高（40px），保证与弹窗中线对齐。
+   原先「输入框 + 小眼睛 + 按钮」挤在一行，其中小眼睛按钮只有 26px 高，
+   三个元素高度不一，整行看上去是歪的。 */
+.pv-unlock { display: flex; flex-direction: column; gap: 10px; }
+.pv-input { position: relative; }
+.pv-input input { height: 40px; padding-right: 44px; font-size: var(--fs-md, 14px); }
+.pv-eye {
+  position: absolute; top: 50%; right: 5px; transform: translateY(-50%);
+  width: 30px; height: 30px;
+  display: inline-flex; align-items: center; justify-content: center;
+  padding: 0; border: 0; border-radius: var(--r-sm, 6px);
+  background: transparent; color: var(--c-text-3, #6b7280);
+  font-size: 15px; line-height: 1; cursor: pointer;
+  transition: background var(--t-fast, .15s), color var(--t-fast, .15s);
+}
+.pv-eye:hover { background: var(--c-surface-2, rgba(255,255,255,.06)); color: var(--c-text, #e6e8ee); }
+.pv-err { color: var(--c-danger, #e5484d); font-size: var(--fs-sm, 13px); margin: 10px 0 0; }
+.pv-hint { color: var(--c-text-3, #6b7280); font-size: 12px; line-height: 1.7; margin: 12px 0 0; }
 </style>

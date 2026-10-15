@@ -137,6 +137,20 @@ def _save_persisted() -> None:
         pass
 
 
+def session_cookie(sid: str, https: bool, idle_days: int) -> str:
+    """构造会话 Cookie 的 Set-Cookie 值。
+
+    HttpOnly（JS 读不到，防 XSS 窃取）+ SameSite=Lax（拦跨站 POST 形式的 CSRF）；
+    HTTPS 下追加 Secure。登录与「URL 令牌换会话」共用，避免两处写法不一致。
+    """
+    parts = ["%s=%s" % (SESSION_COOKIE, sid), "Path=/", "HttpOnly", "SameSite=Lax"]
+    if idle_days > 0:
+        parts.append("Max-Age=%d" % (idle_days * 86400))
+    if https:
+        parts.append("Secure")
+    return "; ".join(parts)
+
+
 def new_session(ip: str, ua: str, idle_days: int, abs_days: int) -> Tuple[str, Dict[str, Any]]:
     sid = secrets.token_urlsafe(32)
     now = time.time()

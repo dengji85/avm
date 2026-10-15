@@ -2,7 +2,7 @@
 import { onMounted, onBeforeUnmount, watch, ref, computed } from 'vue'
 import { state, applyTheme } from './state.js'
 import { getFacets, getConfig, getServerInfo, getSession, onNoToken, serverOffline } from './api.js'
-import { toast } from './utils.js'
+import { toast, setSiteTitle } from './utils.js'
 import { useTasks } from './composables/useTasks.js'
 
 import TopNav from './components/TopNav.vue'
@@ -64,7 +64,18 @@ async function loadConfig() {
     // 首次启动引导：config.server.setup_done 未置真则弹出引导遮罩
     const done = !!(state.config && state.config.server && state.config.server.setup_done)
     state.onboarded = done
+    applyTitleFromConfig()
   } catch (e) { /* 非致命 */ }
+}
+
+/* 浏览器标题 = 品牌名 + 自定义后缀（混淆用，见 docs/安全与隐私设计.md 的 L4） */
+function applyTitleFromConfig() {
+  setSiteTitle(state.config && state.config.privacy && state.config.privacy.site_subtitle)
+}
+
+/* 设置页改动隐私配置后：重新拉配置并刷新标题（遮挡层也监听同一事件） */
+async function onPrivacyChanged() {
+  await loadConfig()
 }
 
 /* 运行环境能力：容器 / NAS 下隐藏「用系统播放器」「在文件夹中显示」等无效入口 */
@@ -107,11 +118,13 @@ onMounted(async () => {
   checkSession()
   tasks.start()
   window.addEventListener('avm-refresh', onGlobalRefresh)
+  window.addEventListener('avm-privacy-changed', onPrivacyChanged)
 })
 
 onBeforeUnmount(() => {
   tasks.stop()
   window.removeEventListener('avm-refresh', onGlobalRefresh)
+  window.removeEventListener('avm-privacy-changed', onPrivacyChanged)
 })
 
 /* 让子视图能触发分面刷新 */

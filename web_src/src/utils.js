@@ -137,6 +137,19 @@ export function resolveConfirm(v) {
 }
 
 /* ---------------- 其他 ---------------- */
+
+/**
+ * 设置浏览器标题为「品牌名 - 自定义后缀」。
+ *
+ * 后缀来自 privacy.site_subtitle，用于混淆：任务栏 / 标签页被旁人扫到时不起疑，
+ * 是「紧急遮挡」之外的第二道隐私保护（见 docs/安全与隐私设计.md 的 L4）。
+ */
+export function setSiteTitle(subtitle) {
+  const brand = t('nav.brand')
+  const sub = String(subtitle == null ? '' : subtitle).trim()
+  document.title = sub ? `${brand} - ${sub}` : brand
+}
+
 export function debounce(fn, ms = 260) {
   let t = null
   return (...args) => {

@@ -123,6 +123,9 @@ const prepareMsg = ref('')
  * 重封装只复制视频流、不重新编码，耗时受磁盘 IO 限制，弱 CPU 的 NAS 也能胜任。
  */
 async function onError() {
+  // 隐私锁定期间媒体流会被 423 拒绝，属预期行为：忽略错误，
+  // 解锁后会恢复播放（见 PrivacyLock 的 resumePlayback），避免误触发降级。
+  if (window.__avmLocked) return
   failed.value = true
   if (remuxTried) { fallbackExternal(); return }
   try {

@@ -11,7 +11,7 @@ from typing import Any, Dict
 from fastapi import APIRouter, HTTPException, Request, Response
 
 from . import auth
-from .config import ensure_access_token, load_config, mask_token, update_config
+from .config import ensure_access_token, load_config, update_config
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 # 隐私锁定接口单独一组：锁定期间中间件只放行 /api/privacy/ 与 /api/auth/
@@ -56,12 +56,7 @@ def _idle_abs(server: Dict[str, Any]) -> tuple:
 
 def _set_session_cookie(response: Response, sid: str, https: bool, idle_days: int) -> None:
     """写入 HttpOnly 会话 Cookie，并顺手清掉旧版前端写入的长期令牌 Cookie。"""
-    parts = ["%s=%s" % (auth.SESSION_COOKIE, sid), "Path=/", "HttpOnly", "SameSite=Lax"]
-    if idle_days > 0:
-        parts.append("Max-Age=%d" % (idle_days * 86400))
-    if https:
-        parts.append("Secure")
-    response.headers.append("Set-Cookie", "; ".join(parts))
+    response.headers.append("Set-Cookie", auth.session_cookie(sid, https, idle_days))
     # avm_token 是旧版本由前端 JS 写入、有效期长达一年的令牌，安全性差，升级后清除
     response.headers.append(
         "Set-Cookie",
@@ -174,7 +169,6 @@ def session_info(request: Request) -> Dict[str, Any]:
         "sessions": len(auth.list_sessions()),
         "expires_at": (float(info.get("last") or 0) + idle * 86400) if (info and idle) else 0,
         "abs_expires_at": (float(info.get("created") or 0) + absd * 86400) if (info and absd) else 0,
-        "token_masked": mask_token(server.get("access_token") or ""),
     }
 
 
@@ -328,12 +322,20 @@ def privacy_unlock(payload: Dict[str, Any], request: Request) -> Dict[str, Any]:
 
     if mode == "pin":
         stored = (privacy.get("pin_hash") or "").strip()
-        if not stored:
-            raise HTTPException(400, "尚未设置简单密码")
-        if not auth.verify_pin(credential, stored):
-            n = _record_fail(ip)
-            auth.audit("unlock", ip, ua, "简单密码错误（第 %d 次）" % n, ok=False)
-            raise HTTPException(401, "简单密码不正确")
+        # 逃生通道：忘记简单密码时，可用「访问令牌」解锁。
+        #   令牌本身就是登录凭据（强度高于 4 位简单密码），用它兜底不会降低安全性；
+        #   而没有这条通道，用户忘密码后会连设置页都打不开（锁定期间中间件拒绝所有接口），
+        #   只能手动去改 data/config.json。解锁后可进设置重置简单密码。
+        expected = (server.get("access_token") or "").strip()
+        if expected and credential == expected:
+            auth.audit("unlock", ip, ua, "已用访问令牌兜底解锁（简单密码模式）", ok=True)
+        else:
+            if not stored:
+                raise HTTPException(400, "尚未设置简单密码")
+            if not auth.verify_pin(credential, stored):
+                n = _record_fail(ip)
+                auth.audit("unlock", ip, ua, "简单密码错误（第 %d 次）" % n, ok=False)
+                raise HTTPException(401, "简单密码不正确")
     elif mode == "token":
         expected = (server.get("access_token") or "").strip()
         if not expected or credential != expected:
