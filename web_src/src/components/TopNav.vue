@@ -2,7 +2,7 @@
 import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
 import { state, NAV_TABS, NAV_MORE, NAV_ICONS } from '../state.js'
 import { useTasks, pct, etaSec, phaseLabel, fmtDur, fetchScrapeLogs } from '../composables/useTasks.js'
-import { aiStatus, aiSearchIntent } from '../api.js'
+import { aiStatus, aiSearchIntent, getSession, logout } from '../api.js'
 import { toast, fmtAgo } from '../utils.js'
 import { t } from '../i18n/index.js'
 import NavMenu from './NavMenu.vue'
@@ -87,7 +87,24 @@ function onKey(e) {
     searchEl.value.blur()
   }
 }
-onMounted(() => { window.addEventListener('keydown', onKey); refreshAi() })
+/* 会话状态：仅远程已登录的设备显示「退出登录」（本机免验证时无需退出） */
+const sessionInfo = ref(null)
+const canLogout = computed(() => !!(sessionInfo.value && sessionInfo.value.via === 'session'))
+async function refreshSession() {
+  try { sessionInfo.value = await getSession() } catch (e) { sessionInfo.value = null }
+}
+async function doLogout() {
+  try { await logout() } catch (e) { /* 幂等：失败也继续清本地状态 */ }
+  sessionInfo.value = null
+  toast(t('nav.loggedOut'), 'ok')
+  setTimeout(() => window.location.reload(), 300)
+}
+
+onMounted(() => {
+  window.addEventListener('keydown', onKey)
+  refreshAi()
+  refreshSession()
+})
 onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
 
 function toggleTheme() { state.theme = state.theme === 'dark' ? 'light' : 'dark' }
@@ -393,6 +410,7 @@ async function setScrapeFilter(taskId, f) {
         </div>
       </div>
 
+      <button v-if="canLogout" class="btn ghost icon" @click="doLogout" :data-tip="$t('nav.logout')">⎋</button>
       <button class="btn ghost icon" @click="toggleTheme" :data-tip="state.theme === 'dark' ? $t('nav.themeLight') : $t('nav.themeDark')">{{ themeIcon }}</button>
       <button class="btn ghost icon" :class="{ active: state.view === 'settings' }" @click="state.view = 'settings'" :data-tip="$t('nav.settings')">⚙</button>
     </div>

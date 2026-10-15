@@ -1,6 +1,6 @@
 <script setup>
-import { ref, onMounted } from 'vue'
-import { getToken, setToken } from '../api.js'
+import { ref } from 'vue'
+import { login } from '../api.js'
 import { useI18n } from '../i18n/index.js'
 import { toast } from '../utils.js'
 
@@ -8,22 +8,32 @@ const { t } = useI18n()
 const visible = ref(false)
 const token = ref('')
 const showToken = ref(false)
+const busy = ref(false)
+const err = ref('')
 
-onMounted(() => {
-  token.value = getToken()
-})
-
-function open() { visible.value = true }
+function open() { err.value = ''; visible.value = true }
 function close() { visible.value = false }
-function submit() {
+
+async function submit() {
   const v = token.value.trim()
-  setToken(v)
-  close()
-  toast(v ? t('token.saved') : t('token.cleared'))
-  // 页面里已经加载过的 <img>/<video> 用的是「无令牌」的旧请求，失败后浏览器不会
-  // 自动重试；只派发 avm-refresh 也未必重新拉图。整页刷新一次最可靠，
-  // 保证封面、头像、播放等资源立刻带上新 Cookie 重新请求。
-  setTimeout(() => window.location.reload(), 400)
+  if (!v) { err.value = t('common.token.failed'); return }
+  busy.value = true
+  err.value = ''
+  try {
+    // 令牌只交给后端换取会话（HttpOnly Cookie），浏览器不再保存令牌本身
+    await login(v)
+    token.value = ''
+    close()
+    toast(t('common.token.saved'))
+    // 页面里已经加载过的 <img>/<video> 用的是未认证的旧请求，失败后浏览器不会
+    // 自动重试；整页刷新一次，确保封面、头像与播放立刻带上会话 Cookie。
+    setTimeout(() => window.location.reload(), 300)
+  } catch (e) {
+    err.value = e.message || t('common.token.failed')
+    toast(err.value, 'err')
+  } finally {
+    busy.value = false
+  }
 }
 
 defineExpose({ open })
@@ -34,22 +44,23 @@ defineExpose({ open })
     <div class="modal card token-gate">
       <div class="tg-head">
         <span class="icon">🔑</span>
-        <h3>{{ t('token.title') }}</h3>
+        <h3>{{ t('common.token.title') }}</h3>
       </div>
-      <p class="tg-desc">{{ t('token.desc') }}</p>
+      <p class="tg-desc">{{ t('common.token.desc') }}</p>
       <div class="tg-input">
         <input
           :type="showToken ? 'text' : 'password'"
           v-model="token"
-          :placeholder="t('token.placeholder')"
+          :placeholder="t('common.token.placeholder')"
           @keyup.enter="submit"
           autofocus
         />
         <button class="btn ghost tiny" @click="showToken = !showToken">{{ showToken ? '🙈' : '👁' }}</button>
       </div>
+      <p v-if="err" class="tg-err">{{ err }}</p>
       <div class="tg-actions">
         <button class="btn ghost" @click="close">{{ t('common.cancel') }}</button>
-        <button class="btn primary" @click="submit">{{ t('token.enter') }}</button>
+        <button class="btn primary" :disabled="busy" @click="submit">{{ busy ? t('common.token.signingIn') : t('common.token.enter') }}</button>
       </div>
     </div>
   </div>
@@ -63,6 +74,7 @@ defineExpose({ open })
 .tg-desc { color: var(--c-text-2); font-size: var(--fs-sm); margin: var(--sp-2) 0 var(--sp-3); line-height: 1.5; }
 .tg-input { display: flex; gap: var(--sp-2); }
 .tg-input input { flex: 1; }
+.tg-err { color: var(--c-danger, #e5484d); font-size: var(--fs-sm); margin: var(--sp-2) 0 0; }
 .tg-actions { display: flex; justify-content: flex-end; gap: var(--sp-2); margin-top: var(--sp-4); }
 @media (max-width: 480px) {
   .tg-actions { flex-wrap: wrap; }

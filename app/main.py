@@ -10,49 +10,62 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import __version__
+from . import __version__, auth
 from .api import router
-from .config import WEB_DIR, ensure_dirs, DATA_DIR, CONFIG_PATH, load_config, ensure_access_token
+from .api_auth import privacy_router, router as auth_router
+from .config import (WEB_DIR, ensure_dirs, DATA_DIR, CONFIG_PATH, TOKEN_FILE,
+                     load_config, ensure_access_token, mask_token)
 from .db import init_db
 
 app = FastAPI(title="片匣 · 本地 AV 收藏管理", version=__version__, docs_url="/api/docs")
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# 跨源白名单：默认空 = 不启用 CORS（前后端同源部署本不需要 CORS）。
+# 如需跨源访问，在 server.cors_origins 里显式列出；改动需重启生效。
+_cors_origins = [str(o) for o in ((load_config().get("server") or {}).get("cors_origins") or []) if o]
+if _cors_origins:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=_cors_origins,
+        allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH"],
+        allow_headers=["Content-Type", "X-Access-Token", "X-Requested-With"],
+    )
 
 _LOCAL_ADDRS = {"127.0.0.1", "::1", "localhost", "testclient"}
 
-# 路由判断：这些路径无需令牌即可访问（静态资源、首页、健康检查、接口文档）
-_PUBLIC_PREFIXES = ("/assets", "/api/health", "/api/docs", "/api/openapi.json")
+# 无需登录即可访问的路径：静态资源、首页、健康检查、登录与会话状态查询。
+# 注意：/api/docs 与 /api/openapi.json 不再默认公开（见 server.expose_docs）。
+_PUBLIC_PREFIXES = (
+    "/assets", "/icons", "/favicon", "/logo",
+    "/api/health",
+    "/api/auth/login", "/api/auth/logout", "/api/auth/session",
+)
 
-
-def _is_local(scope: Scope) -> bool:
-    host = (scope.get("client") or ("", 0))[0] or ""
-    return host in _LOCAL_ADDRS
+# 隐私锁定期间仍可访问的路径（否则页面与解锁接口本身会被自己挡住）
+_LOCK_ALLOWED = ("/api/privacy/", "/api/auth/")
 
 
 def _cookie_token(raw: str) -> str:
-    """从 Cookie 头里取出 avm_token（前端登录后写入，供浏览器自主请求使用）。"""
+    """从 Cookie 头里取出旧版前端写入的 avm_token（升级后由前端清除）。"""
     from urllib.parse import unquote
     for part in (raw or "").split(";"):
         key, _, val = part.strip().partition("=")
-        if key == "avm_token":
+        if key == auth.COOKIE_TOKEN:
             return unquote(val)
     return ""
 
 
 def _token_valid(scope: Scope, cfg_token: str) -> bool:
+    """校验「访问令牌」通道（兼容脚本、旧客户端与二维码链接）。
+
+    支持 X-Access-Token 头、?token= 查询、旧版 avm_token Cookie。
+    令牌为空时不放行——是否关闭访问保护由 server.require_token_remote 决定，
+    避免「配置里没有令牌」意外变成完全开放。
+    """
     if not cfg_token:
-        return True  # 未启用令牌，等同于关闭保护
-    headers = scope.get("headers") or []
-    hmap = {k.decode("latin-1").lower(): v.decode("latin-1") for k, v in headers}
+        return False
+    hmap = auth.http_headers(scope)
     provided = hmap.get("x-access-token")
     if not provided:
-        # 兼容 ?token=xxx
         from urllib.parse import unquote
         qs = scope.get("query_string", b"").decode("latin-1")
         for pair in qs.split("&"):
@@ -60,36 +73,109 @@ def _token_valid(scope: Scope, cfg_token: str) -> bool:
                 provided = unquote(pair.split("=", 1)[1])
                 break
     if not provided:
-        # 兼容 Cookie：<img> / <video> / <a download> 等由浏览器自主发起的请求
-        # 无法携带自定义请求头（X-Access-Token），只能靠 Cookie 通过校验。
-        # 否则远程访问下会出现「设置页能保存、封面与播放却 401」。
+        # <img> / <video> / <a download> 等浏览器自主发起的请求无法携带自定义头，
+        # 登录后的 HttpOnly 会话 Cookie 已覆盖该场景，这里仅兼容历史 Cookie。
         provided = _cookie_token(hmap.get("cookie") or "")
-    return provided == cfg_token
+    return bool(provided) and provided == cfg_token
+
+
+def _session_limits(server) -> tuple:
+    try:
+        idle = int(server.get("session_idle_days", 7) or 0)
+    except (TypeError, ValueError):
+        idle = 7
+    try:
+        absd = int(server.get("session_abs_days", 30) or 0)
+    except (TypeError, ValueError):
+        absd = 30
+    return max(0, idle), max(0, absd)
 
 
 class AccessTokenMiddleware(BaseHTTPMiddleware):
-    """远程访问强制带访问令牌；本机 127.0.0.1 与公开资源豁免。"""
+    """访问控制：会话 Cookie → 访问令牌 → 本机豁免（可配）。
+
+    真实客户端 IP 由 server.trusted_proxies 解析，避免「同机反向代理」被
+    误判为本机而整体放行；详见 docs/安全与隐私设计.md。
+    """
 
     async def dispatch(self, request: Request, call_next):
         path = request.url.path
-        if path.startswith(_PUBLIC_PREFIXES) or path == "/" or path == "/index.html":
+        server = load_config().get("server") or {}
+        if (path.startswith(_PUBLIC_PREFIXES) or path == "/" or path == "/index.html"
+                or (bool(server.get("expose_docs"))
+                    and path.startswith(("/api/docs", "/api/openapi.json")))):
             return await call_next(request)
-        cfg = load_config()
-        if not cfg.get("server", {}).get("require_token_remote", True):
+        if not server.get("require_token_remote", True):
             return await call_next(request)
-        if _is_local(request.scope):
-            return await call_next(request)
-        tok = (cfg.get("server", {}).get("access_token") or "").strip()
-        if _token_valid(request.scope, tok):
-            return await call_next(request)
-        return JSONResponse(
-            status_code=401,
-            content={"detail": "需要访问令牌", "code": "NO_TOKEN"},
-        )
+
+        ip = auth.client_ip(request.scope, server.get("trusted_proxies") or ["127.0.0.1", "::1"])
+        request.scope["avm_client_ip"] = ip
+
+        allowed = False
+        # 1) 会话 Cookie（登录后签发；默认仅内存，server.session_persist 可落盘）
+        sid = auth.cookie_value(request.scope, auth.SESSION_COOKIE)
+        if sid:
+            idle, absd = _session_limits(server)
+            if auth.touch_session(sid, idle, absd):
+                allowed = True
+        # 2) 访问令牌（兼容脚本 / 旧客户端）
+        if not allowed and _token_valid(request.scope, (server.get("access_token") or "").strip()):
+            allowed = True
+        # 3) 本机豁免（容器内默认关闭：端口映射与同机反代无法区分「真本机」）
+        if not allowed and bool(server.get("local_bypass", True)) and auth.is_local_ip(ip):
+            allowed = True
+
+        if not allowed:
+            auth.audit("deny", ip, request.headers.get("user-agent", ""), path, ok=False)
+            return JSONResponse(
+                status_code=401,
+                content={"detail": "需要访问令牌", "code": "NO_TOKEN"},
+            )
+
+        # 4) 隐私锁定（状态在服务端）：除解锁相关接口外一律拒绝。
+        #    锁定状态不存前端，所以刷新页面 / 重开标签页 / 直接调接口都拿不到内容。
+        if auth.privacy_locked() and not path.startswith(_LOCK_ALLOWED):
+            return JSONResponse(
+                status_code=423,
+                content={"detail": "内容已锁定", "code": "LOCKED"},
+            )
+
+        return await call_next(request)
+
+
+# 前端为本地打包资源，无第三方 CDN：CSP 收紧脚本来源，图片额外允许 https（远程封面）
+_CSP = (
+    "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+    "img-src 'self' data: blob: https:; media-src 'self' blob:; connect-src 'self'; "
+    "frame-ancestors 'self'; object-src 'none'; base-uri 'self'"
+)
+
+
+class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    """安全响应头（可用 server.security_headers 关闭）。"""
+
+    async def dispatch(self, request: Request, call_next):
+        resp = await call_next(request)
+        if not bool((load_config().get("server") or {}).get("security_headers", True)):
+            return resp
+        h = resp.headers
+        h.setdefault("X-Content-Type-Options", "nosniff")
+        h.setdefault("X-Frame-Options", "SAMEORIGIN")
+        h.setdefault("Referrer-Policy", "no-referrer")
+        h.setdefault("Permissions-Policy", "geolocation=(), microphone=(), camera=()")
+        h.setdefault("Content-Security-Policy", _CSP)
+        if auth.is_https(request.scope):
+            h.setdefault("Strict-Transport-Security", "max-age=31536000")
+        return resp
 
 
 app.add_middleware(AccessTokenMiddleware)
+# 后添加者位于外层：安全响应头包裹访问控制，401 响应同样带上安全头
+app.add_middleware(SecurityHeadersMiddleware)
+
 app.include_router(router)
+app.include_router(auth_router)
+app.include_router(privacy_router)
 
 
 def _backup_database() -> None:
@@ -145,13 +231,22 @@ def _startup() -> None:
     _record_version()
     tok = ensure_access_token()
     cfg = load_config()
-    host = cfg.get("server", {}).get("host", "127.0.0.1")
+    server = cfg.get("server") or {}
+    # 会话持久化：开启时恢复上次落盘的会话（默认关闭 → 容器重启即全部失效）
+    auth.set_persist(bool(server.get("session_persist")))
+    restored = auth.load_persisted()
+    host = server.get("host", "127.0.0.1")
     if host in ("0.0.0.0", ""):
-        print("=" * 48)
-        print("远程访问已开启，局域网设备需携带访问令牌：")
-        print("  " + tok)
-        print("前端设置页可查看/重置令牌；本机 127.0.0.1 访问免令牌。")
-        print("=" * 48)
+        local_bypass = bool(server.get("local_bypass", True))
+        print("=" * 60)
+        print("远程访问已开启。访问令牌（完整值见文件，日志只打印掩码）：")
+        print("  掩码：%s" % mask_token(tok))
+        print("  文件：%s" % TOKEN_FILE)
+        print("  也可用环境变量 AVM_ACCESS_TOKEN 预设；登录后可在设置页退出登录 / 管理会话。")
+        print("  本机免令牌：%s（server.local_bypass）" % ("是" if local_bypass else "否"))
+        if restored:
+            print("  已恢复 %d 个持久会话（server.session_persist=true）" % restored)
+        print("=" * 60)
     _start_auto_scan()
 
 
@@ -206,7 +301,16 @@ def _start_auto_scan() -> None:
 
 @app.exception_handler(Exception)
 async def _unhandled(request, exc):  # pragma: no cover
-    return JSONResponse({"detail": f"服务内部错误：{exc}"}, status_code=500)
+    """未捕获异常：对外只返回 request_id，细节写服务端日志（不回显内部信息）。"""
+    rid = "%08x" % int(time.time() * 1000)
+    try:
+        import sys
+        import traceback
+        print("[error %s] %s\n%s" % (rid, request.url.path, traceback.format_exc()),
+              file=sys.stderr)
+    except Exception:
+        pass
+    return JSONResponse({"detail": "服务内部错误", "request_id": rid}, status_code=500)
 
 
 @app.get("/")

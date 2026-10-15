@@ -156,13 +156,13 @@ docker compose pull && docker compose up -d
 
 > 說明：`latest` 只在發佈新版本時更新，**不會被 `main` 的建置覆蓋**；想提前拿到修正請拉 `main`。
 
-* **首次存取需要權杖**：`docker compose logs avm | grep "远程访问令牌"`，或以環境變數 `AVM_ACCESS_TOKEN` 預設。
+* **首次存取需要登入**：權杖寫在容器內 `data/access_token.txt`（`docker compose exec avm cat /data/access_token.txt`），或以環境變數 `AVM_ACCESS_TOKEN` 預設；在頁面貼上權杖即可登入，登入後可在「設定 → 存取」登出 / 管理工作階段。
 * 媒體庫在「設定 → 媒體庫」填**容器內路徑**（如 `/media`）。
 * 資料（設定 / 資料庫 / 封面 / 頭像 / 預覽）全在 `/data` 卷，升級只需換映像。
 * 映像預設內建 `ffmpeg` 與 `chromium`；自建時可用 `--build-arg INSTALL_CHROMIUM=0` 精簡。
 * 容器內無桌面環境，「用系統播放器 / 在資料夾中顯示」會自動隱藏，刪除預設為「僅移出媒體庫」。
 
-> 完整說明（NAS 各平台、環境變數、反向代理、升級、FAQ）見 **[docs/Docker部署.md](docs/Docker部署.md)**。
+> 完整說明（NAS 各平台、環境變數、反向代理、升級、FAQ）見 **[docs/Docker部署.md](docs/Docker部署.md)**；反代部署下的鑑權與會話安全必讀 **[docs/安全与隐私设计.md](docs/安全与隐私设计.md)**。
 
 ---
 
@@ -242,4 +242,4 @@ MIT —— 僅供個人學習與管理自用收藏。
 
 ---
 
-完整使用說明見 **[`docs/使用手册.md`](docs/使用手册.md)**，開發文件見 **[`docs/开发文档.md`](docs/开发文档.md)**，升級遷移見 **[`docs/升级指南.md`](docs/升级指南.md)**，更新歷史見 **[`CHANGELOG.md`](CHANGELOG.md)**。
+完整使用說明見 **[`docs/使用手册.md`](docs/使用手册.md)**，開發文件見 **[`docs/开发文档.md`](docs/开发文档.md)**，升級遷移見 **[`docs/升级指南.md`](docs/升级指南.md)**，安全與隱私（反代鑑權、會話、防窺）見 **[`docs/安全与隐私设计.md`](docs/安全与隐私设计.md)**，更新歷史見 **[`CHANGELOG.md`](CHANGELOG.md)**。

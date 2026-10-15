@@ -26,8 +26,8 @@ mkdir -p ./data
 docker compose pull
 docker compose up -d
 
-# 4) 查看日志，取得访问令牌
-docker compose logs avm | grep 远程访问令牌
+# 4) 取得访问令牌（完整值只写在容器内的文件里，日志只打印掩码）
+docker compose exec avm cat /data/access_token.txt
 ```
 
 指定版本：

@@ -156,13 +156,13 @@ docker compose pull && docker compose up -d
 
 > Note: `latest` is only updated when a new release is published — it is **never overwritten** by `main` builds. Pull `main` if you want fixes early.
 
-* **An access token is required on first visit** — read it via `docker compose logs avm | grep "远程访问令牌"`, or preset it with `AVM_ACCESS_TOKEN`.
+* **Sign in on first visit** — the token is stored at `data/access_token.txt` inside the container (`docker compose exec avm cat /data/access_token.txt`), or preset it with `AVM_ACCESS_TOKEN`. Paste it on the page to sign in; you can sign out or manage sessions under Settings → Access.
 * Set the media path to the **container path** (e.g. `/media`) in Settings → Library.
 * Everything (config / DB / covers / avatars / previews) lives in the `/data` volume; upgrading only swaps the image.
 * The image bundles `ffmpeg` and `chromium`; use `--build-arg INSTALL_CHROMIUM=0` for a slimmer build.
 * No desktop inside a container — "open external player / reveal folder" are hidden and deletion defaults to "remove from library".
 
-> Full guide (NAS platforms, env vars, reverse proxy, upgrade, FAQ): **[docs/Docker部署.md](docs/Docker部署.md)**.
+> Full guide (NAS platforms, env vars, reverse proxy, upgrade, FAQ): **[docs/Docker部署.md](docs/Docker部署.md)**; authentication & session security behind a reverse proxy: **[docs/安全与隐私设计.md](docs/安全与隐私设计.md)**.
 
 ---
 
@@ -242,4 +242,4 @@ MIT — for personal study and managing your own collection only.
 
 ---
 
-Full usage guide in **[`docs/使用手册.md`](docs/使用手册.md)**, dev docs in **[`docs/开发文档.md`](docs/开发文档.md)**, upgrade/migration in **[`docs/升级指南.md`](docs/升级指南.md)**, changelog in **[`CHANGELOG.md`](CHANGELOG.md)**.
+Full usage guide in **[`docs/使用手册.md`](docs/使用手册.md)**, dev docs in **[`docs/开发文档.md`](docs/开发文档.md)**, upgrade/migration in **[`docs/升级指南.md`](docs/升级指南.md)**, security & privacy in **[`docs/安全与隐私设计.md`](docs/安全与隐私设计.md)**, changelog in **[`CHANGELOG.md`](CHANGELOG.md)**.

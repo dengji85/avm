@@ -1,7 +1,7 @@
 <script setup>
 import { onMounted, onBeforeUnmount, watch, ref, computed } from 'vue'
 import { state, applyTheme } from './state.js'
-import { getFacets, getConfig, getServerInfo, onNoToken, serverOffline } from './api.js'
+import { getFacets, getConfig, getServerInfo, getSession, onNoToken, serverOffline } from './api.js'
 import { toast } from './utils.js'
 import { useTasks } from './composables/useTasks.js'
 
@@ -13,6 +13,7 @@ import DetailDrawer from './components/DetailDrawer.vue'
 import TokenGate from './components/TokenGate.vue'
 import PlaylistPlayer from './components/PlaylistPlayer.vue'
 import MiniPlayBar from './components/MiniPlayBar.vue'
+import PrivacyLock from './components/PrivacyLock.vue'
 
 const tokenGate = ref(null)
 
@@ -91,10 +92,19 @@ watch(serverOffline, (off, was) => {
   else if (!off && was) toast('已重新连接服务器', 'ok', 2500)
 })
 
+/* 主动确认登录状态：未登录时直接弹登录框，避免首屏一堆 401 请求之后才提示 */
+async function checkSession() {
+  try {
+    const s = await getSession()
+    if (s && !s.authenticated && tokenGate.value) tokenGate.value.open()
+  } catch (e) { /* 后端离线等场景忽略，后续请求 401 会兜底 */ }
+}
+
 onMounted(async () => {
   applyTheme()
   onNoToken(() => tokenGate.value && tokenGate.value.open())
   await Promise.all([loadFacets(), loadConfig(), loadServerCaps()])
+  checkSession()
   tasks.start()
   window.addEventListener('avm-refresh', onGlobalRefresh)
 })
@@ -125,6 +135,7 @@ function onFilterChange() { /* 由各视图自行响应 state 变化 */ }
     <ToastLayer />
     <ConfirmDialog />
     <TokenGate ref="tokenGate" />
+    <PrivacyLock />
 
     <!-- 全局播放队列：全屏播放器（打开时）+ 迷你播放条（关闭但队列存在时） -->
     <PlaylistPlayer v-if="state.playQueue.open" />

@@ -1871,29 +1871,44 @@ def _build_date() -> str:
 
 
 @router.get("/server/info")
-def server_info() -> Dict[str, Any]:
-    """返回访问令牌与监听信息（供前端设置页展示）。"""
-    from .config import ensure_access_token
+def server_info(request: Request) -> Dict[str, Any]:
+    """返回监听信息与访问令牌（供前端设置页展示）。
+
+    安全：完整令牌只在**本机**请求时返回；远程（含反向代理过来的请求）一律
+    返回掩码，避免已登录用户拿走长期有效的令牌，绕过会话的过期与登出。
+    """
+    from . import auth
+    from .config import ensure_access_token, mask_token
     cfg = load_config(refresh=True)
-    host = cfg.get("server", {}).get("host", "127.0.0.1")
-    port = cfg.get("server", {}).get("port", 8770)
+    server = cfg.get("server") or {}
+    host = server.get("host", "127.0.0.1")
+    port = server.get("port", 8770)
     tok = ensure_access_token()
+    ip = auth.client_ip(request.scope, server.get("trusted_proxies") or ["127.0.0.1", "::1"])
+    is_local = auth.is_local_ip(ip)
     lan = _lan_addresses()
     local_url = f"http://127.0.0.1:{port}/"
     urls = [local_url]
-    for ip in lan:
-        urls.append(f"http://{ip}:{port}/?token={tok}")
+    for addr in lan:
+        # 本机查看时给带令牌的直达链接（便于复制到手机）；远程只给地址
+        urls.append(f"http://{addr}:{port}/?token={tok}" if is_local else f"http://{addr}:{port}/")
     return {
         "host": host,
         "port": port,
-        "access_token": tok,
-        "require_token_remote": cfg.get("server", {}).get("require_token_remote", True),
+        "access_token": tok if is_local else mask_token(tok),
+        "token_masked": not is_local,
+        "require_token_remote": server.get("require_token_remote", True),
+        "local_bypass": bool(server.get("local_bypass", True)),
+        "session_idle_days": int(server.get("session_idle_days", 7) or 0),
+        "session_abs_days": int(server.get("session_abs_days", 30) or 0),
+        "session_persist": bool(server.get("session_persist")),
+        "client_ip": ip,
         "lan_addresses": lan,
         "access_urls": urls,
         "local_url": local_url,
         "app_version": APP_VERSION,
         "build_date": _build_date(),
-        "update_feed": cfg.get("server", {}).get("update_feed", ""),
+        "update_feed": server.get("update_feed", ""),
         # 容器 / 无桌面环境下「用系统播放器」「在文件夹中显示」不可用，
         # 前端据此隐藏按钮（Docker 镜像会设置 AVM_CONTAINER=1）。
         "capabilities": {
@@ -2056,11 +2071,14 @@ def server_qr(addr: str = "", size: int = 220) -> Response:
 
 @router.post("/server/reset-token")
 def reset_token() -> Dict[str, Any]:
-    """重置访问令牌（留空后由 ensure_access_token 生成新值）。"""
+    """重置访问令牌：生成新值并**吊销全部会话**（所有设备需重新登录）。"""
+    from . import auth
     from .config import ensure_access_token
     update_config({"server": {"access_token": ""}})
     tok = ensure_access_token()
-    return {"access_token": tok}
+    n = auth.drop_all()
+    auth.audit("reset-token", detail="已重置访问令牌，吊销 %d 个会话" % n)
+    return {"access_token": tok, "revoked_sessions": n}
 
 
 @router.get("/fs/list")

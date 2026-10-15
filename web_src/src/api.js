@@ -5,38 +5,36 @@ const TOKEN_KEY = 'avm_access_token'
 // 后端不可达（服务未启动 / 连接被拒）时的全局状态，供 UI 显示离线横幅
 export const serverOffline = ref(false)
 
-export function getToken() {
-  try { return localStorage.getItem(TOKEN_KEY) || '' } catch (e) { return '' }
-}
-
 /**
- * 令牌同时写入 Cookie。
- * <img> / <video> / <a download> 这些由浏览器自主发起的请求**无法携带自定义请求头**，
- * 只靠 X-Access-Token 会全部 401（表现为远程访问时「设置页能保存，但封面、头像、
- * 播放全部看不到」）。Cookie 会被浏览器自动带上，后端已同步支持校验。
+ * 访问令牌不再保存在浏览器中。
+ *
+ * 改为「令牌换会话」：登录时把令牌交给后端，由后端下发 **HttpOnly 会话 Cookie**
+ * （`avm_session`）。浏览器会自动携带该 Cookie —— 包括 <img> / <video> 这类无法
+ * 自定义请求头的请求，所以封面与播放不会再 401。令牌本身只留在服务端，前端读不到，
+ * 会话的过期、登出与「容器重启失效」才能真正生效（见 docs/安全与隐私设计.md）。
  */
-const TOKEN_COOKIE = 'avm_token'
-function syncTokenCookie(t) {
-  try {
-    if (t) {
-      document.cookie = `${TOKEN_COOKIE}=${encodeURIComponent(t)}; path=/; max-age=31536000; SameSite=Lax`
-    } else {
-      document.cookie = `${TOKEN_COOKIE}=; path=/; max-age=0; SameSite=Lax`
-    }
-  } catch (e) { /* 隐私模式等场景忽略 */ }
+export function getToken() {
+  return '' // 兼容旧调用：不再提供已保存的令牌
 }
 
-export function setToken(t) {
-  try { if (t) localStorage.setItem(TOKEN_KEY, t); else localStorage.removeItem(TOKEN_KEY) } catch (e) {}
-  syncTokenCookie(t)
+export function setToken() {
+  clearLegacyToken() // 兼容旧调用：立即清除残留的本地令牌
 }
 
-// 旧版本只把令牌存在 localStorage：这里补写一次 Cookie，
-// 避免升级后打开页面时图片与播放仍然 401。
-syncTokenCookie(getToken())
+/** 清理旧版本遗留的长期凭据（localStorage 令牌 + 可被 JS 读取的 avm_token Cookie）。 */
+export function clearLegacyToken() {
+  try { localStorage.removeItem(TOKEN_KEY) } catch (e) {}
+  try { document.cookie = 'avm_token=; path=/; max-age=0; SameSite=Lax' } catch (e) {}
+}
+
+// 打开页面即清理一次历史遗留令牌
+clearLegacyToken()
 // 远程访问被拒时由 App 注册的回调触发登录模态
 let _onNoToken = null
 export function onNoToken(cb) { _onNoToken = cb }
+// 服务端隐私锁定时（HTTP 423）触发遮挡层
+let _onLocked = null
+export function onLocked(cb) { _onLocked = cb }
 
 export async function api(path, options = {}) {
   const opts = Object.assign({ headers: {} }, options)
@@ -44,8 +42,7 @@ export async function api(path, options = {}) {
     opts.headers['Content-Type'] = 'application/json'
     opts.body = JSON.stringify(opts.body)
   }
-  const tok = getToken()
-  if (tok) opts.headers['X-Access-Token'] = tok
+  // 认证改走 HttpOnly 会话 Cookie（浏览器自动携带），不再手动注入令牌头
   let res
   try {
     res = await fetch(API + path, opts)
@@ -66,6 +63,13 @@ export async function api(path, options = {}) {
       if (_onNoToken) _onNoToken()
       const err = new Error('需要访问令牌')
       err.code = 'NO_TOKEN'
+      throw err
+    }
+    if (res.status === 423) {
+      // 服务端隐私锁定：内容被拒绝返回，前端切到遮挡层（刷新也无法绕过）
+      if (_onLocked) _onLocked()
+      const err = new Error('内容已锁定')
+      err.code = 'LOCKED'
       throw err
     }
     const detail = data && (data.detail || (data.errors && data.errors[0] && data.errors[0].msg))
@@ -104,6 +108,23 @@ export const prepareStreamStatus = (id) => get(`/movies/${id}/prepare-stream/sta
 export const streamCacheStats = () => get('/stream-cache')
 export const clearStreamCache = () => post('/stream-cache/clear', {})
 export const csvUrl = () => `${API}/export/csv`
+
+/* ---------------- 登录 / 会话（见 docs/安全与隐私设计.md） ---------------- */
+export const login = (token) => post('/auth/login', { token })
+export const logout = () => post('/auth/logout', {})
+export const logoutAll = () => post('/auth/logout-all', {})
+export const getSession = () => get('/auth/session')
+export const listSessions = () => get('/auth/sessions')
+export const revokeSession = (sid) => del(`/auth/sessions/${encodeURIComponent(sid)}`)
+export const getAudit = (limit = 50) => get(`/auth/audit?limit=${encodeURIComponent(limit)}`)
+/* 隐私解锁：简单密码（只存哈希在服务端，前端只发送明文校验） */
+export const pinStatus = () => get('/auth/pin-status')
+export const setPin = (pin) => post('/auth/set-pin', { pin })
+
+/* 隐私锁定：状态存服务端，刷新页面无法绕过 */
+export const privacyState = () => get('/privacy/state')
+export const privacyLock = (reason = 'manual') => post('/privacy/lock', { reason })
+export const privacyUnlock = (credential = '') => post('/privacy/unlock', { credential })
 
 /* ---------------- 服务/访问控制 ---------------- */
 export const getServerInfo = () => get('/server/info')

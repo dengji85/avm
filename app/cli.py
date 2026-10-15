@@ -183,13 +183,25 @@ def cmd_serve(args) -> int:
     try:
         print(f"数据目录： {DATA_DIR}")
         if load_config().get("server", {}).get("require_token_remote", True):
-            print(f"远程访问令牌： {ensure_access_token()}")
+            # 完整令牌写在文件里（权限 0600），日志只打印掩码，避免泄漏进日志/工单
+            from .config import TOKEN_FILE, mask_token
+            print(f"远程访问令牌： {mask_token(ensure_access_token())}（完整值见 {TOKEN_FILE}）")
     except Exception:
         pass
     print("按 Ctrl+C 退出服务。")
     if not args.no_browser:
         threading.Timer(1.5, lambda: webbrowser.open(url)).start()
-    uvicorn.run(app, host=args.host, port=args.port, reload=args.reload, log_level="info")
+    # proxy_headers：让 uvicorn 依据可信代理（server.trusted_proxies）还原真实客户端 IP；
+    # 否则同机反向代理时所有请求来源都会是 127.0.0.1，访问控制会被整体绕过
+    # （详见 docs/安全与隐私设计.md）。
+    try:
+        _trusted = ",".join(
+            str(x) for x in (load_config().get("server", {}).get("trusted_proxies") or [])
+        ) or "127.0.0.1,::1"
+    except Exception:
+        _trusted = "127.0.0.1,::1"
+    uvicorn.run(app, host=args.host, port=args.port, reload=args.reload, log_level="info",
+                proxy_headers=True, forwarded_allow_ips=_trusted)
     return 0
 
 

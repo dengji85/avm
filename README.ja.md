@@ -156,13 +156,13 @@ docker compose pull && docker compose up -d
 
 > 補足：`latest` は新バージョン公開時のみ更新され、**`main` のビルドで上書きされることはありません**。修正を早く使いたい場合は `main` をどうぞ。
 
-* **初回アクセスにはアクセストークンが必要**：`docker compose logs avm | grep "远程访问令牌"` で確認、または `AVM_ACCESS_TOKEN` で事前設定。
+* **初回アクセス時はログインが必要**：トークンはコンテナ内 `data/access_token.txt` にあります（`docker compose exec avm cat /data/access_token.txt`）。`AVM_ACCESS_TOKEN` での事前設定も可能。ページで貼り付けてログインし、「設定 → アクセス」からログアウトやセッション管理ができます。
 * メディアパスは「設定 → ライブラリ」で**コンテナ内パス**（例 `/media`）を指定。
 * データ（設定／DB／表紙／アバター／プレビュー）は `/data` ボリュームに保存。アップグレードはイメージ差し替えのみ。
 * イメージには `ffmpeg` と `chromium` を同梱。`--build-arg INSTALL_CHROMIUM=0` で軽量ビルドも可能。
 * コンテナ内にデスクトップはないため「外部プレイヤーで開く／フォルダを表示」は非表示、削除は既定で「ライブラリから削除のみ」。
 
-> 詳細（NAS 各プラットフォーム、環境変数、リバースプロキシ、アップグレード、FAQ）：**[docs/Docker部署.md](docs/Docker部署.md)**。
+> 詳細（NAS 各プラットフォーム、環境変数、リバースプロキシ、アップグレード、FAQ）：**[docs/Docker部署.md](docs/Docker部署.md)**。リバースプロキシ配下の認証・セッションについては **[docs/安全与隐私设计.md](docs/安全与隐私设计.md)** を必ずご確認ください。
 
 ---
 
@@ -242,4 +242,4 @@ MIT —— 個人の学習および自己のコレクション管理のみを目
 
 ---
 
-完全な利用ガイドは **[`docs/使用手册.md`](docs/使用手册.md)**、開発ドキュメントは **[`docs/开发文档.md`](docs/开发文档.md)**、アップグレード・移行は **[`docs/升级指南.md`](docs/升级指南.md)**、更新履歴は **[`CHANGELOG.md`](CHANGELOG.md)** を参照。
+完全な利用ガイドは **[`docs/使用手册.md`](docs/使用手册.md)**、開発ドキュメントは **[`docs/开发文档.md`](docs/开发文档.md)**、アップグレード・移行は **[`docs/升级指南.md`](docs/升级指南.md)**、セキュリティとプライバシーは **[`docs/安全与隐私设计.md`](docs/安全与隐私设计.md)**、更新履歴は **[`CHANGELOG.md`](CHANGELOG.md)** を参照。

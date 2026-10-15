@@ -33,6 +33,11 @@ FANART_DIR = DATA_DIR / "fanarts"
 REMUX_DIR = DATA_DIR / "remux"
 DB_PATH = DATA_DIR / "library.db"
 CONFIG_PATH = DATA_DIR / "config.json"
+# 完整访问令牌的落盘文件（权限 0600）：启动日志只打印掩码，容器 / NAS 用户从这里取
+TOKEN_FILE = DATA_DIR / "access_token.txt"
+# 是否运行在容器内。容器经端口映射 / 同机反代时无法区分「真本机」，
+# 因此「本机免令牌」在容器里默认关闭（详见 docs/安全与隐私设计.md）。
+IN_CONTAINER = os.environ.get("AVM_CONTAINER", "").strip() == "1"
 
 
 def _resolve_dir(cfg_value: str | None, default: Path) -> Path:
@@ -219,10 +224,35 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "host": "127.0.0.1",
         "port": 8770,
         "open_browser": True,
-        # 访问令牌：为空时自动生成（仅本机 127.0.0.1 豁免；远程访问必须携带）
+        # 访问令牌：为空时自动生成。完整值同时写入 data/access_token.txt（0600），
+        # 启动日志只打印掩码，避免令牌泄漏进 docker logs / 日志文件。
         "access_token": "",
         # 是否启用远程访问控制（关闭则任何能连上的设备都可访问，仅供纯本机调试）
         "require_token_remote": True,
+        # 信任的反向代理 IP：只有直连来源位于该列表时才解析 X-Forwarded-For，
+        # 否则忽略该头（防止伪造 IP 绕过本机豁免与登录限速）。
+        # NAS 上反代与容器同机时，保持默认即可拿到真实客户端 IP。
+        "trusted_proxies": ["127.0.0.1", "::1"],
+        # 本机（127.0.0.1/::1）是否免令牌：桌面 exe 默认开启；
+        # 容器默认关闭（端口映射 / 同机反代无法区分「真本机」，开着等于对局域网免认证）
+        "local_bypass": not IN_CONTAINER,
+        # 会话（登录后签发）：空闲超时 / 绝对超时（天，0 = 不过期）
+        "session_idle_days": 7,
+        "session_abs_days": 30,
+        # 会话是否落盘：默认 false = 仅内存，进程 / 容器重启即全部失效（更安全）；
+        # 开启后以 SHA-256 指纹落盘 data/sessions.json，重启仍保持登录。
+        "session_persist": False,
+        # 登录失败限速：同一 IP 连续失败达到该次数后封禁指定分钟数（0 = 不限制）
+        "login_max_fails": 5,
+        "login_block_minutes": 15,
+        # 是否允许匿名访问 /api/docs 与 /api/openapi.json（默认关闭）
+        "expose_docs": False,
+        # 跨源白名单：默认空 = 不启用 CORS（同源部署无需 CORS）
+        "cors_origins": [],
+        # 安全响应头（CSP / nosniff / Referrer-Policy / X-Frame-Options 等）
+        "security_headers": True,
+        # 出站 HTTPS 是否跳过证书校验（不推荐开启）
+        "insecure_skip_verify": False,
         # 版本更新清单地址。默认指向 GitHub Releases（发版即打 tag 推到 git 即可自动生效）：
         # 后端会按 GitHub 结构解析 tag_name(版本)/html_url(下载页)/body(更新说明)/published_at(日期)。
         # 也可改为自建的版本清单 JSON（含 version/download_url/released/notes）。
@@ -263,6 +293,27 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "api_key": "",
         "model": "gpt-4o-mini",
         "temperature": 0.4,
+    },
+    # 隐私保护（桌面 / 大屏场景）：离开电脑时自动遮挡，避免"忘记关"的尴尬
+    "privacy": {
+        # 空闲自动锁定（分钟）：无操作达到该时长后遮挡全部内容并暂停播放；0 = 关闭。
+        # 正在播放视频时不算空闲（看片中途不会被锁）。
+        "idle_lock_minutes": 10,
+        # 解锁方式（空闲锁定与紧急遮挡通用）：
+        #   click = 点击 / 任意键即解锁（仅防"路过瞥一眼"）
+        #   pin   = 需要输入「简单密码」（需先在设置页设置，见 privacy.pin_hash）
+        #   token = 需要输入访问令牌（最安全）
+        "lock_unlock": "token",
+        # 简单密码的 PBKDF2-HMAC-SHA256 哈希（设置页写入，不存明文；空 = 未设置）
+        "pin_hash": "",
+        # 紧急遮挡（"老板键"）快捷键：任意界面按下立即遮挡 + 静音，再按一次恢复
+        "panic_key": "Ctrl+Shift+H",
+        # 页面标题中性化：标题固定为品牌名，不显示影片信息
+        "neutral_title": True,
+        # 切换到其他标签页 / 最小化时自动暂停播放，避免声音外泄
+        "pause_when_hidden": True,
+        # 启动即遮挡：打开页面先显示遮挡层，需手动解锁
+        "lock_on_start": False,
     },
 }
 
@@ -359,20 +410,51 @@ def update_config(patch: Dict[str, Any]) -> Dict[str, Any]:
 def ensure_access_token() -> str:
     """启动时确保存在一个访问令牌：若配置为空则生成一个随机令牌并落盘。
 
-    返回当前生效的令牌。本地 127.0.0.1 访问始终豁免，远程访问需携带此令牌。
+    返回当前生效的令牌。本机是否免令牌见 server.local_bypass；远程访问可用
+    令牌换取会话（推荐），或直接携带令牌（兼容脚本与旧客户端）。
 
     容器 / NAS 部署可用环境变量 AVM_ACCESS_TOKEN 预设，避免首次启动还要翻日志找令牌。
+    完整令牌同时写入 data/access_token.txt（权限 0600），启动日志只打印掩码。
     """
     env_tok = os.environ.get("AVM_ACCESS_TOKEN", "").strip()
-    if env_tok:
-        return env_tok
-    cfg = load_config()
-    tok = (cfg.get("server", {}).get("access_token") or "").strip()
+    tok = env_tok
     if not tok:
-        import secrets
-        tok = secrets.token_urlsafe(24)
-        update_config({"server": {"access_token": tok}})
+        cfg = load_config()
+        tok = (cfg.get("server", {}).get("access_token") or "").strip()
+        if not tok:
+            import secrets
+            tok = secrets.token_urlsafe(24)
+            update_config({"server": {"access_token": tok}})
+    write_token_file(tok)
     return tok
+
+
+def write_token_file(tok: str) -> None:
+    """把完整令牌写入 data/access_token.txt（权限 0600），便于容器 / NAS 用户取用。"""
+    try:
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        path = TOKEN_FILE
+        if path.exists():
+            try:
+                if path.read_text(encoding="utf-8").strip() == str(tok):
+                    return
+            except Exception:
+                pass
+        path.write_text(str(tok) + "\n", encoding="utf-8")
+        try:
+            os.chmod(path, 0o600)
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+
+def mask_token(tok: str) -> str:
+    """令牌掩码（首尾各留 4 位），用于日志与远程接口展示。"""
+    t = str(tok or "")
+    if len(t) <= 8:
+        return "*" * len(t)
+    return "%s******%s" % (t[:4], t[-4:])
 
 
 def roots_to_scan(cfg: Dict[str, Any] | None = None) -> list:

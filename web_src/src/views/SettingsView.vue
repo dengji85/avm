@@ -6,8 +6,10 @@ import {
   parsePreview as apiParse, fsList, sniffCovers, extractAllCovers, csvUrl, cacheAvatars,
   fillActressAvatars, rescanLocalCovers, fetchActressProfile, getServerInfo, resetToken, checkUpdate,
   listPlugins, togglePlugin, regenAllPreviews, streamCacheStats, clearStreamCache,
+  listSessions, revokeSession, getAudit, logout as apiLogout, logoutAll as apiLogoutAll,
+  setPin, pinStatus,
 } from '../api.js'
-import { toast, confirmDialog } from '../utils.js'
+import { toast, confirmDialog, fmtAgo } from '../utils.js'
 import { useTasks } from '../composables/useTasks.js'
 import { LANGUAGES, i18nState, setLang } from '../i18n'
 import { t } from '../i18n/index.js'
@@ -22,6 +24,7 @@ const TABS = [
   ['appearance', 'settings.tab.appearance'],
   ['sites', 'settings.tab.sites'],
   ['remote', 'settings.tab.remote'],
+  ['privacy', 'settings.tab.privacy'],
   ['about', 'settings.tab.about'],
 ]
 const tab = ref('library')
@@ -45,6 +48,14 @@ const cfg = reactive({
   stream: { auto_remux: true, remux_cache_mb: 4096 },
   wiki: { languages: ['ja', 'zh'] },
   online_sites: [],
+  server: {
+    session_idle_days: 7, session_abs_days: 30, session_persist: false,
+    local_bypass: true, expose_docs: false, trusted_proxies: [],
+  },
+  privacy: {
+    idle_lock_minutes: 10, lock_unlock: 'token', panic_key: 'Ctrl+Shift+H',
+    neutral_title: true, pause_when_hidden: true, lock_on_start: false,
+  },
 })
 
 /* 常见站点预设：首次进入或点「添加常见站点」时一次性补入。
@@ -115,7 +126,27 @@ async function load() {
     })
     providers.active = pv.active || []
     providers.available.forEach((p) => { provOn[p.id] = orderList.includes(p.id) })
+    // 安全 / 会话配置（server 段）
+    cfg.server = Object.assign(
+      {
+        session_idle_days: 7, session_abs_days: 30, session_persist: false,
+        local_bypass: true, expose_docs: false, trusted_proxies: [],
+      },
+      c.server,
+    )
+    trustedProxiesText.value = (cfg.server.trusted_proxies || []).join(', ')
+    // 隐私保护（桌面防窥）
+    cfg.privacy = Object.assign(
+      {
+        idle_lock_minutes: 10, lock_unlock: 'token', panic_key: 'Ctrl+Shift+H',
+        neutral_title: true, pause_when_hidden: true, lock_on_start: false,
+      },
+      c.privacy,
+    )
     loadStreamCache()
+    loadSecurity()
+    // 先拿到「是否已设置简单密码」，否则解锁方式下拉的校验会误判
+    await loadPinStatus()
     state.config = cfg
   } catch (e) { toast(e.message, 'err') } finally { loading.value = false }
 }
@@ -173,6 +204,152 @@ async function clearCacheNow() {
     toast(t('settings.playCleared', { n: r.removed || 0 }), 'ok')
     await loadStreamCache()
   } catch (e) { toast(e.message, 'err') } finally { clearingCache.value = false }
+}
+
+/* ---------------- 登录与会话（安全，见 docs/安全与隐私设计.md） ---------------- */
+const trustedProxiesText = ref('127.0.0.1, ::1')
+const sessions = ref([])
+const audit = ref([])
+const savingSec = ref(false)
+
+async function loadSecurity() {
+  try {
+    const r = await listSessions()
+    sessions.value = r.items || []
+  } catch (e) { sessions.value = [] }
+  try {
+    const a = await getAudit(30)
+    audit.value = a.items || []
+  } catch (e) { audit.value = [] }
+}
+
+async function saveSecurity() {
+  savingSec.value = true
+  try {
+    const list = trustedProxiesText.value.split(',').map((s) => s.trim()).filter(Boolean)
+    await putConfig({
+      server: {
+        session_idle_days: Math.max(0, Number(cfg.server.session_idle_days) || 0),
+        session_abs_days: Math.max(0, Number(cfg.server.session_abs_days) || 0),
+        session_persist: !!cfg.server.session_persist,
+        local_bypass: !!cfg.server.local_bypass,
+        expose_docs: !!cfg.server.expose_docs,
+        trusted_proxies: list,
+      },
+    })
+    toast(t('settings.secSaved'), 'ok')
+    await loadSecurity()
+  } catch (e) { toast(e.message, 'err') } finally { savingSec.value = false }
+}
+
+/* ---------------- 隐私保护（桌面防窥） ---------------- */
+/* 隐私设置改为「改动即自动保存」（debounce 500ms）：开关 / 下拉 / 数字输入
+   都不必再滑到底部点按钮。简单密码属敏感输入，保留行内「设置 / 更新」按钮单独提交。 */
+const savingPrivacy = ref(false)
+let privacyTimer = null
+
+async function savePrivacy(silent = true) {
+  savingPrivacy.value = true
+  try {
+    await putConfig({
+      privacy: {
+        idle_lock_minutes: Math.max(0, Number(cfg.privacy.idle_lock_minutes) || 0),
+        lock_unlock: cfg.privacy.lock_unlock === 'click' ? 'click'
+          : (cfg.privacy.lock_unlock === 'pin' ? 'pin' : 'token'),
+        panic_key: (cfg.privacy.panic_key || '').trim() || 'Ctrl+Shift+H',
+        neutral_title: !!cfg.privacy.neutral_title,
+        pause_when_hidden: !!cfg.privacy.pause_when_hidden,
+        lock_on_start: !!cfg.privacy.lock_on_start,
+      },
+    })
+    // 让遮挡层立即重新读取配置（无需整页刷新）
+    window.dispatchEvent(new CustomEvent('avm-privacy-changed'))
+    if (!silent) toast(t('settings.secSaved'), 'ok')
+  } catch (e) {
+    toast(e.message, 'err')
+  } finally {
+    savingPrivacy.value = false
+  }
+}
+
+/* 保存只由控件事件（@change / @input）触发，不用 watch：
+   watch 无法区分「用户改动」和「load() 重新赋值」，会在加载时误触发保存 ——
+   曾把用户设好的「简单密码」解锁方式静默覆盖回令牌。 */
+function scheduleSavePrivacy() {
+  if (privacyTimer) clearTimeout(privacyTimer)
+  privacyTimer = setTimeout(() => savePrivacy(true), 500)
+}
+
+/* 解锁方式变更：选了「简单密码」但还没设置时只回退界面，不写入后端 */
+function onUnlockModeChange() {
+  if (cfg.privacy.lock_unlock === 'pin' && !hasPin.value) {
+    cfg.privacy.lock_unlock = 'token'
+    toast(t('privacy.pinNeedSet'), 'err')
+    return
+  }
+  scheduleSavePrivacy()
+}
+
+/* 隐私解锁「简单密码」：明文只在提交瞬间传一次，服务端只保存 PBKDF2 哈希 */
+const pinInput = ref('')
+const hasPin = ref(false)
+const savingPin = ref(false)
+
+async function loadPinStatus() {
+  try {
+    const r = await pinStatus()
+    hasPin.value = !!(r && r.has_pin)
+  } catch (e) {
+    // 读取失败时保持原值：置 false 会让「切换解锁方式」被误判成「尚未设置简单密码」
+  }
+}
+
+/* 行内提交简单密码（单独按钮：避免输入过程中被自动保存打断） */
+async function savePin() {
+  const v = pinInput.value.trim()
+  if (v.length < 4) { toast(t('privacy.pinSetPh'), 'err'); return }
+  savingPin.value = true
+  try {
+    const r = await setPin(v)
+    hasPin.value = !!(r && r.has_pin)
+    pinInput.value = ''
+    toast(t('privacy.pinSaved'), 'ok')
+  } catch (e) { toast(e.message, 'err') } finally { savingPin.value = false }
+}
+
+async function clearPin() {
+  savingPin.value = true
+  try {
+    await setPin('')
+    hasPin.value = false
+    pinInput.value = ''
+    toast(t('privacy.pinCleared'), 'ok')
+  } catch (e) { toast(e.message, 'err') } finally { savingPin.value = false }
+}
+
+async function doLogout() {
+  try {
+    await apiLogout()
+    toast(t('nav.loggedOut'), 'ok')
+    setTimeout(() => window.location.reload(), 300)
+  } catch (e) { toast(e.message, 'err') }
+}
+
+async function doLogoutAll() {
+  const ok = await confirmDialog(t('settings.secLogoutAll'), t('settings.secSessionsHint'), { danger: true, okText: t('settings.secLogoutAll') })
+  if (!ok) return
+  try {
+    await apiLogoutAll()
+    setTimeout(() => window.location.reload(), 300)
+  } catch (e) { toast(e.message, 'err') }
+}
+
+async function kickSession(id) {
+  try {
+    await revokeSession(id)
+    toast(t('settings.secRevoke'), 'ok')
+    await loadSecurity()
+  } catch (e) { toast(e.message, 'err') }
 }
 
 /* 按当前密度档位重新生成全部预览图（改档后刷新已生成影片） */
@@ -1138,8 +1315,69 @@ onMounted(async () => { await load(); await loadServerInfo(); loadPlugins() })
         </div>
       </template>
 
+      <!-- ============ 隐私 ============ -->
+      <template v-else-if="tab === 'privacy'">
+        <!-- 隐私保护：桌面防窥（见 docs/安全与隐私设计.md 的 L4） -->
+        <div class="panel">
+          <div class="panel-head">{{ $t('privacy.title') }}</div>
+          <div class="panel-body">
+            <div class="field-row">
+              <label>{{ $t('privacy.idleMinutes') }}</label>
+              <input class="inp" type="number" min="0" style="max-width:110px" v-model.number="cfg.privacy.idle_lock_minutes" @input="scheduleSavePrivacy()" />
+              <label>{{ $t('privacy.unlock') }}</label>
+              <select v-model="cfg.privacy.lock_unlock" style="width:170px" @change="onUnlockModeChange()">
+                <option value="click">{{ $t('privacy.unlockClick') }}</option>
+                <option value="pin">{{ $t('privacy.unlockPin') }}</option>
+                <option value="token">{{ $t('privacy.unlockToken') }}</option>
+              </select>
+            </div>
+            <span class="hint">{{ $t('privacy.idleHint') }}</span>
+
+            <div class="field col">
+              <label>{{ $t('privacy.unlockPin') }}</label>
+              <div class="hstack">
+                <input class="inp mono" v-model="pinInput" type="password" :placeholder="$t('privacy.pinSetPh')" style="max-width:280px" />
+                <button class="btn tiny" :disabled="savingPin" @click="savePin">{{ $t('privacy.pinSet') }}</button>
+                <button class="btn tiny ghost" :disabled="savingPin || !hasPin" @click="clearPin">{{ $t('privacy.pinClear') }}</button>
+                <span class="muted sm">{{ hasPin ? $t('privacy.pinHas') : $t('privacy.pinNone') }}</span>
+              </div>
+              <span class="hint">{{ $t('privacy.pinSaveHint') }}</span>
+            </div>
+
+            <div class="field">
+              <label class="toggle">
+                <input type="checkbox" v-model="cfg.privacy.neutral_title" @change="scheduleSavePrivacy()" /><span class="track"></span>
+              </label>
+              <span>{{ $t('privacy.neutralTitle') }}</span>
+              <span class="hint">{{ $t('privacy.neutralTitleHint') }}</span>
+            </div>
+            <div class="field">
+              <label class="toggle">
+                <input type="checkbox" v-model="cfg.privacy.pause_when_hidden" @change="scheduleSavePrivacy()" /><span class="track"></span>
+              </label>
+              <span>{{ $t('privacy.pauseHidden') }}</span>
+              <span class="hint">{{ $t('privacy.pauseHiddenHint') }}</span>
+            </div>
+            <div class="field">
+              <label class="toggle">
+                <input type="checkbox" v-model="cfg.privacy.lock_on_start" @change="scheduleSavePrivacy()" /><span class="track"></span>
+              </label>
+              <span>{{ $t('privacy.lockOnStart') }}</span>
+              <span class="hint">{{ $t('privacy.lockOnStartHint') }}</span>
+            </div>
+            <div class="field col">
+              <label>{{ $t('privacy.panicKey') }}</label>
+              <input class="inp mono" v-model="cfg.privacy.panic_key" placeholder="Ctrl+Shift+H" style="max-width:260px" @input="scheduleSavePrivacy()" />
+              <span class="hint">{{ $t('privacy.panicKeyHint') }}</span>
+            </div>
+            <span class="hint">{{ savingPrivacy ? $t('settings.saving') : $t('privacy.autoSaved') }}</span>
+          </div>
+        </div>
+      </template>
+
       <!-- ============ 外观 ============ -->
       <template v-else-if="tab === 'appearance'">
+
         <div class="panel">
           <div class="panel-head">{{ $t('settings.themeDisplay') }}</div>
           <div class="panel-body">
@@ -1209,6 +1447,76 @@ onMounted(async () => { await load(); await loadServerInfo(); loadPlugins() })
 
       <!-- ============ 远程（访问与远程） ============ -->
       <template v-else-if="tab === 'remote'">
+        <!-- 登录与会话（安全，见 docs/安全与隐私设计.md） -->
+        <div class="panel">
+          <div class="panel-head">{{ $t('settings.secTitle') }}</div>
+          <div class="panel-body">
+            <div class="field-row">
+              <label>{{ $t('settings.secIdleDays') }}</label>
+              <input class="inp" type="number" min="0" style="max-width:110px" v-model.number="cfg.server.session_idle_days" />
+              <label>{{ $t('settings.secAbsDays') }}</label>
+              <input class="inp" type="number" min="0" style="max-width:110px" v-model.number="cfg.server.session_abs_days" />
+            </div>
+            <span class="hint">{{ $t('settings.secExpHint') }}</span>
+            <div class="field">
+              <label class="toggle">
+                <input type="checkbox" v-model="cfg.server.session_persist" /><span class="track"></span>
+              </label>
+              <span>{{ $t('settings.secPersist') }}</span>
+              <span class="hint">{{ $t('settings.secPersistHint') }}</span>
+            </div>
+            <div class="field">
+              <label class="toggle">
+                <input type="checkbox" v-model="cfg.server.local_bypass" /><span class="track"></span>
+              </label>
+              <span>{{ $t('settings.secLocalBypass') }}</span>
+              <span class="hint">{{ $t('settings.secLocalBypassHint') }}</span>
+            </div>
+            <div class="field">
+              <label class="toggle">
+                <input type="checkbox" v-model="cfg.server.expose_docs" /><span class="track"></span>
+              </label>
+              <span>{{ $t('settings.secExposeDocs') }}</span>
+              <span class="hint">{{ $t('settings.secExposeDocsHint') }}</span>
+            </div>
+            <div class="field col">
+              <label>{{ $t('settings.secTrustedProxies') }}</label>
+              <input class="inp mono" v-model="trustedProxiesText" placeholder="127.0.0.1, ::1" />
+              <span class="hint">{{ $t('settings.secTrustedProxiesHint') }}</span>
+            </div>
+            <div class="hstack">
+              <button class="btn tiny primary" :disabled="savingSec" @click="saveSecurity">{{ $t('common.save') }}</button>
+              <button class="btn tiny ghost" @click="doLogout">{{ $t('settings.secLogout') }}</button>
+              <button class="btn tiny ghost" @click="doLogoutAll">{{ $t('settings.secLogoutAll') }}</button>
+            </div>
+
+            <div class="field col" v-if="sessions.length">
+              <label>{{ $t('settings.secSessions') }}</label>
+              <div v-for="s in sessions" :key="s.id" class="sec-row">
+                <span class="mono">{{ s.ip || '-' }}</span>
+                <span class="muted sm sec-grow">{{ s.ua }}</span>
+                <span class="muted sm tabular">{{ fmtAgo(s.last) }}</span>
+                <span v-if="s.current" class="muted sm">· {{ $t('settings.secCurrent') }}</span>
+                <button v-else class="btn tiny ghost" @click="kickSession(s.id)">{{ $t('settings.secRevoke') }}</button>
+              </div>
+              <span class="hint">{{ $t('settings.secSessionsHint') }}</span>
+            </div>
+
+            <div class="field col">
+              <label>{{ $t('settings.secAudit') }}</label>
+              <div v-if="audit.length">
+                <div v-for="(a, i) in audit" :key="i" class="sec-row">
+                  <span class="mono">{{ a.ip || '-' }}</span>
+                  <span class="muted sm">{{ a.event }}</span>
+                  <span class="muted sm sec-grow">{{ a.detail }}</span>
+                  <span class="muted sm tabular">{{ fmtAgo(a.ts) }}</span>
+                </div>
+              </div>
+              <span v-else class="muted">{{ $t('settings.secAuditEmpty') }}</span>
+            </div>
+          </div>
+        </div>
+
         <div class="panel">
           <div class="panel-head">{{ $t('settings.access') }}</div>
           <div class="panel-body">
@@ -1222,11 +1530,12 @@ onMounted(async () => { await load(); await loadServerInfo(); loadPlugins() })
               <div class="tok-row">
                 <input class="inp mono" v-model="tokInput" :type="showTok ? 'text' : 'password'" :placeholder="$t('settings.tokenPh')" @keyup.enter="saveToken" />
                 <button class="btn tiny ghost" @click="showTok = !showTok">{{ showTok ? '🙈' : '👁' }}</button>
-                <button class="btn tiny ghost" @click="copyTok" :disabled="!serverInfo.access_token">{{ $t('settings.copy') }}</button>
-                <button class="btn tiny" :disabled="savingTok" @click="saveToken">{{ savingTok ? $t('settings.saving') : $t('settings.saveFeed') }}</button>
-                <button class="btn tiny ghost" @click="doResetToken" :title="$t('settings.resetToken')">🔄</button>
+                <button class="btn tiny ghost" @click="copyTok" :disabled="serverInfo.token_masked || !serverInfo.access_token">{{ $t('settings.copy') }}</button>
+                <button class="btn tiny" :disabled="savingTok || serverInfo.token_masked" @click="saveToken">{{ savingTok ? $t('settings.saving') : $t('settings.saveFeed') }}</button>
+                <button class="btn tiny ghost" :disabled="serverInfo.token_masked" @click="doResetToken" :title="$t('settings.resetToken')">🔄</button>
               </div>
               <span class="muted">{{ $t('settings.tokenHint') }}</span>
+              <span v-if="serverInfo.token_masked" class="hint">🔒 {{ $t('settings.secTokenMasked') }}</span>
             </div>
             <div class="fw-tip" v-if="lanUrls.length">
               <div class="fw-tip-title">⚠️ {{ $t('settings.fwTitle') }}</div>
@@ -1365,6 +1674,10 @@ onMounted(async () => { await load(); await loadServerInfo(); loadPlugins() })
 </template>
 
 <style scoped>
+/* 安全面板：活跃会话 / 登录记录行 */
+.sec-row { display: flex; align-items: center; gap: 10px; padding: 5px 0; border-bottom: 1px solid var(--c-line, rgba(128,128,128,.18)); }
+.sec-row:last-child { border-bottom: none; }
+.sec-grow { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .st-tabs { border-bottom: none; }
 /* 居中 + 舒适最大宽度 + 充足底部留白 */
 .view-body {
