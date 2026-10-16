@@ -2,12 +2,14 @@
 import { ref, reactive, computed, onMounted } from 'vue'
 import { state } from '../state.js'
 import {
-  getConfig, putConfig, listProviders, testScraper as apiTest,
+  API, getConfig, putConfig, listProviders, testScraper as apiTest,
   parsePreview as apiParse, fsList, sniffCovers, extractAllCovers, csvUrl, cacheAvatars,
   fillActressAvatars, rescanLocalCovers, fetchActressProfile, getServerInfo, resetToken, checkUpdate,
   listPlugins, togglePlugin, regenAllPreviews, streamCacheStats, clearStreamCache,
   listSessions, revokeSession, getAudit, logout as apiLogout, logoutAll as apiLogoutAll,
   setPin, pinStatus,
+  totpStatus, totpSetup, totpEnable, totpDisable,
+  listApiKeys, createApiKey, revokeApiKey,
 } from '../api.js'
 import { toast, confirmDialog, fmtAgo, setSiteTitle } from '../utils.js'
 import { useTasks } from '../composables/useTasks.js'
@@ -132,6 +134,7 @@ async function load() {
       {
         session_idle_days: 7, session_abs_days: 30, session_persist: false,
         local_bypass: true, expose_docs: false, trusted_proxies: [],
+        insecure_skip_verify: false,
       },
       c.server,
     )
@@ -223,6 +226,104 @@ async function loadSecurity() {
     const a = await getAudit(30)
     audit.value = a.items || []
   } catch (e) { audit.value = [] }
+  await Promise.all([loadTotp(), loadKeys()])
+}
+
+/* ---------------- 两步验证（TOTP） ---------------- */
+const totp = reactive({ enabled: false, recovery_left: 0, pending: false })
+const totpCodeInput = ref('')
+const totpSetupInfo = ref(null)     // { secret, uri }
+const totpQrSeq = ref(0)
+const recoveryCodes = ref([])
+const busyTotp = ref(false)
+// 密钥由服务端暂存直接渲染，不经过 URL / 响应正文（避免进历史与反代日志）
+// 前缀走 api.js 的 API 常量，避免子路径部署时这里漏改（表现为二维码静默 404）
+const totpQrUrl = computed(() => `${API}/auth/totp/qr?_=${totpQrSeq.value}`)
+
+async function loadTotp() {
+  try { Object.assign(totp, await totpStatus()) } catch (e) { /* 未登录等场景忽略 */ }
+}
+
+async function startTotpBind() {
+  busyTotp.value = true
+  try {
+    const r = await totpSetup()
+    totpSetupInfo.value = { secret: r.secret, uri: r.uri }
+    totpCodeInput.value = ''
+    totpQrSeq.value += 1
+    await loadTotp()
+  } catch (e) { toast(e.message, 'err') } finally { busyTotp.value = false }
+}
+
+async function confirmTotpBind() {
+  const code = (totpCodeInput.value || '').trim()
+  if (!code) { toast(t('settings.totpCodePh'), 'err'); return }
+  busyTotp.value = true
+  try {
+    const r = await totpEnable(code)
+    recoveryCodes.value = r.recovery_codes || []
+    totpSetupInfo.value = null
+    totpCodeInput.value = ''
+    await loadTotp()
+    toast(t('settings.totpOn'), 'ok')
+  } catch (e) { toast(e.message, 'err') } finally { busyTotp.value = false }
+}
+
+async function disableTotp() {
+  const code = (totpCodeInput.value || '').trim()
+  if (!code) { toast(t('settings.totpCodePh'), 'err'); return }
+  const ok = await confirmDialog(t('settings.totpDisable'), t('settings.totpDisableHint'), { danger: true, okText: t('settings.totpDisable') })
+  if (!ok) return
+  busyTotp.value = true
+  try {
+    await totpDisable(code)
+    recoveryCodes.value = []
+    totpCodeInput.value = ''
+    await loadTotp()
+    toast(t('settings.totpDisabled'), 'ok')
+  } catch (e) { toast(e.message, 'err') } finally { busyTotp.value = false }
+}
+
+/* ---------------- 事务 API Key ---------------- */
+const apiKeys = ref([])
+const newKeyName = ref('')
+const newKeyScope = ref('full')
+const createdKey = ref('')
+const busyKey = ref(false)
+
+async function loadKeys() {
+  try { const r = await listApiKeys(); apiKeys.value = r.items || [] } catch (e) { apiKeys.value = [] }
+}
+
+async function doCreateKey() {
+  busyKey.value = true
+  try {
+    const r = await createApiKey((newKeyName.value || '').trim(), newKeyScope.value)
+    createdKey.value = r.key || ''
+    newKeyName.value = ''
+    await loadKeys()
+    toast(t('settings.keyCreated'), 'ok')
+  } catch (e) { toast(e.message, 'err') } finally { busyKey.value = false }
+}
+
+async function doRevokeKey(id) {
+  const ok = await confirmDialog(t('settings.keyRevoke'), t('settings.keyRevokeHint'), { danger: true, okText: t('settings.keyRevoke') })
+  if (!ok) return
+  try { await revokeApiKey(id); await loadKeys(); toast(t('settings.keyRevoked'), 'ok') }
+  catch (e) { toast(e.message, 'err') }
+}
+
+/* 关闭出站证书校验 = 失去中间人防护，属「降低安全性」的开关：
+   勾选时先弹一次确认，取消就把勾选还原，避免误点。 */
+async function onToggleInsecureTls(e) {
+  const on = !!(e && e.target ? e.target.checked : cfg.server.insecure_skip_verify)
+  if (!on) return
+  const ok = await confirmDialog(
+    t('settings.secInsecureTls'),
+    t('settings.secInsecureTlsWarn'),
+    { danger: true, okText: t('common.confirm') },
+  )
+  if (!ok) cfg.server.insecure_skip_verify = false
 }
 
 async function saveSecurity() {
@@ -236,6 +337,7 @@ async function saveSecurity() {
         session_persist: !!cfg.server.session_persist,
         local_bypass: !!cfg.server.local_bypass,
         expose_docs: !!cfg.server.expose_docs,
+        insecure_skip_verify: !!cfg.server.insecure_skip_verify,
         trusted_proxies: list,
       },
     })
@@ -1491,6 +1593,13 @@ onMounted(async () => { await load(); await loadServerInfo(); loadPlugins() })
               <span>{{ $t('settings.secExposeDocs') }}</span>
               <span class="hint">{{ $t('settings.secExposeDocsHint') }}</span>
             </div>
+            <div class="field">
+              <label class="toggle">
+                <input type="checkbox" v-model="cfg.server.insecure_skip_verify" @change="onToggleInsecureTls" /><span class="track"></span>
+              </label>
+              <span>{{ $t('settings.secInsecureTls') }}</span>
+              <span class="hint">{{ $t('settings.secInsecureTlsHint') }}</span>
+            </div>
             <div class="field col">
               <label>{{ $t('settings.secTrustedProxies') }}</label>
               <input class="inp mono" v-model="trustedProxiesText" placeholder="127.0.0.1, ::1" />
@@ -1526,6 +1635,95 @@ onMounted(async () => { await load(); await loadServerInfo(); loadPlugins() })
               </div>
               <span v-else class="muted">{{ $t('settings.secAuditEmpty') }}</span>
             </div>
+          </div>
+        </div>
+
+        <!-- 两步验证（TOTP） -->
+        <div class="panel">
+          <div class="panel-head">{{ $t('settings.totpTitle') }}</div>
+          <div class="panel-body">
+            <div class="field">
+              <span>{{ totp.enabled ? $t('settings.totpOn') : $t('settings.totpOff') }}</span>
+              <span class="hint">{{ $t('settings.totpHint') }}</span>
+            </div>
+
+            <template v-if="!totp.enabled">
+              <div v-if="!totpSetupInfo" class="hstack">
+                <button class="btn tiny primary" :disabled="busyTotp" @click="startTotpBind">{{ $t('settings.totpBind') }}</button>
+              </div>
+              <div v-else class="totp-bind">
+                <img class="qr-img" :src="totpQrUrl" alt="TOTP" />
+                <div class="totp-bind-side">
+                  <span class="hint">{{ $t('settings.totpScanHint') }}</span>
+                  <div class="field col">
+                    <label>{{ $t('settings.totpSecret') }}</label>
+                    <input class="inp mono" :value="totpSetupInfo.secret" readonly @focus="$event.target.select()" />
+                  </div>
+                  <div class="field col">
+                    <label>{{ $t('settings.totpCode') }}</label>
+                    <input class="inp mono" v-model="totpCodeInput" inputmode="numeric" maxlength="6" :placeholder="$t('settings.totpCodePh')" @keyup.enter="confirmTotpBind" />
+                  </div>
+                  <div class="hstack">
+                    <button class="btn tiny primary" :disabled="busyTotp" @click="confirmTotpBind">{{ $t('settings.totpConfirm') }}</button>
+                    <button class="btn tiny ghost" @click="totpSetupInfo = null; totpCodeInput = ''">{{ $t('common.cancel') }}</button>
+                  </div>
+                </div>
+              </div>
+            </template>
+
+            <template v-else>
+              <div class="field col" v-if="recoveryCodes.length">
+                <label>{{ $t('settings.totpRecovery') }}</label>
+                <code class="mono rec-codes">{{ recoveryCodes.join('   ') }}</code>
+                <span class="hint">{{ $t('settings.totpRecoveryHint') }}</span>
+                <div class="hstack">
+                  <button class="btn tiny ghost" @click="copyText(recoveryCodes.join('\n'))">{{ $t('settings.copy') }}</button>
+                </div>
+              </div>
+              <div class="field col">
+                <label>{{ $t('settings.totpCode') }}</label>
+                <input class="inp mono" v-model="totpCodeInput" inputmode="numeric" maxlength="20" :placeholder="$t('settings.totpOffPh')" />
+                <span class="hint">{{ $t('settings.totpRecoveryLeft', { n: totp.recovery_left }) }}</span>
+              </div>
+              <div class="hstack">
+                <button class="btn tiny danger" :disabled="busyTotp" @click="disableTotp">{{ $t('settings.totpDisable') }}</button>
+              </div>
+            </template>
+          </div>
+        </div>
+
+        <!-- 事务 API Key -->
+        <div class="panel">
+          <div class="panel-head">{{ $t('settings.keyTitle') }}</div>
+          <div class="panel-body">
+            <span class="hint">{{ $t('settings.keyHint') }}</span>
+            <div class="hstack">
+              <input class="inp" v-model="newKeyName" :placeholder="$t('settings.keyNamePh')" style="max-width:200px" />
+              <select class="inp" v-model="newKeyScope" style="max-width:170px">
+                <option value="full">{{ $t('settings.keyScopeFull') }}</option>
+                <option value="read">{{ $t('settings.keyScopeRead') }}</option>
+              </select>
+              <button class="btn tiny primary" :disabled="busyKey" @click="doCreateKey">{{ $t('settings.keyCreate') }}</button>
+            </div>
+            <div v-if="createdKey" class="fw-tip">
+              <div class="fw-tip-title">🔑 {{ $t('settings.keyCreatedTitle') }}</div>
+              <code class="fw-cmd mono">{{ createdKey }}</code>
+              <div class="hstack">
+                <button class="btn tiny ghost" @click="copyText(createdKey)">{{ $t('settings.copy') }}</button>
+                <button class="btn tiny ghost" @click="createdKey = ''">{{ $t('common.cancel') }}</button>
+              </div>
+              <div class="fw-tip-body">{{ $t('settings.keyCreatedHint') }}</div>
+            </div>
+            <div class="field col" v-if="apiKeys.length">
+              <div v-for="k in apiKeys" :key="k.id" class="sec-row">
+                <span class="mono">{{ k.id }}</span>
+                <span class="sec-grow">{{ k.name }}</span>
+                <span class="muted sm">{{ k.scope === 'read' ? $t('settings.keyScopeRead') : $t('settings.keyScopeFull') }}</span>
+                <span class="muted sm tabular">{{ k.last_used ? fmtAgo(k.last_used) : $t('settings.keyNever') }}</span>
+                <button class="btn tiny ghost" @click="doRevokeKey(k.id)">{{ $t('settings.secRevoke') }}</button>
+              </div>
+            </div>
+            <span v-else class="muted">{{ $t('settings.keyEmpty') }}</span>
           </div>
         </div>
 
@@ -1690,6 +1888,10 @@ onMounted(async () => { await load(); await loadServerInfo(); loadPlugins() })
 .sec-row { display: flex; align-items: center; gap: 10px; padding: 5px 0; border-bottom: 1px solid var(--c-line, rgba(128,128,128,.18)); }
 .sec-row:last-child { border-bottom: none; }
 .sec-grow { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 两步验证绑定：左侧二维码 + 右侧密钥与验证码 */
+.totp-bind { display: flex; gap: var(--sp-4, 16px); align-items: flex-start; flex-wrap: wrap; }
+.totp-bind-side { flex: 1; min-width: 220px; display: flex; flex-direction: column; gap: var(--sp-2, 8px); }
+.rec-codes { display: block; padding: var(--sp-2, 8px); border-radius: var(--r-sm, 6px); background: var(--c-surface-2, rgba(128,128,128,.12)); word-spacing: 10px; user-select: all; }
 .st-tabs { border-bottom: none; }
 /* 居中 + 舒适最大宽度 + 充足底部留白 */
 .view-body {

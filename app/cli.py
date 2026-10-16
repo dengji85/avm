@@ -229,7 +229,22 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def _force_utf8_stdio() -> None:
+    """把标准输出 / 错误统一切到 UTF-8（环境不支持时静默跳过）。
+
+    Windows 控制台以及「重定向到文件」的场景默认走本地编码（cp936/cp1252 等），
+    中文日志会以本地编码写出，之后用 UTF-8 工具打开就成了一片乱码。
+    开发脚本、打包 exe、容器都以本函数所在模块为唯一入口，故在此统一兜底。
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
+
 def main(argv=None) -> int:
+    _force_utf8_stdio()
     args = build_parser().parse_args(argv)
     if args.cmd == "scan":
         return cmd_scan(args)

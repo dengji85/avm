@@ -11,6 +11,7 @@ from typing import Any, Dict
 from fastapi import APIRouter, HTTPException, Request, Response
 
 from . import auth
+from . import totp as totp_mod
 from .config import ensure_access_token, load_config, update_config
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
@@ -92,6 +93,31 @@ def login(payload: Dict[str, Any], request: Request, response: Response) -> Dict
         elif max_fails:
             msg += "，已达上限，请稍后再试"
         raise HTTPException(401, msg)
+
+    # 两步验证：启用后仅凭令牌还不够，必须再提交一次验证器验证码（或备用码）。
+    # 令牌正确但未带验证码时返回 200 + need_totp（**不签发会话**），
+    # 前端据此在同一个弹窗里显示第二步输入框，用户不必重输令牌。
+    if bool(server.get("totp_enabled")) and (server.get("totp_secret") or "").strip():
+        code = str((payload or {}).get("totp") or "").strip()
+        if not code:
+            return {"ok": False, "need_totp": True}
+        secret = (server.get("totp_secret") or "").strip()
+        step = totp_mod.verify(secret, code, after=float(server.get("totp_last_step") or 0))
+        if step is not None:
+            # 记录已用时间步，同一验证码在有效期内不可重放
+            update_config({"server": {"totp_last_step": int(step)}})
+            auth.audit("login", ip, ua, "两步验证通过", ok=True)
+        else:
+            # 备用码兜底：命中即从列表移除（一次性）
+            recovery = list(server.get("totp_recovery") or [])
+            hit = totp_mod.match_recovery(code, recovery)
+            if not hit:
+                n = _record_fail(ip)
+                auth.audit("login", ip, ua, "两步验证码错误（第 %d 次）" % n, ok=False)
+                raise HTTPException(401, "两步验证码不正确")
+            rest = [h for h in recovery if h != hit]
+            update_config({"server": {"totp_recovery": rest}})
+            auth.audit("login", ip, ua, "使用备用码登录（剩余 %d 个）" % len(rest), ok=True)
 
     auth.clear_fails(ip)
     idle, absd = _idle_abs(server)
@@ -347,3 +373,159 @@ def privacy_unlock(payload: Dict[str, Any], request: Request) -> Dict[str, Any]:
     auth.privacy_unlock()
     auth.audit("privacy-unlock", ip, ua, "已解锁（%s）" % mode)
     return {"ok": True, "locked": False}
+
+
+# ------------------------------------------------------------------ 两步验证（TOTP）
+@router.get("/totp")
+def totp_status(request: Request) -> Dict[str, Any]:
+    """两步验证状态（不下发密钥与备用码）。"""
+    server = _server_cfg()
+    return {
+        "enabled": bool(server.get("totp_enabled")) and bool((server.get("totp_secret") or "").strip()),
+        "recovery_left": len(server.get("totp_recovery") or []),
+        "pending": auth.totp_pending(_client(request, server)),
+        "issuer": totp_mod.ISSUER,
+        "digits": totp_mod.DIGITS,
+        "period": totp_mod.STEP,
+    }
+
+
+@router.post("/totp/setup")
+def totp_setup(request: Request) -> Dict[str, Any]:
+    """开始绑定：生成密钥并返回 otpauth 链接（此时**尚未启用**，需再确认一次验证码）。"""
+    server = _server_cfg()
+    ip = _client(request, server)
+    if bool(server.get("totp_enabled")) and (server.get("totp_secret") or "").strip():
+        raise HTTPException(400, "两步验证已启用，请先关闭再重新绑定")
+    secret = totp_mod.new_secret()
+    auth.totp_stash(ip, secret)
+    account = "avm@%s" % (server.get("host") or "localhost")
+    return {"ok": True, "secret": secret, "uri": totp_mod.provisioning_uri(secret, account)}
+
+
+@router.get("/totp/qr")
+def totp_qr(request: Request) -> Response:
+    """把当前待确认的 otpauth 链接渲染成二维码（绑定用）。
+
+    密钥直接从服务端暂存里取，**不经过 URL 或响应正文**，避免密钥出现在
+    浏览器历史 / 反向代理日志里；重复请求图片也不会消费掉暂存。
+    """
+    import io
+
+    import qrcode
+
+    server = _server_cfg()
+    ip = _client(request, server)
+    secret = auth.totp_peek(ip)
+    if not secret:
+        raise HTTPException(400, "绑定已过期，请重新生成二维码")
+    uri = totp_mod.provisioning_uri(secret, "avm@%s" % (server.get("host") or "localhost"))
+    img = qrcode.QRCode(box_size=6, border=2, error_correction=qrcode.constants.ERROR_CORRECT_M)
+    img.add_data(uri)
+    img.make(fit=True)
+    buf = io.BytesIO()
+    img.make_image(fill_color="#111", back_color="#fff").save(buf, format="PNG")
+    return Response(content=buf.getvalue(), media_type="image/png",
+                    headers={"Cache-Control": "no-store"})
+
+
+@router.post("/totp/enable")
+def totp_enable(payload: Dict[str, Any], request: Request) -> Dict[str, Any]:
+    """确认绑定：校验一次验证码后启用，并返回备用码（**只展示这一次**）。"""
+    server = _server_cfg()
+    ip = _client(request, server)
+    ua = _ua(request)
+    # 与登录共用同一套失败限速：绑定确认同样不能被反复尝试
+    max_fails = int(server.get("login_max_fails") or 0)
+    block_min = int(server.get("login_block_minutes") or 0)
+    until = auth.blocked_until(ip, max_fails, block_min)
+    now = time.time()
+    if until > now:
+        auth.audit("totp", ip, ua, "处于封禁期，拒绝绑定确认", ok=False)
+        raise HTTPException(429, "尝试次数过多，请 %d 分钟后再试" % (int((until - now) // 60) + 1))
+    code = str((payload or {}).get("code") or "").strip()
+    secret, created = auth.totp_take(ip)
+    if not secret:
+        raise HTTPException(400, "绑定已超时，请重新生成二维码")
+    if totp_mod.verify(secret, code) is None:
+        # 输错不算致命失败，允许重试（密钥不丢），但要计数，且**保持原 TTL 起点**
+        n = _record_fail(ip)
+        auth.totp_stash(ip, secret, created)
+        auth.audit("totp", ip, ua, "绑定确认失败：验证码不正确（第 %d 次）" % n, ok=False)
+        raise HTTPException(401, "验证码不正确；请确认手机时间已自动同步后重试")
+    codes = totp_mod.new_recovery_codes()
+    auth.clear_fails(ip)          # 与 login / disable 一致：成功后清零失败计数
+    update_config({"server": {
+        "totp_enabled": True,
+        "totp_secret": secret,
+        "totp_last_step": int(time.time() // totp_mod.STEP),
+        "totp_recovery": [totp_mod.hash_code(c) for c in codes],
+    }})
+    auth.audit("totp", ip, ua, "已启用两步验证", ok=True)
+    return {"ok": True, "recovery_codes": codes}
+
+
+@router.post("/totp/disable")
+def totp_disable(payload: Dict[str, Any], request: Request) -> Dict[str, Any]:
+    """关闭两步验证：需提交当前验证码或任一备用码。"""
+    server = _server_cfg()
+    ip = _client(request, server)
+    ua = _ua(request)
+    # 与登录共用同一套失败限速：验证码若能无限次尝试，两步验证即形同虚设
+    max_fails = int(server.get("login_max_fails") or 0)
+    block_min = int(server.get("login_block_minutes") or 0)
+    until = auth.blocked_until(ip, max_fails, block_min)
+    now = time.time()
+    if until > now:
+        auth.audit("totp", ip, ua, "处于封禁期，拒绝关闭尝试", ok=False)
+        raise HTTPException(429, "尝试次数过多，请 %d 分钟后再试" % (int((until - now) // 60) + 1))
+    secret = (server.get("totp_secret") or "").strip()
+    if not (bool(server.get("totp_enabled")) and secret):
+        return {"ok": True, "enabled": False}
+    code = str((payload or {}).get("code") or "").strip()
+    ok = totp_mod.verify(secret, code) is not None
+    if not ok:
+        ok = totp_mod.match_recovery(code, list(server.get("totp_recovery") or [])) is not None
+    if not ok:
+        n = _record_fail(ip)
+        auth.audit("totp", ip, ua, "关闭两步验证失败：验证码不正确（第 %d 次）" % n, ok=False)
+        raise HTTPException(401, "验证码不正确")
+    auth.clear_fails(ip)
+    update_config({"server": {
+        "totp_enabled": False, "totp_secret": "", "totp_last_step": 0, "totp_recovery": [],
+    }})
+    auth.audit("totp", ip, ua, "已关闭两步验证", ok=True)
+    return {"ok": True, "enabled": False}
+
+
+# ------------------------------------------------------------------ 事务 API Key
+@router.get("/keys")
+def list_keys() -> Dict[str, Any]:
+    """API Key 列表（只含名称 / 范围 / 使用情况，不含明文与哈希）。"""
+    return {"items": auth.list_api_keys()}
+
+
+@router.post("/keys")
+def create_key(payload: Dict[str, Any], request: Request) -> Dict[str, Any]:
+    """新建 API Key：明文只在本次响应里返回一次，请立即保存。"""
+    server = _server_cfg()
+    ip = _client(request, server)
+    name = str((payload or {}).get("name") or "").strip()
+    scope = str((payload or {}).get("scope") or "full").strip().lower()
+    raw, info = auth.new_api_key(name, scope)
+    auth.audit("api-key", ip, _ua(request), "已创建 API Key：%s（%s）" % (info["name"], info["scope"]))
+    return {"ok": True, "key": raw, "item": {
+        "id": info["id"], "name": info["name"], "scope": info["scope"],
+        "created": info["created"], "last_used": 0.0, "uses": 0,
+    }}
+
+
+@router.delete("/keys/{key_id}")
+def delete_key(key_id: str, request: Request) -> Dict[str, Any]:
+    """吊销 API Key。"""
+    server = _server_cfg()
+    ip = _client(request, server)
+    ok = auth.revoke_api_key(key_id)
+    if ok:
+        auth.audit("api-key", ip, _ua(request), "已吊销 API Key %s" % key_id)
+    return {"ok": ok}

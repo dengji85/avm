@@ -27,7 +27,8 @@ if _cors_origins:
         CORSMiddleware,
         allow_origins=_cors_origins,
         allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH"],
-        allow_headers=["Content-Type", "X-Access-Token", "X-Requested-With"],
+        allow_headers=["Content-Type", "X-Access-Token", "X-Requested-With",
+                       "Authorization", "X-API-Key"],
     )
 
 # 公开的静态资源目录（前缀匹配，路径由 Vite 构建产物决定）
@@ -54,6 +55,16 @@ _LOCK_ALLOWED = (
     "/api/auth/verify-pin",    # 简单密码解锁
 )
 
+# 事务 API Key **不可**访问的凭据管理接口：Key 是机器凭据，一旦泄露若还能
+# 自建新 Key（持久化）、绑定 / 解绑 TOTP（把所有者锁在门外）或一次登出所有设备，
+# 影响面会被显著放大。这些操作必须由交互式会话完成。
+_KEY_FORBIDDEN = (
+    "/api/auth/keys",          # API Key 自身的创建 / 列表 / 吊销
+    "/api/auth/totp",          # 两步验证的绑定、启用、关闭、二维码
+    "/api/auth/logout-all",    # 一次登出全部设备
+    "/api/auth/sessions",      # 活跃会话（含 IP / UA 的设备列表）
+)
+
 
 def _cookie_token(raw: str) -> str:
     """从 Cookie 头里取出旧版前端写入的 avm_token（升级后由前端清除）。"""
@@ -73,6 +84,15 @@ def _query_token(scope: Scope) -> str:
         if pair.startswith("token="):
             return unquote(pair.split("=", 1)[1])
     return ""
+
+
+def _api_key_from(scope: Scope) -> str:
+    """从 ``Authorization: Bearer ***`` 或 ``X-API-Key`` 头里取出事务 API Key。"""
+    h = auth.http_headers(scope)
+    bearer = (h.get("authorization") or "").strip()
+    if bearer.lower().startswith("bearer "):
+        return bearer[7:].strip()
+    return (h.get("x-api-key") or "").strip()
 
 
 def _token_valid(scope: Scope, cfg_token: str) -> bool:
@@ -155,6 +175,27 @@ class AccessTokenMiddleware(BaseHTTPMiddleware):
             # 3) 本机豁免（容器内默认关闭：端口映射与同机反代无法区分「真本机」）
             if not allowed and bool(server.get("local_bypass", True)) and auth.is_local_ip(ip):
                 allowed = True
+            # 4) 事务 API Key（Authorization: Bearer / X-API-Key），供脚本与自动化。
+            #    与登录会话分离：可命名、可单独吊销、scope=read 时只允许读取。
+            #    注意 API Key **不受两步验证约束** —— 它是机器凭据，要求交互式验证码
+            #    会让自动化不可用；代价是「多了一把不需要两步验证的钥匙」，设置页已提示。
+            if not allowed:
+                raw_key = _api_key_from(request.scope)
+                if raw_key:
+                    key_info = auth.verify_api_key(raw_key)
+                    if key_info:
+                        # 凭据管理接口不接受 API Key（见 _KEY_FORBIDDEN 注释）
+                        if path.startswith(_KEY_FORBIDDEN):
+                            auth.audit("deny", ip, ua,
+                                       "%s（API Key 不可用于凭据管理）" % path, ok=False)
+                            return JSONResponse(
+                                status_code=403,
+                                content={"detail": "该接口需交互式会话，API Key 不可用",
+                                         "code": "KEY_FORBIDDEN"},
+                            )
+                        allowed = True
+                        request.scope["avm_api_scope"] = key_info.get("scope") or "full"
+                        request.scope["avm_api_name"] = key_info.get("name") or ""
 
             if not allowed:
                 auth.audit("deny", ip, ua, path, ok=False)
@@ -163,7 +204,7 @@ class AccessTokenMiddleware(BaseHTTPMiddleware):
                     content={"detail": "需要访问令牌", "code": "NO_TOKEN"},
                 )
 
-        # 4) 隐私锁定（状态在服务端）：除解锁相关接口外一律拒绝。
+        # 5) 隐私锁定（状态在服务端）：除解锁相关接口外一律拒绝。
         #    锁定状态不存前端，所以刷新页面 / 重开标签页 / 直接调接口都拿不到内容。
         #    这一段刻意放在 require_token_remote 判断**之外**：关掉访问保护做本机调试时，
         #    锁定仍须生效，否则「锁定」在关闭访问控制后就形同虚设。
@@ -171,6 +212,13 @@ class AccessTokenMiddleware(BaseHTTPMiddleware):
             return JSONResponse(
                 status_code=423,
                 content={"detail": "内容已锁定", "code": "LOCKED"},
+            )
+
+        # 6) 只读 API Key 不得执行写操作（脚本误用 / 泄漏后的影响面收敛）
+        if request.scope.get("avm_api_scope") == "read" and request.method not in ("GET", "HEAD"):
+            return JSONResponse(
+                status_code=403,
+                content={"detail": "该 API Key 为只读，不能执行写操作", "code": "READ_ONLY"},
             )
 
         return await call_next(request)
@@ -272,6 +320,7 @@ def _startup() -> None:
     # 会话持久化：开启时恢复上次落盘的会话（默认关闭 → 容器重启即全部失效）
     auth.set_persist(bool(server.get("session_persist")))
     restored = auth.load_persisted()
+    keys = auth.load_api_keys()
     host = server.get("host", "127.0.0.1")
     if host in ("0.0.0.0", ""):
         local_bypass = bool(server.get("local_bypass", True))
@@ -283,6 +332,8 @@ def _startup() -> None:
         print("  本机免令牌：%s（server.local_bypass）" % ("是" if local_bypass else "否"))
         if restored:
             print("  已恢复 %d 个持久会话（server.session_persist=true）" % restored)
+        if keys:
+            print("  已加载 %d 个 API Key（设置 → 访问 可管理）" % keys)
         print("=" * 60)
     _start_auto_scan()
 

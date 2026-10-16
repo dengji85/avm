@@ -253,6 +253,12 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "security_headers": True,
         # 出站 HTTPS 是否跳过证书校验（不推荐开启）
         "insecure_skip_verify": False,
+        # 两步验证（TOTP）：启用后，用令牌换取会话时还需输入验证器 App 的 6 位码。
+        # 注意：以下字段都是凭据或凭据材料，GET /api/config 不会下发（见 app/api.py）。
+        "totp_enabled": False,
+        "totp_secret": "",        # Base32 密钥
+        "totp_last_step": 0,      # 最近一次通过的时间步，用于防重放
+        "totp_recovery": [],      # 备用码哈希（一次性，用后即删）
         # 版本更新清单地址。默认指向 GitHub Releases（发版即打 tag 推到 git 即可自动生效）：
         # 后端会按 GitHub 结构解析 tag_name(版本)/html_url(下载页)/body(更新说明)/published_at(日期)。
         # 也可改为自建的版本清单 JSON（含 version/download_url/released/notes）。
@@ -392,6 +398,13 @@ def _write(cfg: Dict[str, Any]) -> None:
     tmp = CONFIG_PATH.with_suffix(".tmp")
     tmp.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
     tmp.replace(CONFIG_PATH)
+    # config.json 内含访问令牌与 TOTP 密钥明文，权限须与访问令牌文件一致（0600）：
+    # 否则同机低权限进程可直接读走密钥，绕过两步验证。Windows 上 chmod 语义有限，
+    # 失败静默跳过（与 token / sessions / api_keys 文件同一处理方式）。
+    try:
+        os.chmod(CONFIG_PATH, 0o600)
+    except Exception:
+        pass
 
 
 def save_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
@@ -458,6 +471,37 @@ def mask_token(tok: str) -> str:
     if len(t) <= 8:
         return "*" * len(t)
     return "%s******%s" % (t[:4], t[-4:])
+
+
+def outbound_verify_tls() -> bool:
+    """出站 HTTPS 是否校验服务器证书（server.insecure_skip_verify 的反相）。
+
+    默认 **True（严格校验）**。只有用户在配置里显式写了
+    ``server.insecure_skip_verify = true`` 才返回 False —— 该开关是给
+    「目标站证书过期 / 自签 / 本地代理做了 TLS 中间人」这类确实校验不过的场景
+    留的逃生口，打开等于放弃出站连接的中间人防护，不建议长期开启。
+
+    读取失败（配置损坏等）时一律按「校验」处理，避免静默降级。
+    """
+    try:
+        return not bool((load_config().get("server") or {}).get("insecure_skip_verify"))
+    except Exception:
+        return True
+
+
+def outbound_ssl_context():
+    """出站请求用的 SSLContext（供 urllib 使用）。
+
+    与 requests 的 ``verify=outbound_verify_tls()`` 共用同一开关，
+    保证「图片下载 / 刮削 / 维基插件」三处出站行为一致。
+    """
+    import ssl
+
+    ctx = ssl.create_default_context()
+    if not outbound_verify_tls():
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+    return ctx
 
 
 def roots_to_scan(cfg: Dict[str, Any] | None = None) -> list:

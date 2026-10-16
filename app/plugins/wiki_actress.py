@@ -26,12 +26,12 @@ from __future__ import annotations
 
 import json
 import re
-import ssl
 import time
 import urllib.parse
 import urllib.request
 from typing import Any, Dict, Optional
 
+from ..config import outbound_ssl_context
 from .base import ActressPlugin
 
 WIKI_API = "https://{lang}.wikipedia.org/w/api.php"
@@ -105,9 +105,8 @@ def _wiki_fetch_text(cfg: Dict[str, Any], lang: str, params: Dict[str, Any]) -> 
 
     proxy_handler = urllib.request.ProxyHandler(
         {"http": proxy, "https": proxy} if proxy else {})
-    ctx = ssl.create_default_context()
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
+    # 证书校验默认开启；仅 server.insecure_skip_verify=true 时降级（逃生口）
+    ctx = outbound_ssl_context()
     opener = urllib.request.build_opener(
         proxy_handler, urllib.request.HTTPSHandler(context=ctx))
     opener.addheaders = [("User-Agent", "Mozilla/5.0 (av-manager actress plugin)")]

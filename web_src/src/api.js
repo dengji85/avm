@@ -1,6 +1,6 @@
 // 统一 API 请求封装。开发期由 vite proxy 转发 /api 到后端。
 import { ref } from 'vue'
-const API = '/api'
+export const API = '/api'
 const TOKEN_KEY = 'avm_access_token'
 // 后端不可达（服务未启动 / 连接被拒）时的全局状态，供 UI 显示离线横幅
 export const serverOffline = ref(false)
@@ -110,7 +110,7 @@ export const clearStreamCache = () => post('/stream-cache/clear', {})
 export const csvUrl = () => `${API}/export/csv`
 
 /* ---------------- 登录 / 会话（见 docs/安全与隐私设计.md） ---------------- */
-export const login = (token) => post('/auth/login', { token })
+export const login = (token, totp = '') => post('/auth/login', { token, totp })
 export const logout = () => post('/auth/logout', {})
 export const logoutAll = () => post('/auth/logout-all', {})
 export const getSession = () => get('/auth/session')
@@ -120,6 +120,15 @@ export const getAudit = (limit = 50) => get(`/auth/audit?limit=${encodeURICompon
 /* 隐私解锁：简单密码（只存哈希在服务端，前端只发送明文校验） */
 export const pinStatus = () => get('/auth/pin-status')
 export const setPin = (pin) => post('/auth/set-pin', { pin })
+/* 两步验证（TOTP）：密钥与备用码只存在服务端，前端仅提交验证码 */
+export const totpStatus = () => get('/auth/totp')
+export const totpSetup = () => post('/auth/totp/setup', {})
+export const totpEnable = (code) => post('/auth/totp/enable', { code })
+export const totpDisable = (code) => post('/auth/totp/disable', { code })
+/* 事务 API Key：明文只在创建时返回一次 */
+export const listApiKeys = () => get('/auth/keys')
+export const createApiKey = (name, scope) => post('/auth/keys', { name, scope })
+export const revokeApiKey = (id) => del(`/auth/keys/${encodeURIComponent(id)}`)
 
 /* 隐私锁定：状态存服务端，刷新页面无法绕过 */
 export const privacyState = () => get('/privacy/state')

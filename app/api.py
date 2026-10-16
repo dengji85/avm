@@ -870,7 +870,14 @@ def get_stats() -> Dict[str, Any]:
         data["recent"] = [store._row_to_card(r) for r in data["recent"]]
         data["scan_logs"] = query_all(
             conn, "SELECT * FROM scan_logs ORDER BY id DESC LIMIT 10")
-        return data
+    # 原挂在免令牌 /api/health 上的运行时信息（暴露面收敛后移到需鉴权的这里）
+    data["runtime"] = {
+        "python": sys.version.split()[0],
+        "data_dir": str(DATA_DIR),
+        "scan_running": SCAN.running,
+        "scrape_running": SCRAPE.running,
+    }
+    return data
 
 
 @router.get("/profile")
@@ -1825,12 +1832,20 @@ def _require_local(request: Request) -> str:
 @router.get("/config")
 def get_config() -> Dict[str, Any]:
     cfg = load_config(refresh=True)
-    # 安全：privacy.pin_hash 是可离线爆破的凭据材料（4 位纯数字的 PBKDF2 哈希几分钟内
-    # 即可还原），任何情况下都不下发。前端只需知道「是否已设置」——
-    # 遮挡层读 /api/privacy/state 的 has_pin，设置页读 /api/auth/pin-status。
+    # 安全：以下字段是凭据或凭据材料，任何情况下都不下发（前端需要的信息走专用接口）：
+    #   privacy.pin_hash    —— 可离线爆破简单密码，进而绕过隐私锁定
+    #   server.access_token —— 长期令牌，取走即可绕过会话的过期 / 登出 / 踢设备
+    #                          （本机需要完整令牌时用 /api/server/info，那里按来源判定）
+    #   server.totp_*       —— 两步验证密钥、备用码哈希与防重放步数
+    # 前端只用「是否已设置」这类布尔量：pin 走 /api/privacy/state 与 /api/auth/pin-status，
+    # 令牌走 /api/server/info，TOTP 走 /api/auth/totp。
     privacy = cfg.get("privacy")
-    if isinstance(privacy, dict) and privacy.get("pin_hash"):
+    if isinstance(privacy, dict):
         privacy.pop("pin_hash", None)
+    server = cfg.get("server")
+    if isinstance(server, dict):
+        for field in ("access_token", "totp_secret", "totp_recovery", "totp_last_step"):
+            server.pop(field, None)
     return cfg
 
 
@@ -2367,16 +2382,13 @@ def batch_update_movies(payload: Dict[str, Any] = Body(default={})) -> Dict[str,
 
 @router.get("/health")
 def health() -> Dict[str, Any]:
-    with db() as conn:
-        total = query_one(conn, "SELECT COUNT(*) AS c FROM movies")
-    return {
-        "ok": True,
-        "python": sys.version.split()[0],
-        "data_dir": str(DATA_DIR),
-        "movies": total["c"] if total else 0,
-        "scan_running": SCAN.running,
-        "scrape_running": SCRAPE.running,
-    }
+    """健康检查（免令牌白名单）：只回最小可判定信息，供探活 / 容器健康检查使用。
+
+    早先这里一并回显 data_dir、库内影片数与扫描状态，等于让**匿名请求**就能探到
+    数据目录与收藏规模；按设计文档 §L3「暴露面收敛」把这些字段移入需鉴权的
+    /api/stats（键 runtime）。
+    """
+    return {"ok": True, "version": APP_VERSION}
 
 
 # ------------------------------------------------------------------ 字幕匹配与对齐

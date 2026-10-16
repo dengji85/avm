@@ -9,7 +9,7 @@ import shutil
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from .config import COVER_DIR, avatar_dir, fanart_dir, ensure_dirs
+from .config import COVER_DIR, avatar_dir, fanart_dir, ensure_dirs, outbound_ssl_context
 
 IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif")
 
@@ -184,7 +184,6 @@ def _download_urllib(url: str, headers: Dict[str, str], proxy: str, timeout: int
     """
     import gzip
     import io
-    import ssl
     import urllib.parse
     import urllib.request
     try:
@@ -198,9 +197,9 @@ def _download_urllib(url: str, headers: Dict[str, str], proxy: str, timeout: int
             url = enc_url
         proxy_handler = urllib.request.ProxyHandler(
             {"http": proxy, "https": proxy} if proxy else {})
-        ctx = ssl.create_default_context()
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
+        # 证书校验默认开启（出站中间人防护）；只有用户显式设置
+        # server.insecure_skip_verify = true 时才降级为不校验。
+        ctx = outbound_ssl_context()
         opener = urllib.request.build_opener(
             proxy_handler, urllib.request.HTTPSHandler(context=ctx))
         req = urllib.request.Request(url, headers=headers)

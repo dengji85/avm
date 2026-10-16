@@ -384,3 +384,178 @@ def privacy_locked() -> bool:
 def privacy_state() -> Dict[str, Any]:
     with _LOCK:
         return dict(_PRIVACY)
+
+
+# ------------------------------------------------------------------ 事务 API Key
+# 供脚本 / 自动化调用：与登录会话分离，可命名、可吊销、可限定「只读」；
+# 磁盘只保存 SHA-256 哈希（权限 0600），明文仅在创建时返回一次。
+_API_KEYS: Dict[str, Dict[str, Any]] = {}   # 哈希 -> {id, name, scope, created, last_used, uses}
+KEY_PREFIX = "avm_"
+
+
+def _keys_path() -> str:
+    from .config import DATA_DIR
+    return str(DATA_DIR / "api_keys.json")
+
+
+def key_hash(raw: str) -> str:
+    return hashlib.sha256(("avm-key:" + (raw or "").strip()).encode("utf-8")).hexdigest()
+
+
+def load_api_keys() -> int:
+    """启动时读取落盘的 API Key（只有哈希，没有明文）。"""
+    try:
+        with open(_keys_path(), "r", encoding="utf-8") as f:
+            data = json.loads(f.read() or "{}")
+    except Exception:
+        return 0
+    n = 0
+    with _LOCK:
+        for fp, info in (data.get("keys") or {}).items():
+            if isinstance(info, dict):
+                _API_KEYS[fp] = info
+                n += 1
+    return n
+
+
+def _save_api_keys() -> None:
+    try:
+        with _LOCK:
+            payload = json.dumps({"keys": _API_KEYS}, ensure_ascii=False)
+        path = _keys_path()
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(payload)
+        os.replace(tmp, path)
+        try:
+            os.chmod(path, 0o600)
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+
+def new_api_key(name: str, scope: str = "full") -> Tuple[str, Dict[str, Any]]:
+    """新建 API Key；返回（明文 key，记录）—— 明文只在此刻出现一次。"""
+    raw = KEY_PREFIX + secrets.token_urlsafe(32)
+    info = {
+        "id": secrets.token_hex(4),
+        "name": (name or "").strip()[:40] or "未命名",
+        "scope": "read" if (scope or "").strip().lower() == "read" else "full",
+        "created": time.time(),
+        "last_used": 0.0,
+        "uses": 0,
+    }
+    with _LOCK:
+        _API_KEYS[key_hash(raw)] = info
+    _save_api_keys()
+    return raw, dict(info)
+
+
+def verify_api_key(raw: str) -> Optional[Dict[str, Any]]:
+    """校验 API Key：命中则记录使用时间与次数，返回记录（含 scope）。"""
+    k = (raw or "").strip()
+    if not k.startswith(KEY_PREFIX):
+        return None
+    fp = key_hash(k)
+    need_save = False
+    with _LOCK:
+        info = _API_KEYS.get(fp)
+        if not info:
+            return None
+        now = time.time()
+        info["last_used"] = now
+        info["uses"] = int(info.get("uses") or 0) + 1
+        # 使用记录节流写盘：脚本高频调用时不至于每个请求都落盘
+        if now - float(info.get("_saved") or 0) > 60:
+            info["_saved"] = now
+            need_save = True
+        out = dict(info)
+    if need_save:
+        _save_api_keys()
+    return out
+
+
+def list_api_keys() -> List[Dict[str, Any]]:
+    """API Key 列表（不含哈希，对外安全）。"""
+    with _LOCK:
+        items = [{
+            "id": info.get("id", ""),
+            "name": info.get("name", ""),
+            "scope": info.get("scope", "full"),
+            "created": float(info.get("created") or 0),
+            "last_used": float(info.get("last_used") or 0),
+            "uses": int(info.get("uses") or 0),
+        } for info in _API_KEYS.values()]
+    items.sort(key=lambda x: x["created"], reverse=True)
+    return items
+
+
+def revoke_api_key(public_id: str) -> bool:
+    """按公开 id 吊销 API Key。"""
+    pid = (public_id or "").strip().lower()
+    if len(pid) < 4:
+        return False
+    with _LOCK:
+        for fp in list(_API_KEYS.keys()):
+            if str(_API_KEYS[fp].get("id", "")).lower() == pid:
+                _API_KEYS.pop(fp, None)
+                _save_api_keys()
+                return True
+    return False
+
+
+# ------------------------------------------------------------------ 两步验证（TOTP）
+# 待确认的绑定密钥只放内存：用户在设置页扫码后若没有完成验证，重启即作废，
+# 不会在磁盘上留下「已生成密钥但未启用」的半成品。
+_TOTP_PENDING: Dict[str, Dict[str, Any]] = {}
+TOTP_PENDING_TTL = 600          # 绑定窗口（秒）
+
+
+def totp_stash(ip: str, secret: str, created: float = 0.0) -> None:
+    """暂存待确认密钥。
+
+    ``created`` 传原写入时间戳时，TTL 起点保持不变 —— 否则「验证码输错 → 放回
+    重试」每次都刷新起点，待确认密钥会被无限续期。不传则按当前时间计。
+    """
+    with _LOCK:
+        _TOTP_PENDING[ip or "-"] = {
+            "secret": secret,
+            "created": float(created) or time.time(),
+        }
+
+
+def totp_take(ip: str) -> Tuple[str, float]:
+    """取出待确认密钥（一次性，取出即失效）；返回 ``(密钥, 写入时间)``。
+
+    返回写入时间是为了在「输错后放回暂存重试」时保持原 TTL 起点。
+    密钥不存在或已超时返回 ``("", 0.0)``。
+    """
+    with _LOCK:
+        item = _TOTP_PENDING.pop(ip or "-", None)
+    if not item:
+        return "", 0.0
+    created = float(item.get("created") or 0)
+    if time.time() - created > TOTP_PENDING_TTL:
+        return "", 0.0
+    return str(item.get("secret") or ""), created
+
+
+def totp_peek(ip: str) -> str:
+    """读取待确认密钥但**不删除**（绑定页可能重复请求二维码图片）。"""
+    with _LOCK:
+        item = _TOTP_PENDING.get(ip or "-")
+    if not item:
+        return ""
+    if time.time() - float(item.get("created") or 0) > TOTP_PENDING_TTL:
+        return ""
+    return str(item.get("secret") or "")
+
+
+def totp_pending(ip: str) -> bool:
+    """是否已有未完成验证的绑定流程（避免反复生成新密钥）。"""
+    with _LOCK:
+        item = _TOTP_PENDING.get(ip or "-")
+    if not item:
+        return False
+    return time.time() - float(item.get("created") or 0) <= TOTP_PENDING_TTL

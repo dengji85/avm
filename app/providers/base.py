@@ -5,6 +5,8 @@ from __future__ import annotations
 import re
 from typing import Any, Dict, List, Optional
 
+from ..config import outbound_verify_tls
+
 MetaResult = Dict[str, Any]
 
 FIELDS = (
@@ -157,7 +159,9 @@ def http_get(url: str, scfg: Dict[str, Any], options: Dict[str, Any],
                 headers=merged,
                 cookies=cookie_dict,
                 proxies={"http": proxy, "https": proxy} if proxy else None,
-                verify=False,
+                # 默认校验服务器证书；仅 server.insecure_skip_verify=true 时跳过
+                # （逃生口，代价是失去出站中间人防护）
+                verify=outbound_verify_tls(),
             )
             resp.raise_for_status()
             # 解码优先级：响应头声明的 charset > HTML <meta> 声明 > UTF-8 兜底。
