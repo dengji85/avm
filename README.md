@@ -18,7 +18,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-1.13.1-1f6feb.svg"/>
+  <img src="https://img.shields.io/badge/version-1.14.0-1f6feb.svg"/>
   <img src="https://img.shields.io/badge/backend-FastAPI-009688.svg"/>
   <img src="https://img.shields.io/badge/frontend-Vue%203%20%2F%20Vite-42b883.svg"/>
   <img src="https://img.shields.io/badge/database-SQLite-003b57.svg"/>
@@ -51,7 +51,7 @@
 
 **方式一：Windows 免安装单文件 exe（推荐）**
 
-1. 到 **[Releases](https://github.com/dengji85/avm/releases)** 下载单个 `AVM-<版本号>.exe`（如 `AVM-1.13.1.exe`）。
+1. 到 **[Releases](https://github.com/dengji85/avm/releases)** 下载单个 `AVM-<版本号>.exe`（如 `AVM-1.14.0.exe`）。
 2. 放到任意目录（如 `D:\AVM\`），双击启动，自动打开浏览器进入 Web UI。
 3. 升级时**把新 `AVM-*.exe` 放到同目录、删掉旧 exe 即可**——数据（`data/` 库/封面/配置）在同目录自动保留，无需手动替换前端资源。
 4. 备份迁移：`AVM-*.exe` 与 `data/` 一起拷贝即可。
@@ -84,7 +84,7 @@ docker compose pull && docker compose up -d
 | --- | --- | --- |
 | `latest` | 最近一次正式发布，稳定 | 日常使用（推荐） |
 | `main` | `main` 分支最新构建，含尚未正式发布的修复 | 想第一时间验证新修复、反馈问题 |
-| `1.13.1` | 固定版本，不随更新变化 | 需要版本可控 |
+| `1.14.0` | 固定版本，不随更新变化 | 需要版本可控 |
 
 > 说明：`latest` 只在发布新版本时更新，**不会被 `main` 的构建覆盖**；想提前拿到修复就拉 `main`。
 

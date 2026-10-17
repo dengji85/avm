@@ -33,7 +33,7 @@ docker compose exec avm cat /data/access_token.txt
 指定版本：
 
 ```bash
-docker pull ghcr.io/dengji85/avm:1.13.1
+docker pull ghcr.io/dengji85/avm:1.14.0
 ```
 
 > 首次使用需要把 GHCR 上的镜像包设为 **Public**（GitHub → 该仓库 → Packages → 对应镜像 → Package settings → Change visibility），
@@ -179,7 +179,7 @@ docker compose up -d --build
 
 | 触发 | 产出标签 |
 | --- | --- |
-| 推送 `v*` 标签（如 `v1.13.1`） | `1.13.1`、`1.13`、`latest` |
+| 推送 `v*` 标签（如 `v1.14.0`） | `1.14.0`、`1.14`、`latest` |
 | 推送 `main` 分支 | `main` |
 | 手动触发（Actions → Run workflow） | 按当前分支规则 |
 
