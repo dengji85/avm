@@ -50,11 +50,51 @@ export function fmtDate(d) {
   return String(d).slice(0, 10)
 }
 
-/** 相对时间：3天前 */
+/**
+ * 把后端的各种时间写法统一成毫秒时间戳。
+ *
+ * 后端（会话 / 审计 / API Key 的 last_used）直接给的是 **秒级 epoch**（如 1792231258.15），
+ * 而早期实现只按日期字符串解析 —— `new Date("1792231258.15")` 是 Invalid Date，
+ * 于是回退到截断字符串，界面上就出现了裸时间戳。
+ * 这里统一兼容：秒级 / 毫秒级数字、ISO 字符串、`YYYY-MM-DD HH:mm:ss`。
+ */
+export function toMs(d) {
+  if (d === null || d === undefined || d === '') return 0
+  const s = String(d).trim()
+  if (/^\d+(\.\d+)?$/.test(s)) {
+    const n = Number(s)
+    if (!n) return 0
+    // 小于 1e11 视为秒级（毫秒级时间戳在 1973 年以前才会低于这个量级）
+    return n < 1e11 ? Math.round(n * 1000) : Math.round(n)
+  }
+  const ts = new Date(s.replace(' ', 'T')).getTime()
+  return Number.isFinite(ts) ? ts : 0
+}
+
+/** 绝对时间（本地时区）：用于 title 提示，如 2026-10-17 18:49 */
+export function fmtDateTime(d) {
+  const ts = toMs(d)
+  if (!ts) return d ? String(d) : ''
+  const dt = new Date(ts)
+  const p = (n) => String(n).padStart(2, '0')
+  return `${dt.getFullYear()}-${p(dt.getMonth() + 1)}-${p(dt.getDate())} ${p(dt.getHours())}:${p(dt.getMinutes())}`
+}
+
+/**
+ * 把容器里看到的宿主机路径美化：`/d/迅雷下载` → `D:\迅雷下载`。
+ * Docker Desktop 的挂载源在 mountinfo 里就是这种形式；Linux 原生路径原样返回。
+ */
+export function prettyHostPath(root) {
+  const s = String(root || '')
+  const m = s.match(/^\/([a-zA-Z])\/(.*)$/)
+  if (!m) return s
+  return m[1].toUpperCase() + ':\\' + m[2].replace(/\//g, '\\')
+}
+
+/** 相对时间：3天前（兼容秒级时间戳） */
 export function fmtAgo(d) {
-  if (!d) return ''
-  const ts = new Date(String(d).replace(' ', 'T')).getTime()
-  if (!ts) return fmtDate(d)
+  const ts = toMs(d)
+  if (!ts) return d ? fmtDate(d) : ''
   const diff = (Date.now() - ts) / 1000
   if (diff < 60) return t('fmt.justNow')
   if (diff < 3600) return t('fmt.minutesAgo', { n: Math.floor(diff / 60) })

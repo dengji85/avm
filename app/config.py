@@ -224,18 +224,24 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "host": "127.0.0.1",
         "port": 8770,
         "open_browser": True,
+        # 对外访问地址（可选）：容器 / NAS 端口映射后，进程内只能看到容器网段，
+        # 「设置 → 访问」里的地址会指向 172.17.x.x 这类手机连不上的地址。
+        # 在这里填 http://192.168.1.10:8770（或用环境变量 AVM_PUBLIC_URL 覆盖），
+        # 设置页就会显示该地址。
+        "public_url": "",
         # 访问令牌：为空时自动生成。完整值同时写入 data/access_token.txt（0600），
         # 启动日志只打印掩码，避免令牌泄漏进 docker logs / 日志文件。
+        # 设置页默认只显示掩码，查看完整值需再次输入令牌（见 /api/server/reveal-token）。
         "access_token": "",
-        # 是否启用远程访问控制（关闭则任何能连上的设备都可访问，仅供纯本机调试）
-        "require_token_remote": True,
+        # 访问保护（唯一开关）：开启后**所有设备**（含本机 127.0.0.1）都必须用
+        # 访问令牌换取会话；关闭则任何能连上的设备都可直接访问（设置页有红字警告）。
+        # 不再区分「本机 / 远程」——只有令牌这一个凭据。
+        # 旧键名 require_token_remote 会在加载时自动迁移到本键。
+        "token_required": True,
         # 信任的反向代理 IP：只有直连来源位于该列表时才解析 X-Forwarded-For，
-        # 否则忽略该头（防止伪造 IP 绕过本机豁免与登录限速）。
+        # 否则忽略该头（防止伪造 IP 绕过登录限速与审计来源）。
         # NAS 上反代与容器同机时，保持默认即可拿到真实客户端 IP。
         "trusted_proxies": ["127.0.0.1", "::1"],
-        # 本机（127.0.0.1/::1）是否免令牌：桌面 exe 默认开启；
-        # 容器默认关闭（端口映射 / 同机反代无法区分「真本机」，开着等于对局域网免认证）
-        "local_bypass": not IN_CONTAINER,
         # 会话（登录后签发）：空闲超时 / 绝对超时（天，0 = 不过期）
         "session_idle_days": 7,
         "session_abs_days": 30,
@@ -265,6 +271,10 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "update_feed": "https://api.github.com/repos/dengji85/avm/releases/latest",
         # 首次启动引导是否已完成（引导结束后置为 True，换浏览器也不会重复弹）
         "setup_done": False,
+        # 首次向导第 3 步的选择："这台服务会被谁访问"
+        #   private = 只有自己 / 家庭内网    public = 会被公网访问（域名 / 反代 / 端口映射）
+        # 只用于完成页与后续安全提示（是否建议开两步验证），**不直接改认证策略**。
+        "exposure": "private",
     },
     "ui": {
         "page_size": 60,
@@ -305,12 +315,12 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         # 空闲自动锁定（分钟）：无操作达到该时长后遮挡全部内容并暂停播放；0 = 关闭。
         # 正在播放视频时不算空闲（看片中途不会被锁）。
         "idle_lock_minutes": 10,
-        # 解锁方式（空闲锁定与紧急遮挡通用）：
-        #   click = 点击 / 任意键即解锁（仅防"路过瞥一眼"）
-        #   pin   = 需要输入「简单密码」（需先在设置页设置，见 privacy.pin_hash）
-        #   token = 需要输入访问令牌（最安全）
+        # 遮挡后用什么解锁（只有两种，都要主动输入，点击即解锁已移除）：
+        #   pin   = 快速解锁码（4~6 位，PBKDF2 存哈希；高频场景用）
+        #   token = 访问令牌（兜底方式始终可用，不受本设置影响）
+        # 旧值 click 会在加载时自动迁移（有解锁码 → pin，否则 → token）。
         "lock_unlock": "token",
-        # 简单密码的 PBKDF2-HMAC-SHA256 哈希（设置页写入，不存明文；空 = 未设置）
+        # 快速解锁码的 PBKDF2-HMAC-SHA256 哈希（设置页写入，不存明文；空 = 未设置）
         "pin_hash": "",
         # 紧急遮挡（"老板键"）快捷键：任意界面按下立即遮挡 + 静音，再按一次恢复
         "panic_key": "Ctrl+Shift+H",
@@ -366,6 +376,33 @@ def _deep_merge(base: Any, patch: Any) -> Any:
     return copy.deepcopy(patch)
 
 
+def _migrate_legacy(cfg: Dict[str, Any]) -> bool:
+    """就地迁移旧配置键，返回是否发生过改动（改动才落盘）。
+
+    - `server.local_bypass`：已删除的「本机免令牌」，直接丢弃
+    - `server.require_token_remote` → `server.token_required`：改名，值保持
+    - `privacy.lock_unlock = click`：该模式已移除，按是否设过解锁码迁移到 pin / token
+    """
+    changed = False
+    server = cfg.get("server")
+    if isinstance(server, dict):
+        if "local_bypass" in server:
+            server.pop("local_bypass", None)
+            changed = True
+        if "require_token_remote" in server:
+            old = server.pop("require_token_remote")
+            if "token_required" not in server:
+                server["token_required"] = bool(old)
+            changed = True
+    privacy = cfg.get("privacy")
+    if isinstance(privacy, dict):
+        mode = str(privacy.get("lock_unlock") or "token")
+        if mode not in ("pin", "token"):
+            privacy["lock_unlock"] = "pin" if (privacy.get("pin_hash") or "").strip() else "token"
+            changed = True
+    return changed
+
+
 def load_config(refresh: bool = False) -> Dict[str, Any]:
     global _CACHE
     with _LOCK:
@@ -387,8 +424,10 @@ def load_config(refresh: bool = False) -> Dict[str, Any]:
         # 常用站点：未配置过时由 DEFAULT_CONFIG 提供预设；已保存的走补齐逻辑。
         # 用户若手动删空了站点列表（空数组），这里保持为空，不再填回预设。
         merged["online_sites"] = _migrate_online_sites(merged.get("online_sites"))
+        # 旧键迁移（单一令牌 / 隐私锁两态）：只在确有改动时写回一次
+        migrated = _migrate_legacy(merged)
         _CACHE = merged
-        if not CONFIG_PATH.exists():
+        if migrated or not CONFIG_PATH.exists():
             _write(merged)
         return copy.deepcopy(merged)
 
@@ -423,11 +462,64 @@ def update_config(patch: Dict[str, Any]) -> Dict[str, Any]:
         return save_config(_deep_merge(current, patch))
 
 
+def current_access_token() -> str:
+    """当前生效的访问令牌（环境变量优先，其次配置文件），不生成、不落盘。
+
+    中间件每个请求都要比对令牌，不能用 ensure_access_token()（它会写文件）；
+    同时必须尊重 AVM_ACCESS_TOKEN —— 否则容器用环境变量预设令牌时，
+    `?token=` 链接与 X-Access-Token 头会全部失效（配置里是空串）。
+    """
+    env = os.environ.get("AVM_ACCESS_TOKEN", "").strip()
+    if env:
+        return env
+    try:
+        return str((load_config().get("server") or {}).get("access_token") or "").strip()
+    except Exception:
+        return ""
+
+
+def session_cookie_name() -> str:
+    """会话 Cookie 名，按实例区分。
+
+    Cookie 以**主机名**为作用域、**不区分端口**：同一台机器上同时跑开发实例
+    （8770）与容器（8771）时，两个实例若都用 `avm_session`，后登录的那个会覆盖
+    前一个的会话 Cookie，而两者的会话存储互不相通 —— 表现就是「刷新 / 打开播放
+    时随机又要求输入令牌」。这里用数据目录派生的短哈希做后缀，天然互不干扰。
+
+    也可用环境变量 AVM_COOKIE_NAME 显式指定（多实例共用同一数据目录时用得上）。
+    """
+    env = os.environ.get("AVM_COOKIE_NAME", "").strip()
+    if env:
+        return env
+    import hashlib
+    try:
+        seed = str(DATA_DIR.resolve())
+    except Exception:
+        seed = str(DATA_DIR)
+    return "avm_session_" + hashlib.sha256(seed.encode("utf-8")).hexdigest()[:8]
+
+
+def public_base_url() -> str:
+    """返回对外访问地址（不带尾斜杠），未配置时返回 ""。
+
+    容器 / NAS 经端口映射时，进程内探测到的只是容器网段地址，手机连不上。
+    因此对外地址只能由外部显式告知：优先环境变量 AVM_PUBLIC_URL，
+    其次配置项 server.public_url；都为空则沿用自动探测。
+    """
+    val = os.environ.get("AVM_PUBLIC_URL", "").strip()
+    if not val:
+        try:
+            val = str((load_config().get("server") or {}).get("public_url") or "").strip()
+        except Exception:
+            val = ""
+    return val.rstrip("/")
+
+
 def ensure_access_token() -> str:
     """启动时确保存在一个访问令牌：若配置为空则生成一个随机令牌并落盘。
 
-    返回当前生效的令牌。本机是否免令牌见 server.local_bypass；远程访问可用
-    令牌换取会话（推荐），或直接携带令牌（兼容脚本与旧客户端）。
+    返回当前生效的令牌。所有设备（含本机）都用它换取会话（推荐），
+    或直接携带令牌（兼容脚本与旧客户端）；本机不再免令牌。
 
     容器 / NAS 部署可用环境变量 AVM_ACCESS_TOKEN 预设，避免首次启动还要翻日志找令牌。
     完整令牌同时写入 data/access_token.txt（权限 0600），启动日志只打印掩码。

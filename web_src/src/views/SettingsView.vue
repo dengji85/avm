@@ -1,17 +1,18 @@
 <script setup>
-import { ref, reactive, computed, onMounted } from 'vue'
+import { ref, reactive, computed, onBeforeUnmount, onMounted } from 'vue'
 import { state } from '../state.js'
 import {
   API, getConfig, putConfig, listProviders, testScraper as apiTest,
   parsePreview as apiParse, fsList, sniffCovers, extractAllCovers, csvUrl, cacheAvatars,
-  fillActressAvatars, rescanLocalCovers, fetchActressProfile, getServerInfo, resetToken, checkUpdate,
+  fillActressAvatars, rescanLocalCovers, fetchActressProfile, getServerInfo, revealToken, rotateToken, checkUpdate,
+  fsMounts,
   listPlugins, togglePlugin, regenAllPreviews, streamCacheStats, clearStreamCache,
   listSessions, revokeSession, getAudit, logout as apiLogout, logoutAll as apiLogoutAll,
-  setPin, pinStatus,
+  setPin, privacyState,
   totpStatus, totpSetup, totpEnable, totpDisable,
   listApiKeys, createApiKey, revokeApiKey,
 } from '../api.js'
-import { toast, confirmDialog, fmtAgo, setSiteTitle } from '../utils.js'
+import { toast, confirmDialog, fmtAgo, fmtDateTime, prettyHostPath, setSiteTitle } from '../utils.js'
 import { useTasks } from '../composables/useTasks.js'
 import { LANGUAGES, i18nState, setLang } from '../i18n'
 import { t } from '../i18n/index.js'
@@ -52,7 +53,7 @@ const cfg = reactive({
   online_sites: [],
   server: {
     session_idle_days: 7, session_abs_days: 30, session_persist: false,
-    local_bypass: true, expose_docs: false, trusted_proxies: [],
+    expose_docs: false, trusted_proxies: [],
   },
   privacy: {
     idle_lock_minutes: 10, lock_unlock: 'token', panic_key: 'Ctrl+Shift+H',
@@ -133,7 +134,7 @@ async function load() {
     cfg.server = Object.assign(
       {
         session_idle_days: 7, session_abs_days: 30, session_persist: false,
-        local_bypass: true, expose_docs: false, trusted_proxies: [],
+        expose_docs: false, trusted_proxies: [],
         insecure_skip_verify: false,
       },
       c.server,
@@ -239,6 +240,34 @@ const busyTotp = ref(false)
 // 密钥由服务端暂存直接渲染，不经过 URL / 响应正文（避免进历史与反代日志）
 // 前缀走 api.js 的 API 常量，避免子路径部署时这里漏改（表现为二维码静默 404）
 const totpQrUrl = computed(() => `${API}/auth/totp/qr?_=${totpQrSeq.value}`)
+onBeforeUnmount(() => {
+  if (clockTimer) clearInterval(clockTimer)
+  if (revealTimer) clearInterval(revealTimer)   // 令牌明文 30 秒倒计时，离开页面也要停
+})
+
+// 服务器时间：验证码对不上十有八九是手机时钟偏了，绑定面板里直接显示对比
+const serverSkewMs = ref(0)
+const clockNow = ref(Date.now())
+let clockTimer = null
+const serverClockText = computed(() => {
+  const d = new Date(clockNow.value + serverSkewMs.value)
+  const p = (n) => String(n).padStart(2, '0')
+  return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`
+})
+function startClock() {
+  stopClock()
+  clockNow.value = Date.now()
+  clockTimer = setInterval(() => { clockNow.value = Date.now() }, 1000)
+}
+function stopClock() {
+  if (clockTimer) clearInterval(clockTimer)
+  clockTimer = null
+}
+
+/** 密钥按 4 位分组，便于手动输入（微软验证器手动添加时最好抄这个） */
+function groupSecret(s) {
+  return String(s || '').replace(/\s+/g, '').replace(/(.{4})/g, '$1 ').trim()
+}
 
 async function loadTotp() {
   try { Object.assign(totp, await totpStatus()) } catch (e) { /* 未登录等场景忽略 */ }
@@ -251,12 +280,22 @@ async function startTotpBind() {
     totpSetupInfo.value = { secret: r.secret, uri: r.uri }
     totpCodeInput.value = ''
     totpQrSeq.value += 1
+    // 与服务器时钟对齐（只是显示用，校验仍在服务端）
+    serverSkewMs.value = r.server_time ? (r.server_time * 1000 - Date.now()) : 0
+    startClock()
     await loadTotp()
   } catch (e) { toast(e.message, 'err') } finally { busyTotp.value = false }
 }
 
+function cancelTotpBind() {
+  totpSetupInfo.value = null
+  totpCodeInput.value = ''
+  stopClock()
+}
+
 async function confirmTotpBind() {
-  const code = (totpCodeInput.value || '').trim()
+  // 允许 123 456 / 123-456 / 全角数字，服务端会统一规整
+  const code = (totpCodeInput.value || '').replace(/[^\d０-９]/g, '')
   if (!code) { toast(t('settings.totpCodePh'), 'err'); return }
   busyTotp.value = true
   try {
@@ -264,6 +303,7 @@ async function confirmTotpBind() {
     recoveryCodes.value = r.recovery_codes || []
     totpSetupInfo.value = null
     totpCodeInput.value = ''
+    stopClock()
     await loadTotp()
     toast(t('settings.totpOn'), 'ok')
   } catch (e) { toast(e.message, 'err') } finally { busyTotp.value = false }
@@ -335,7 +375,6 @@ async function saveSecurity() {
         session_idle_days: Math.max(0, Number(cfg.server.session_idle_days) || 0),
         session_abs_days: Math.max(0, Number(cfg.server.session_abs_days) || 0),
         session_persist: !!cfg.server.session_persist,
-        local_bypass: !!cfg.server.local_bypass,
         expose_docs: !!cfg.server.expose_docs,
         insecure_skip_verify: !!cfg.server.insecure_skip_verify,
         trusted_proxies: list,
@@ -358,8 +397,7 @@ async function savePrivacy(silent = true) {
     await putConfig({
       privacy: {
         idle_lock_minutes: Math.max(0, Number(cfg.privacy.idle_lock_minutes) || 0),
-        lock_unlock: cfg.privacy.lock_unlock === 'click' ? 'click'
-          : (cfg.privacy.lock_unlock === 'pin' ? 'pin' : 'token'),
+        lock_unlock: cfg.privacy.lock_unlock === 'pin' ? 'pin' : 'token',
         panic_key: (cfg.privacy.panic_key || '').trim() || 'Ctrl+Shift+H',
         neutral_title: !!cfg.privacy.neutral_title,
         pause_when_hidden: !!cfg.privacy.pause_when_hidden,
@@ -380,39 +418,28 @@ async function savePrivacy(silent = true) {
 }
 
 /* 保存只由控件事件（@change / @input）触发，不用 watch：
-   watch 无法区分「用户改动」和「load() 重新赋值」，会在加载时误触发保存 ——
-   曾把用户设好的「简单密码」解锁方式静默覆盖回令牌。 */
+   watch 无法区分「用户改动」和「load() 重新赋值」，会在加载时误触发保存。 */
 function scheduleSavePrivacy() {
   if (privacyTimer) clearTimeout(privacyTimer)
   privacyTimer = setTimeout(() => savePrivacy(true), 500)
 }
 
-/* 解锁方式变更：选了「简单密码」但还没设置时只回退界面，不写入后端 */
-function onUnlockModeChange() {
-  if (cfg.privacy.lock_unlock === 'pin' && !hasPin.value) {
-    cfg.privacy.lock_unlock = 'token'
-    toast(t('privacy.pinNeedSet'), 'err')
-    return
-  }
-  scheduleSavePrivacy()
-}
-
-/* 隐私解锁「简单密码」：明文只在提交瞬间传一次，服务端只保存 PBKDF2 哈希 */
+/* 快速解锁码：明文只在提交瞬间传一次，服务端只保存 PBKDF2 哈希。
+   设置成功后后端会同时把 unlock_mode 切到 pin；清除则回落到访问令牌。 */
 const pinInput = ref('')
-const showPin = ref(false) // 简单密码输入框的明文 / 密文切换
+const showPin = ref(false)
 const hasPin = ref(false)
 const savingPin = ref(false)
 
 async function loadPinStatus() {
   try {
-    const r = await pinStatus()
-    hasPin.value = !!(r && r.has_pin)
+    const st = await privacyState()
+    hasPin.value = !!(st && st.has_pin)
   } catch (e) {
-    // 读取失败时保持原值：置 false 会让「切换解锁方式」被误判成「尚未设置简单密码」
+    // 读取失败时保持原值，避免误判成「尚未设置」
   }
 }
 
-/* 行内提交简单密码（单独按钮：避免输入过程中被自动保存打断） */
 async function savePin() {
   const v = pinInput.value.trim()
   if (v.length < 4) { toast(t('privacy.pinSetPh'), 'err'); return }
@@ -420,6 +447,7 @@ async function savePin() {
   try {
     const r = await setPin(v)
     hasPin.value = !!(r && r.has_pin)
+    cfg.privacy.lock_unlock = hasPin.value ? 'pin' : 'token'
     pinInput.value = ''
     toast(t('privacy.pinSaved'), 'ok')
   } catch (e) { toast(e.message, 'err') } finally { savingPin.value = false }
@@ -430,6 +458,7 @@ async function clearPin() {
   try {
     await setPin('')
     hasPin.value = false
+    cfg.privacy.lock_unlock = 'token'
     pinInput.value = ''
     toast(t('privacy.pinCleared'), 'ok')
   } catch (e) { toast(e.message, 'err') } finally { savingPin.value = false }
@@ -477,6 +506,26 @@ async function regeneratePreviews() {
 }
 
 const newPath = ref('')
+
+/* 容器里"已挂载的目录"：宿主机路径与容器内路径对不上，手输容易错，
+   这里直接列出来点选（桌面环境 mounts 为空，界面不出现） */
+const mounts = ref([])
+const inContainer = ref(false)
+async function loadMounts() {
+  try {
+    const r = await fsMounts()
+    inContainer.value = !!r.in_container
+    mounts.value = (r.items || []).filter((x) => x.target && x.target !== '/data')
+  } catch (e) { /* 非容器 / 无权限：忽略 */ }
+}
+async function addMount(target) {
+  const v = String(target || '').trim()
+  if (!v) return
+  if ((cfg.library.paths || []).includes(v)) { toast(t('settings.dirExists'), 'err'); return }
+  cfg.library.paths.push(v)
+  await saveLibrary()
+}
+
 async function addPath() {
   const v = newPath.value.trim()
   if (!v) return
@@ -737,37 +786,79 @@ const parseStats = computed(() => {
 })
 
 /* ---------------- 访问与远程 ---------------- */
-const serverInfo = reactive({ host: '127.0.0.1', port: 8770, access_token: '', require_token_remote: true })
+const serverInfo = reactive({ host: '127.0.0.1', port: 8770, access_token: '', token_masked: true, token_env_locked: false })
 const showTok = ref(false)
-const tokInput = ref('')
+const tokInput = ref('')            // 只用于「设置新令牌」，留空表示不修改
 const savingTok = ref(false)
 const requireToken = ref(true)
-function maskToken(tok) {
-  if (!tok) return '—'
-  if (tok.length <= 8) return tok
-  return tok.slice(0, 4) + '•'.repeat(Math.min(24, tok.length - 8)) + tok.slice(-4)
+// 完整令牌默认不可见：点「显示」需再次输入当前令牌，明文 30 秒后自动隐藏
+const revealValue = ref('')
+const revealLeft = ref(0)
+let revealTimer = null
+// 再确认对话框：查看 / 更换令牌共用（action 决定行为）
+const confirmAct = ref('')          // '' | 'reveal' | 'rotate'
+const confirmInput = ref('')
+const confirmBusy = ref(false)
+
+function askConfirm(act) {
+  confirmAct.value = act
+  confirmInput.value = ''
 }
-async function copyTok() {
-  try { await navigator.clipboard.writeText(serverInfo.access_token); toast(t('settings.copied'), 'ok') }
-  catch (e) { toast(t('settings.copyFailed'), 'err') }
+
+function stopReveal() {
+  clearInterval(revealTimer)
+  revealValue.value = ''
+  revealLeft.value = 0
 }
-async function doResetToken() {
-  try { const r = await resetToken(); serverInfo.access_token = r.access_token; tokInput.value = r.access_token; await loadServerInfo(); toast(t('settings.tokenReset'), 'ok') }
-  catch (e) { toast(e.message, 'err') }
+
+function startReveal(token) {
+  stopReveal()
+  revealValue.value = token || ''
+  revealLeft.value = 30
+  revealTimer = setInterval(() => {
+    revealLeft.value -= 1
+    if (revealLeft.value <= 0) stopReveal()
+  }, 1000)
 }
+
+async function runConfirm() {
+  const v = (confirmInput.value || '').trim()
+  if (!v) { toast(t('settings.revealNeedToken'), 'err'); return }
+  confirmBusy.value = true
+  try {
+    if (confirmAct.value === 'rotate') {
+      const r = await rotateToken(v)
+      startReveal(r.access_token)
+      await loadServerInfo()
+      toast(t('settings.tokenRotated'), 'ok')
+    } else {
+      const r = await revealToken(v)
+      startReveal(r.token)
+      toast(t('settings.tokenRevealed'), 'ok')
+    }
+    confirmAct.value = ''
+    confirmInput.value = ''
+  } catch (e) { toast(e.message, 'err') }
+  finally { confirmBusy.value = false }
+}
+
 async function saveToken() {
   const v = (tokInput.value || '').trim()
-  if (v && (v.length < 8 || /\s/.test(v))) { toast(t('settings.tokenInvalid'), 'err'); return }
+  if (!v) return
+  if (v.length < 8 || /\s/.test(v)) { toast(t('settings.tokenInvalid'), 'err'); return }
   savingTok.value = true
   try {
     await putConfig({ server: { access_token: v } })
-    serverInfo.access_token = v || serverInfo.access_token
+    tokInput.value = ''
     await loadServerInfo()
     toast(t('settings.tokenSaved'), 'ok')
   } catch (e) { toast(e.message, 'err') }
   finally { savingTok.value = false }
 }
 const qrAddr = ref('')
+// 二维码里是一次性短链（5 分钟、用一次失效），本机或已登录会话都能生成；
+// 后端在 /server/info 里给判定结果，前端据此显示提示而不是一张 403 的碎图。
+const qrAvailable = ref(true)
 const qrUrl = computed(() => `/api/server/qr?addr=${encodeURIComponent(qrAddr.value || '')}&_=${Date.now()}`)
 const isLocal = (u) => /(^|[/:])(127\.0\.0\.1|localhost|0\.0\.0\.0)(:|\/|$)/i.test(u)
 const lanUrls = computed(() => (serverInfo.access_urls || []).filter((u) => !isLocal(u)))
@@ -776,18 +867,19 @@ async function copyText(text) {
   catch (e) { toast(t('settings.copyFailed'), 'err') }
 }
 async function saveRequireToken() {
-  try { await putConfig({ server: { require_token_remote: requireToken.value } }); await loadServerInfo(); toast(t('settings.saved'), 'ok') }
+  try { await putConfig({ server: { token_required: requireToken.value } }); await loadServerInfo(); toast(t('settings.saved'), 'ok') }
   catch (e) { toast(e.message, 'err') }
 }
 
 async function loadServerInfo() {
+  loadMounts()   // 容器里的「已挂载目录」，随环境信息一起取
   try {
     const r = await getServerInfo()
     Object.assign(serverInfo, r)
-    requireToken.value = r.require_token_remote
+    requireToken.value = r.token_required !== false
+    qrAvailable.value = r.qr_available !== false
     const urls = (r.access_urls || []).filter((u) => !/(^|[/:])(127\.0\.0\.1|localhost|0\.0\.0\.0)(:|\/|$)/i.test(u))
     if (urls.length) qrAddr.value = urls[0]
-    if (r.access_token) tokInput.value = r.access_token
     if (r.app_version) appVersion.value = r.app_version
     if (r.build_date) buildDate.value = r.build_date
   } catch (e) { /* 非致命 */ }
@@ -950,9 +1042,24 @@ onMounted(async () => { await load(); await loadServerInfo(); loadPlugins() })
             </ul>
             <p v-else class="muted">{{ $t('settings.noDirYet') }}</p>
 
+            <div v-if="inContainer && mounts.length" class="mount-chips">
+              <span class="muted sm">{{ $t('settings.detectedMounts') }}</span>
+              <button
+                v-for="m in mounts"
+                :key="m.target"
+                :class="['btn', 'tiny', (cfg.library.paths || []).includes(m.target) ? 'primary' : 'ghost']"
+                @click="addMount(m.target)"
+              >
+                📁 {{ m.target }}
+                <span v-if="m.root && m.root !== '/' && prettyHostPath(m.root) !== m.target" class="muted">
+                  ← {{ prettyHostPath(m.root) }}
+                </span>
+              </button>
+            </div>
+
             <div class="hstack">
               <input v-model="newPath" :placeholder="$t('settings.scanDirPh')" @keydown.enter="addPath" />
-              <button class="btn" @click="browse('')">{{ $t('settings.browseDir') }}</button>
+              <button v-if="!inContainer" class="btn" @click="browse('')">{{ $t('settings.browseDir') }}</button>
               <button class="btn primary" @click="addPath">{{ $t('common.add') }}</button>
             </div>
           </div>
@@ -1432,17 +1539,11 @@ onMounted(async () => { await load(); await loadServerInfo(); loadPlugins() })
             <div class="field-row">
               <label>{{ $t('privacy.idleMinutes') }}</label>
               <input class="inp" type="number" min="0" style="max-width:110px" v-model.number="cfg.privacy.idle_lock_minutes" @input="scheduleSavePrivacy()" />
-              <label>{{ $t('privacy.unlock') }}</label>
-              <select v-model="cfg.privacy.lock_unlock" style="width:170px" @change="onUnlockModeChange()">
-                <option value="click">{{ $t('privacy.unlockClick') }}</option>
-                <option value="pin">{{ $t('privacy.unlockPin') }}</option>
-                <option value="token">{{ $t('privacy.unlockToken') }}</option>
-              </select>
             </div>
             <span class="hint">{{ $t('privacy.idleHint') }}</span>
 
             <div class="field col">
-              <label>{{ $t('privacy.unlockPin') }}</label>
+              <label>{{ $t('privacy.unlockTitle') }}</label>
               <div class="hstack">
                 <input class="inp mono" v-model="pinInput" :type="showPin ? 'text' : 'password'" name="avm-code" autocomplete="new-password" autocapitalize="off" spellcheck="false" data-lpignore="true" data-1p-ignore data-bwignore :placeholder="$t('privacy.pinSetPh')" style="max-width:280px" />
                 <button class="btn tiny ghost" @click="showPin = !showPin">{{ showPin ? '🙈' : '👁' }}</button>
@@ -1450,7 +1551,7 @@ onMounted(async () => { await load(); await loadServerInfo(); loadPlugins() })
                 <button class="btn tiny ghost" :disabled="savingPin || !hasPin" @click="clearPin">{{ $t('privacy.pinClear') }}</button>
                 <span class="muted sm">{{ hasPin ? $t('privacy.pinHas') : $t('privacy.pinNone') }}</span>
               </div>
-              <span class="hint">{{ $t('privacy.pinSaveHint') }}</span>
+              <span class="hint">{{ $t('privacy.unlockHint') }}</span>
             </div>
 
             <div class="field">
@@ -1561,9 +1662,140 @@ onMounted(async () => { await load(); await loadServerInfo(); loadPlugins() })
 
       <!-- ============ 远程（访问与远程） ============ -->
       <template v-else-if="tab === 'remote'">
-        <!-- 登录与会话（安全，见 docs/安全与隐私设计.md） -->
+        <!-- ===== ① 访问保护 / ② 访问令牌 / ③ 扫码（用户只需理解这三件事） ===== -->
         <div class="panel">
-          <div class="panel-head">{{ $t('settings.secTitle') }}</div>
+          <div class="panel-head">{{ $t('settings.access') }}</div>
+          <div class="panel-body">
+            <div class="field">
+              <label class="toggle">
+                <input type="checkbox" v-model="requireToken" @change="saveRequireToken" /><span class="track"></span>
+              </label>
+              <span>{{ $t('settings.requireToken') }}</span>
+              <span class="hint">{{ $t('settings.requireTokenHint') }}</span>
+            </div>
+            <div class="fw-tip" v-if="!requireToken">
+              <div class="fw-tip-title">⚠️ {{ $t('settings.protectOffTitle') }}</div>
+              <div class="fw-tip-body">{{ $t('settings.protectOffBody') }}</div>
+            </div>
+
+            <div class="field col">
+              <label>{{ $t('settings.accessToken') }}</label>
+              <div class="tok-row">
+                <input class="inp mono" readonly :value="revealValue || serverInfo.access_token" />
+                <span v-if="revealValue" class="muted sm tabular">{{ revealLeft }}s</span>
+                <button class="btn tiny ghost" :disabled="!!confirmAct" @click="askConfirm('reveal')">{{ $t('settings.tokenShow') }}</button>
+                <button class="btn tiny ghost" :disabled="!revealValue" @click="copyText(revealValue)">{{ $t('settings.copy') }}</button>
+              </div>
+              <span class="muted">{{ $t('settings.tokenHint') }}</span>
+              <span class="hint">{{ $t('settings.tokenRevealHint') }}</span>
+            </div>
+
+            <div class="fw-tip" v-if="confirmAct">
+              <div class="fw-tip-title">
+                {{ confirmAct === 'rotate' ? $t('settings.tokenRotateConfirm') : $t('settings.tokenRevealConfirm') }}
+              </div>
+              <div class="hstack">
+                <input class="inp mono" v-model="confirmInput" type="password" :placeholder="$t('settings.tokenPh')" style="max-width:240px" @keyup.enter="runConfirm" />
+                <button class="btn tiny primary" :disabled="confirmBusy" @click="runConfirm">{{ $t('common.confirm') }}</button>
+                <button class="btn tiny ghost" @click="confirmAct = ''">{{ $t('common.cancel') }}</button>
+              </div>
+            </div>
+
+            <div class="field col" v-if="!confirmAct && !serverInfo.token_env_locked">
+              <label>{{ $t('settings.tokenSetNew') }}</label>
+              <div class="hstack">
+                <input class="inp mono" v-model="tokInput" :type="showTok ? 'text' : 'password'" name="avm-code" autocomplete="new-password" autocapitalize="off" spellcheck="false" data-lpignore="true" data-1p-ignore data-bwignore :placeholder="$t('settings.tokenPh')" style="max-width:260px" />
+                <button class="btn tiny ghost" @click="showTok = !showTok">{{ showTok ? '🙈' : '👁' }}</button>
+                <button class="btn tiny" :disabled="savingTok || !tokInput.trim()" @click="saveToken">{{ savingTok ? $t('settings.saving') : $t('common.save') }}</button>
+                <button class="btn tiny danger" :disabled="savingTok" @click="askConfirm('rotate')">{{ $t('settings.tokenRotate') }}</button>
+              </div>
+              <span class="hint">{{ $t('settings.tokenRotateHint') }}</span>
+            </div>
+            <div class="fw-tip" v-else-if="!confirmAct && serverInfo.token_env_locked">
+              <div class="fw-tip-title">🔒 {{ $t('settings.tokenEnvLocked') }}</div>
+              <div class="fw-tip-body">{{ $t('settings.tokenEnvLockedHint') }}</div>
+            </div>
+
+            <div class="field">
+              <label>{{ $t('settings.listenAddr') }}</label>
+              <span class="mono">{{ serverInfo.host }}:{{ serverInfo.port }}</span>
+            </div>
+
+            <div class="field col lan-share" v-if="lanUrls.length">
+              <label>{{ $t('settings.lanAccess') }}</label>
+              <div class="lan-share-body">
+                <div class="qr-wrap" v-if="qrAvailable">
+                  <img class="qr-img" :src="qrUrl" alt="QR" />
+                  <div class="muted sm center">{{ $t('settings.scanHint') }}</div>
+                </div>
+                <div class="qr-off" v-else>
+                  <div class="qr-off-title">🔒 {{ $t('settings.qrUnavailable') }}</div>
+                  <div class="muted sm">{{ $t('settings.qrNeedLogin') }}</div>
+                </div>
+                <div class="lan-urls">
+                  <div
+                    v-for="u in lanUrls"
+                    :key="u"
+                    class="url-row"
+                    :class="{ active: qrAvailable && qrAddr === u }"
+                    @click="qrAddr = u"
+                  >
+                    <code class="mono url">{{ u }}</code>
+                    <button class="btn tiny ghost" @click.stop="copyText(u)">{{ $t('settings.copy') }}</button>
+                  </div>
+                  <span class="muted sm" v-if="qrAvailable">{{ $t('settings.tapToQr') }}</span>
+                </div>
+              </div>
+            </div>
+            <div class="fw-tip" v-if="lanUrls.length">
+              <div class="fw-tip-title">⚠️ {{ $t('settings.fwTitle') }}</div>
+              <div class="fw-tip-body">{{ $t('settings.fwBody') }}</div>
+              <code class="fw-cmd mono">netsh advfirewall firewall add rule name="AVM" dir=in action=allow protocol=TCP localport={{ serverInfo.port }} profile=any edge=yes</code>
+            </div>
+          </div>
+        </div>
+
+        <!-- ===== ④ 已登录设备 ===== -->
+        <div class="panel">
+          <div class="panel-head">{{ $t('settings.secSessions') }}</div>
+          <div class="panel-body">
+            <div class="field col" v-if="sessions.length">
+              <div v-for="s in sessions" :key="s.id" class="sec-row">
+                <span class="mono">{{ s.ip || '-' }}</span>
+                <span class="muted sm sec-grow">{{ s.ua }}</span>
+                <span class="muted sm tabular" :title="fmtDateTime(s.last)">{{ fmtAgo(s.last) }}</span>
+                <span v-if="s.current" class="muted sm">· {{ $t('settings.secCurrent') }}</span>
+                <button v-else class="btn tiny ghost" @click="kickSession(s.id)">{{ $t('settings.secRevoke') }}</button>
+              </div>
+              <span class="hint">{{ $t('settings.secSessionsHint') }}</span>
+            </div>
+
+            <div class="field col">
+              <label>{{ $t('settings.secAudit') }}</label>
+              <div v-if="audit.length">
+                <div v-for="(a, i) in audit" :key="i" class="sec-row">
+                  <span class="mono">{{ a.ip || '-' }}</span>
+                  <span class="muted sm">{{ a.event }}</span>
+                  <span class="muted sm sec-grow">{{ a.detail }}</span>
+                  <span class="muted sm tabular" :title="fmtDateTime(a.ts)">{{ fmtAgo(a.ts) }}</span>
+                </div>
+              </div>
+              <span v-else class="muted">{{ $t('settings.secAuditEmpty') }}</span>
+            </div>
+
+            <div class="hstack">
+              <button class="btn tiny ghost" @click="doLogout">{{ $t('settings.secLogout') }}</button>
+              <button class="btn tiny ghost" @click="doLogoutAll">{{ $t('settings.secLogoutAll') }}</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- ===== 高级（默认折叠：会话策略 / 两步验证 / API Key） ===== -->
+        <details class="adv">
+          <summary>{{ $t('settings.advanced') }}</summary>
+
+          <div class="panel">
+            <div class="panel-head">{{ $t('settings.secTitle') }}</div>
           <div class="panel-body">
             <div class="field-row">
               <label>{{ $t('settings.secIdleDays') }}</label>
@@ -1578,13 +1810,6 @@ onMounted(async () => { await load(); await loadServerInfo(); loadPlugins() })
               </label>
               <span>{{ $t('settings.secPersist') }}</span>
               <span class="hint">{{ $t('settings.secPersistHint') }}</span>
-            </div>
-            <div class="field">
-              <label class="toggle">
-                <input type="checkbox" v-model="cfg.server.local_bypass" /><span class="track"></span>
-              </label>
-              <span>{{ $t('settings.secLocalBypass') }}</span>
-              <span class="hint">{{ $t('settings.secLocalBypassHint') }}</span>
             </div>
             <div class="field">
               <label class="toggle">
@@ -1607,36 +1832,9 @@ onMounted(async () => { await load(); await loadServerInfo(); loadPlugins() })
             </div>
             <div class="hstack">
               <button class="btn tiny primary" :disabled="savingSec" @click="saveSecurity">{{ $t('common.save') }}</button>
-              <button class="btn tiny ghost" @click="doLogout">{{ $t('settings.secLogout') }}</button>
-              <button class="btn tiny ghost" @click="doLogoutAll">{{ $t('settings.secLogoutAll') }}</button>
-            </div>
-
-            <div class="field col" v-if="sessions.length">
-              <label>{{ $t('settings.secSessions') }}</label>
-              <div v-for="s in sessions" :key="s.id" class="sec-row">
-                <span class="mono">{{ s.ip || '-' }}</span>
-                <span class="muted sm sec-grow">{{ s.ua }}</span>
-                <span class="muted sm tabular">{{ fmtAgo(s.last) }}</span>
-                <span v-if="s.current" class="muted sm">· {{ $t('settings.secCurrent') }}</span>
-                <button v-else class="btn tiny ghost" @click="kickSession(s.id)">{{ $t('settings.secRevoke') }}</button>
-              </div>
-              <span class="hint">{{ $t('settings.secSessionsHint') }}</span>
-            </div>
-
-            <div class="field col">
-              <label>{{ $t('settings.secAudit') }}</label>
-              <div v-if="audit.length">
-                <div v-for="(a, i) in audit" :key="i" class="sec-row">
-                  <span class="mono">{{ a.ip || '-' }}</span>
-                  <span class="muted sm">{{ a.event }}</span>
-                  <span class="muted sm sec-grow">{{ a.detail }}</span>
-                  <span class="muted sm tabular">{{ fmtAgo(a.ts) }}</span>
-                </div>
-              </div>
-              <span v-else class="muted">{{ $t('settings.secAuditEmpty') }}</span>
             </div>
           </div>
-        </div>
+          </div>
 
         <!-- 两步验证（TOTP） -->
         <div class="panel">
@@ -1657,15 +1855,24 @@ onMounted(async () => { await load(); await loadServerInfo(); loadPlugins() })
                   <span class="hint">{{ $t('settings.totpScanHint') }}</span>
                   <div class="field col">
                     <label>{{ $t('settings.totpSecret') }}</label>
-                    <input class="inp mono" :value="totpSetupInfo.secret" readonly @focus="$event.target.select()" />
+                    <div class="hstack">
+                      <input class="inp mono" :value="totpSetupInfo.secret" readonly @focus="$event.target.select()" />
+                      <button class="btn tiny ghost" @click="copyText(totpSetupInfo.secret)">{{ $t('settings.copy') }}</button>
+                    </div>
+                    <span class="hint">{{ $t('settings.totpSecretGroup', { s: groupSecret(totpSetupInfo.secret) }) }}</span>
                   </div>
                   <div class="field col">
                     <label>{{ $t('settings.totpCode') }}</label>
-                    <input class="inp mono" v-model="totpCodeInput" inputmode="numeric" maxlength="6" :placeholder="$t('settings.totpCodePh')" @keyup.enter="confirmTotpBind" />
+                    <input class="inp mono" v-model="totpCodeInput" inputmode="numeric" maxlength="12" :placeholder="$t('settings.totpCodePh')" @keyup.enter="confirmTotpBind" />
+                    <span class="hint mono">{{ $t('settings.totpServerTime', { t: serverClockText }) }}</span>
+                  </div>
+                  <div class="fw-tip">
+                    <div class="fw-tip-title">📱 {{ $t('settings.totpMsTitle') }}</div>
+                    <div class="fw-tip-body">{{ $t('settings.totpMsHint') }}</div>
                   </div>
                   <div class="hstack">
                     <button class="btn tiny primary" :disabled="busyTotp" @click="confirmTotpBind">{{ $t('settings.totpConfirm') }}</button>
-                    <button class="btn tiny ghost" @click="totpSetupInfo = null; totpCodeInput = ''">{{ $t('common.cancel') }}</button>
+                    <button class="btn tiny ghost" @click="cancelTotpBind">{{ $t('common.cancel') }}</button>
                   </div>
                 </div>
               </div>
@@ -1719,7 +1926,7 @@ onMounted(async () => { await load(); await loadServerInfo(); loadPlugins() })
                 <span class="mono">{{ k.id }}</span>
                 <span class="sec-grow">{{ k.name }}</span>
                 <span class="muted sm">{{ k.scope === 'read' ? $t('settings.keyScopeRead') : $t('settings.keyScopeFull') }}</span>
-                <span class="muted sm tabular">{{ k.last_used ? fmtAgo(k.last_used) : $t('settings.keyNever') }}</span>
+                <span class="muted sm tabular" :title="k.last_used ? fmtDateTime(k.last_used) : ''">{{ k.last_used ? fmtAgo(k.last_used) : $t('settings.keyNever') }}</span>
                 <button class="btn tiny ghost" @click="doRevokeKey(k.id)">{{ $t('settings.secRevoke') }}</button>
               </div>
             </div>
@@ -1727,61 +1934,7 @@ onMounted(async () => { await load(); await loadServerInfo(); loadPlugins() })
           </div>
         </div>
 
-        <div class="panel">
-          <div class="panel-head">{{ $t('settings.access') }}</div>
-          <div class="panel-body">
-            <div class="field">
-              <label>{{ $t('settings.listenAddr') }}</label>
-              <span class="mono">{{ serverInfo.host }}:{{ serverInfo.port }}</span>
-              <span class="muted">{{ serverInfo.host === '0.0.0.0' ? $t('settings.lanOn') : $t('settings.lanOff') }}</span>
-            </div>
-            <div class="field col">
-              <label>{{ $t('settings.accessToken') }}</label>
-              <div class="tok-row">
-                <input class="inp mono" v-model="tokInput" :type="showTok ? 'text' : 'password'" name="avm-code" autocomplete="new-password" autocapitalize="off" spellcheck="false" data-lpignore="true" data-1p-ignore data-bwignore :placeholder="$t('settings.tokenPh')" @keyup.enter="saveToken" />
-                <button class="btn tiny ghost" @click="showTok = !showTok">{{ showTok ? '🙈' : '👁' }}</button>
-                <button class="btn tiny ghost" @click="copyTok" :disabled="serverInfo.token_masked || !serverInfo.access_token">{{ $t('settings.copy') }}</button>
-                <button class="btn tiny" :disabled="savingTok || serverInfo.token_masked" @click="saveToken">{{ savingTok ? $t('settings.saving') : $t('settings.saveFeed') }}</button>
-                <button class="btn tiny ghost" :disabled="serverInfo.token_masked" @click="doResetToken" :title="$t('settings.resetToken')">🔄</button>
-              </div>
-              <span class="muted">{{ $t('settings.tokenHint') }}</span>
-              <span v-if="serverInfo.token_masked" class="hint">🔒 {{ $t('settings.secTokenMasked') }}</span>
-            </div>
-            <div class="fw-tip" v-if="lanUrls.length">
-              <div class="fw-tip-title">⚠️ {{ $t('settings.fwTitle') }}</div>
-              <div class="fw-tip-body">{{ $t('settings.fwBody') }}</div>
-              <code class="fw-cmd mono">netsh advfirewall firewall add rule name="AVM" dir=in action=allow protocol=TCP localport={{ serverInfo.port }} profile=any edge=yes</code>
-            </div>
-            <div class="field col lan-share" v-if="lanUrls.length">
-              <label>{{ $t('settings.lanAccess') }}</label>
-              <div class="lan-share-body">
-                <div class="qr-wrap">
-                  <img class="qr-img" :src="qrUrl" alt="QR" />
-                  <div class="muted sm center">{{ $t('settings.scanHint') }}</div>
-                </div>
-                <div class="lan-urls">
-                  <div
-                    v-for="u in lanUrls"
-                    :key="u"
-                    class="url-row"
-                    :class="{ active: qrAddr === u }"
-                    @click="qrAddr = u"
-                  >
-                    <code class="mono url">{{ u }}</code>
-                    <button class="btn tiny ghost" @click.stop="copyText(u)">{{ $t('settings.copy') }}</button>
-                  </div>
-                  <span class="muted sm">{{ $t('settings.tapToQr') }}</span>
-                </div>
-              </div>
-            </div>
-            <div class="field">
-              <label class="toggle">
-                <input type="checkbox" v-model="requireToken" @change="saveRequireToken" /><span class="track"></span>
-              </label>
-              <span>{{ $t('settings.requireToken') }}</span>
-            </div>
-          </div>
-        </div>
+        </details>
       </template>
 
       <!-- ============ 关于 ============ -->

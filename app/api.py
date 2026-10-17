@@ -20,13 +20,15 @@ import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from datetime import datetime
+from urllib.parse import urlsplit, urlunsplit
 
 from fastapi import APIRouter, Body, File, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, PlainTextResponse, Response, StreamingResponse
 
 from . import ai as ai_mod
 from . import dedupe, images, nfo as nfo_mod, plugins, providers, scanner, scraper, scrape_diag, store, subtitles
-from .config import COVER_DIR, DATA_DIR, avatar_dir, _deep_merge, load_config, update_config
+from .config import (COVER_DIR, DATA_DIR, IN_CONTAINER, avatar_dir, _deep_merge,
+                     current_access_token, load_config, public_base_url, update_config)
 from .db import connect, db, query_all, query_one
 from .jobs import SCAN, SCRAPE, ACTRESS_FETCH
 
@@ -1814,30 +1816,53 @@ def export_csv() -> StreamingResponse:
 # ------------------------------------------------------------------ 配置/文件浏览
 
 
-def _require_local(request: Request) -> str:
-    """校验请求来自本机（127.0.0.1 / ::1），否则 403；返回客户端 IP。
+def _session_or_token(request: Request) -> bool:
+    """本次请求是否由「登录会话」或「访问令牌」认证（API Key 不算）。
 
-    用于「会交出长期令牌」的能力（完整令牌 / 含令牌的二维码）：远程即使已登录
-    也不给，否则拿走令牌即可绕过会话的过期、登出与踢设备。
+    用于二维码这类「可以生成一次性凭据、但不交出长期令牌」的能力；
+    访问保护关闭时一切本就公开，直接放行。
+    """
+    server = load_config().get("server") or {}
+    if not bool(server.get("token_required", True)):
+        return True
+    return request.scope.get("avm_auth_type") in ("session", "token")
+
+
+def _verify_credential(request: Request, payload: Dict[str, Any], action: str) -> None:
+    """再次校验访问令牌（查看 / 更换令牌前的确认步骤），带失败限速与审计。
+
+    存在的意义：会话被劫持（手机借人、浏览器同步）时，攻击者拿不到长期令牌，
+    「踢设备 / 换令牌」这两个止血手段才有效。
     """
     from . import auth
     server = load_config().get("server") or {}
     ip = auth.client_ip(request.scope, server.get("trusted_proxies") or ["127.0.0.1", "::1"])
-    if not auth.is_local_ip(ip):
-        auth.audit("deny", ip, request.headers.get("user-agent", ""), "远程请求本机专属能力", ok=False)
-        raise HTTPException(403, "该操作会返回长期有效的访问令牌，仅限本机执行")
-    return ip
+    ua = request.headers.get("user-agent", "")
+    max_fails = int(server.get("login_max_fails") or 0)
+    block_min = int(server.get("login_block_minutes") or 0)
+    until = auth.blocked_until(ip, max_fails, block_min)
+    now = time.time()
+    if until > now:
+        auth.audit(action, ip, ua, "处于封禁期，拒绝确认", ok=False)
+        raise HTTPException(429, "尝试次数过多，请 %d 分钟后再试" % (int((until - now) // 60) + 1))
+    credential = str((payload or {}).get("token") or "").strip()
+    expected = current_access_token()
+    if not expected or credential != expected:
+        n = auth.record_fail(ip)
+        auth.audit(action, ip, ua, "令牌确认失败（第 %d 次）" % n, ok=False)
+        raise HTTPException(401, "访问令牌不正确")
+    auth.clear_fails(ip)
 
 
 @router.get("/config")
 def get_config() -> Dict[str, Any]:
     cfg = load_config(refresh=True)
     # 安全：以下字段是凭据或凭据材料，任何情况下都不下发（前端需要的信息走专用接口）：
-    #   privacy.pin_hash    —— 可离线爆破简单密码，进而绕过隐私锁定
-    #   server.access_token —— 长期令牌，取走即可绕过会话的过期 / 登出 / 踢设备
-    #                          （本机需要完整令牌时用 /api/server/info，那里按来源判定）
+    #   privacy.pin_hash    —— 可离线爆破快速解锁码，进而绕过隐私锁定
+    #   server.access_token —— 长期令牌；/api/server/info 只给掩码，
+    #                          看完整值必须再输一次令牌（/api/server/reveal-token）
     #   server.totp_*       —— 两步验证密钥、备用码哈希与防重放步数
-    # 前端只用「是否已设置」这类布尔量：pin 走 /api/privacy/state 与 /api/auth/pin-status，
+    # 前端只用「是否已设置」这类布尔量：解锁码走 /api/privacy/state，
     # 令牌走 /api/server/info，TOTP 走 /api/auth/totp。
     privacy = cfg.get("privacy")
     if isinstance(privacy, dict):
@@ -1890,6 +1915,95 @@ def _lan_addresses() -> List[str]:
     return sorted(addrs, key=_rank)
 
 
+# ------------------------------------------------------------------ 访问地址推断
+# 容器经端口映射后，进程内只看得到容器网段地址（如 172.18.0.2），而请求头
+# Host / X-Forwarded-Host 里带着「用户实际访问用的地址」，用它展示和生成二维码
+# 比探测网卡可靠得多。注意：请求头可被客户端伪造，因此这里的结果**只用于展示**，
+# 绝不参与任何鉴权判定（鉴权统一走 client_ip + 会话/令牌）。
+_HOST_CHARS = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-:[]")
+
+
+def _clean_host(raw: str) -> str:
+    """只接受形如 host[:port] / [IPv6]:port 的值，其它一律视为无效。"""
+    val = (raw or "").strip()
+    if not val or len(val) > 260:
+        return ""
+    for ch in val:
+        if ch not in _HOST_CHARS:
+            return ""
+    return val
+
+
+def _is_loopback_host(host: str) -> bool:
+    low = (host or "").lower()
+    return low.startswith(("127.", "localhost", "[::1]", "0.0.0.0"))
+
+
+def _is_loopback_base(url: str) -> bool:
+    return _is_loopback_host((url or "").split("://", 1)[-1].split("/", 1)[0])
+
+
+def _request_host(request: Request) -> str:
+    h = request.headers
+    raw = (h.get("x-forwarded-host") or "").split(",")[0] or (h.get("host") or "")
+    return _clean_host(raw)
+
+
+def _request_scheme(request: Request) -> str:
+    proto = (request.headers.get("x-forwarded-proto") or "").split(",")[0].strip().lower()
+    return proto if proto in ("http", "https") else (request.url.scheme or "http")
+
+
+def _display_base(request: Request, port: int) -> str:
+    """推断「当前访问地址」，规范成 scheme://host[:port]/ 形式（仅用于展示）。
+
+    优先级：server.public_url / AVM_PUBLIC_URL → 请求头 Host（非回环）
+    → 本机探测到的局域网 IP → 127.0.0.1。
+    """
+    public = public_base_url()
+    if public:
+        return public + "/"
+    host = _request_host(request)
+    if host and not _is_loopback_host(host):
+        return f"{_request_scheme(request)}://{host}/"
+    lan = _lan_addresses()
+    return f"http://{lan[0] if lan else '127.0.0.1'}:{port}/"
+
+
+def _qr_base(addr: str, request: Request, port: int) -> str:
+    """把 addr / 推断结果归一化为 scheme://host[:port]/path/（丢弃 query）。"""
+    raw = (addr or "").strip()
+    if not raw:
+        return _display_base(request, port)
+    if not raw.lower().startswith(("http://", "https://")):
+        raw = "http://" + raw
+    try:
+        parts = urlsplit(raw)
+    except ValueError:
+        return _display_base(request, port)
+    host = _clean_host(parts.netloc)
+    if not host:
+        return _display_base(request, port)
+    if host.startswith("["):
+        if host.endswith("]"):
+            host = host + ":%d" % port
+    elif ":" not in host:
+        host = host + ":%d" % port
+    path = parts.path or "/"
+    if not path.endswith("/"):
+        path += "/"
+    return urlunsplit((parts.scheme or "http", host, path, "", ""))
+
+
+def _qr_allowed(request: Request) -> bool:
+    """能否生成二维码：会话 / 令牌即可（API Key 不行）。
+
+    二维码里装的是一次性短链（默认 5 分钟、用一次失效），不含长期令牌；
+    单一令牌模型下不再按来源 IP 区分，容器 / 手机 / 本机一视同仁。
+    """
+    return _session_or_token(request)
+
+
 def _build_date() -> str:
     """返回编译/构建日期。
 
@@ -1911,8 +2025,8 @@ def _build_date() -> str:
 def server_info(request: Request) -> Dict[str, Any]:
     """返回监听信息与访问令牌（供前端设置页展示）。
 
-    安全：完整令牌只在**本机**请求时返回；远程（含反向代理过来的请求）一律
-    返回掩码，避免已登录用户拿走长期有效的令牌，绕过会话的过期与登出。
+    单一令牌模型：不再按来源 IP 区分本机 / 远程。持有会话或令牌即可看到完整值
+    （手机上也一样），只有事务 API Key 这类低权限机器凭据只给掩码。
     """
     from . import auth
     from .config import ensure_access_token, mask_token
@@ -1922,20 +2036,29 @@ def server_info(request: Request) -> Dict[str, Any]:
     port = server.get("port", 8770)
     tok = ensure_access_token()
     ip = auth.client_ip(request.scope, server.get("trusted_proxies") or ["127.0.0.1", "::1"])
-    is_local = auth.is_local_ip(ip)
-    lan = _lan_addresses()
     local_url = f"http://127.0.0.1:{port}/"
-    urls = [local_url]
-    for addr in lan:
-        # 本机查看时给带令牌的直达链接（便于复制到手机）；远程只给地址
-        urls.append(f"http://{addr}:{port}/?token={tok}" if is_local else f"http://{addr}:{port}/")
+    public = public_base_url()
+    # 访问地址：优先用请求头 / 对外地址推断（容器与反代场景才准确）；
+    # 本机用回环地址打开时再回退到探测到的局域网网卡。
+    base = _display_base(request, port)
+    if _is_loopback_base(base):
+        lan = _lan_addresses()
+        extra = [f"http://{addr}:{port}/" for addr in lan]
+    else:
+        lan = []          # 已有准确地址，容器网段之类的探测结果不再展示
+        extra = [base]
+    # 地址列表只给地址：令牌不再拼进 URL（会进浏览器历史 / 转发记录），
+    # 手机端用设置页二维码（一次性短链）登录一次即可。
+    urls = [local_url] + extra
     return {
         "host": host,
         "port": port,
-        "access_token": tok if is_local else mask_token(tok),
-        "token_masked": not is_local,
-        "require_token_remote": server.get("require_token_remote", True),
-        "local_bypass": bool(server.get("local_bypass", True)),
+        # 完整令牌不再随本接口下发：前端点「显示」时另调 reveal-token（需再输令牌确认）
+        "access_token": mask_token(tok),
+        "token_masked": True,
+        # 令牌由环境变量固定时，页面上的「修改 / 重置」无效，需要改编排后重启
+        "token_env_locked": bool(os.environ.get("AVM_ACCESS_TOKEN", "").strip()),
+        "token_required": bool(server.get("token_required", True)),
         "session_idle_days": int(server.get("session_idle_days", 7) or 0),
         "session_abs_days": int(server.get("session_abs_days", 30) or 0),
         "session_persist": bool(server.get("session_persist")),
@@ -1943,6 +2066,12 @@ def server_info(request: Request) -> Dict[str, Any]:
         "lan_addresses": lan,
         "access_urls": urls,
         "local_url": local_url,
+        # 对外地址（AVM_PUBLIC_URL / server.public_url），未配置时为 ""
+        "public_url": public,
+        "in_container": IN_CONTAINER,
+        # 能否生成二维码（本机 / 已登录会话 / 关闭远程验证）。
+        # 二维码里是一次性短链，容器内也可用；前端据此决定显示二维码还是提示。
+        "qr_available": _qr_allowed(request),
         "app_version": APP_VERSION,
         "build_date": _build_date(),
         "update_feed": server.get("update_feed", ""),
@@ -2080,26 +2209,27 @@ def check_update(channel: str = Query("stable")) -> Dict[str, Any]:
 
 @router.get("/server/qr")
 def server_qr(request: Request, addr: str = "", size: int = 220) -> Response:
-    """生成访问二维码（含 token 的局域网地址），返回 PNG。
+    """生成访问二维码（一次性短链，默认 5 分钟、用一次即失效），返回 PNG。
 
-    addr 可为空（默认取首个局域网地址）、主机名/IP，或完整 URL。
+    addr 可为空（按请求头 / 对外地址自动推断）、主机名/IP，或完整 URL；
+    其中的查询参数（例如 access_urls 里的 ?token=）会被丢弃，统一改写成
+    ``?c=<一次性 code>`` —— 二维码里不再出现长期令牌。
 
-    安全：二维码里带的是**长期有效**的访问令牌，因此仅本机可生成；
-    远程（含反代过来的请求）一律拒绝，避免会话的过期 / 登出 / 踢设备被令牌绕过。
+    安全：二维码里只有一次性凭据；持有会话 / 令牌即可生成（与能否读取完整令牌
+    同一判定），容器 / 手机 / 本机一视同仁。
     """
-    from .config import ensure_access_token
-    _require_local(request)
+    from . import auth
+    if not _qr_allowed(request):
+        server = load_config().get("server") or {}
+        ip = auth.client_ip(request.scope, server.get("trusted_proxies") or ["127.0.0.1", "::1"])
+        auth.audit("deny", ip, request.headers.get("user-agent", ""), "未登录请求生成二维码", ok=False)
+        raise HTTPException(403, "需要本机访问或已登录会话才能生成二维码")
+
     cfg = load_config(refresh=True)
-    port = cfg.get("server", {}).get("port", 8770)
-    tok = ensure_access_token()
-    if addr:
-        if addr.startswith("http://") or addr.startswith("https://"):
-            text = addr
-        else:
-            text = f"http://{addr}:{port}/?token={tok}"
-    else:
-        lan = _lan_addresses()
-        text = f"http://{lan[0] if lan else '127.0.0.1'}:{port}/?token={tok}" if lan else f"http://127.0.0.1:{port}/"
+    port = int((cfg.get("server") or {}).get("port") or 8770)
+    base = _qr_base(addr, request, port)
+    text = f"{base}?c={auth.new_login_link()}"
+
     import qrcode
     qr = qrcode.QRCode(box_size=8, border=2, error_correction=qrcode.constants.ERROR_CORRECT_M)
     qr.add_data(text)
@@ -2107,19 +2237,78 @@ def server_qr(request: Request, addr: str = "", size: int = 220) -> Response:
     img = qr.make_image(fill_color="#111", back_color="#fff")
     buf = io.BytesIO()
     img.save(buf, format="PNG")
-    return Response(content=buf.getvalue(), media_type="image/png")
+    # X-QR-URL 便于抓包 / 自动化核对（同一张图里已经含着这个 URL，不算额外泄漏）；
+    # 一次性 + 短有效期，且需要已登录才能取。
+    return Response(content=buf.getvalue(), media_type="image/png",
+                    headers={"X-QR-URL": text, "Cache-Control": "no-store"})
+
+
+@router.post("/server/reveal-token")
+def reveal_token(request: Request, payload: Dict[str, Any] = Body(default={})) -> Dict[str, Any]:
+    """查看完整访问令牌：必须再输一次当前令牌。
+
+    这样即使会话被劫持（借出的手机、同步了 Cookie 的浏览器），攻击者也拿不到
+    长期令牌；「退出全部设备」与「更换令牌」这两条止血路径才真正有效。
+    """
+    from . import auth
+    _verify_credential(request, payload, "reveal-token")
+    server = load_config().get("server") or {}
+    ip = auth.client_ip(request.scope, server.get("trusted_proxies") or ["127.0.0.1", "::1"])
+    auth.audit("reveal-token", ip, request.headers.get("user-agent", ""), "已查看完整访问令牌", ok=True)
+    return {"token": current_access_token()}
 
 
 @router.post("/server/reset-token")
-def reset_token() -> Dict[str, Any]:
-    """重置访问令牌：生成新值并**吊销全部会话**（所有设备需重新登录）。"""
+def reset_token(request: Request, payload: Dict[str, Any] = Body(default={})) -> Dict[str, Any]:
+    """更换访问令牌：需再输一次当前令牌；换新后**吊销全部会话**（所有设备重新登录）。"""
     from . import auth
     from .config import ensure_access_token
+    if os.environ.get("AVM_ACCESS_TOKEN", "").strip():
+        raise HTTPException(
+            409,
+            "访问令牌由环境变量 AVM_ACCESS_TOKEN 固定，请在编排 / 启动参数里修改后重启",
+        )
+    _verify_credential(request, payload, "reset-token")
     update_config({"server": {"access_token": ""}})
     tok = ensure_access_token()
     n = auth.drop_all()
-    auth.audit("reset-token", detail="已重置访问令牌，吊销 %d 个会话" % n)
+    server = load_config().get("server") or {}
+    ip = auth.client_ip(request.scope, server.get("trusted_proxies") or ["127.0.0.1", "::1"])
+    auth.audit("reset-token", ip, request.headers.get("user-agent", ""),
+               "已更换访问令牌并吊销 %d 个会话" % n, ok=True)
     return {"access_token": tok, "revoked_sessions": n}
+
+
+@router.get("/fs/mounts")
+def fs_mounts() -> Dict[str, Any]:
+    """列出容器内可见的「外部挂载目录」，供媒体库路径选择。
+
+    容器里只有挂载进来的目录才会出现影片，但用户并不知道 compose 里挂到了哪。
+    `/proc/self/mountinfo` 的第 4 列是**挂载源**（Docker Desktop 下形如
+    `/d/迅雷下载`），第 5 列是容器内挂载点，据此可以列出「宿主机 X → 容器 Y」。
+
+    过滤掉 /proc /sys /dev /etc /run /data /app 等系统与应用自身的挂载。
+    """
+    skip = ("/proc", "/sys", "/dev", "/etc", "/run", "/var/lib/docker", "/data", "/app", "/tmp", "/srv")
+    items: List[Dict[str, str]] = []
+    try:
+        with open("/proc/self/mountinfo", "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                parts = line.split(" - ")
+                if len(parts) != 2:
+                    continue
+                left = parts[0].split()
+                right = parts[1].split()
+                if len(left) < 5 or not right:
+                    continue
+                root, target = left[3], left[4]
+                if target == "/" or target.startswith(skip):
+                    continue
+                items.append({"target": target, "root": root, "fstype": right[0]})
+    except Exception:
+        pass
+    items.sort(key=lambda x: x["target"])
+    return {"in_container": IN_CONTAINER, "items": items}
 
 
 @router.get("/fs/list")

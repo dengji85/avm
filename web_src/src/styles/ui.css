@@ -210,10 +210,38 @@ input[type='range'] { accent-color: var(--c-primary); cursor: pointer; height: a
 }
 .section-title .count { color: var(--c-text-3); font-size: var(--fs-sm); font-weight: 400; }
 
-/* ---------------- 局域网访问：二维码 + 地址 ---------------- */
+/* ---------------- 媒体库：容器内已挂载目录 ---------------- */
+.mount-chips {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 6px;
+  margin: var(--sp-2) 0 var(--sp-2);
+}
+.mount-chips .muted { font-size: var(--fs-sm); }
+
+/* ---------------- 设置页「高级」折叠区 ---------------- */
+.adv { margin-top: var(--sp-3); }
+.adv > summary {
+  cursor: pointer; user-select: none; padding: var(--sp-2) var(--sp-1);
+  color: var(--c-text-2); font-size: var(--fs-sm); font-weight: 600;
+  border: 1px dashed var(--c-line); border-radius: var(--r-sm);
+  list-style: none;
+}
+.adv > summary::-webkit-details-marker { display: none; }
+.adv > summary::before { content: '▸ '; }
+.adv[open] > summary::before { content: '▾ '; }
+.adv > summary:hover { border-color: var(--c-line-strong); color: var(--c-text); }
+.adv[open] > summary { margin-bottom: var(--sp-2); }
+
+/* ---------------- 扫码访问：二维码 + 地址 ---------------- */
 .lan-share-body { display: flex; gap: var(--sp-4); flex-wrap: wrap; align-items: flex-start; }
 .qr-wrap { display: flex; flex-direction: column; align-items: center; gap: var(--sp-2); }
 .qr-img { width: 200px; height: 200px; border-radius: var(--r-sm); background: #fff; padding: 6px; border: 1px solid var(--c-line); }
+/* 二维码不可用时的占位（容器 / 远程访问：含令牌的二维码仅本机可生成） */
+.qr-off {
+  width: 200px; min-height: 200px; display: flex; flex-direction: column; justify-content: center;
+  gap: var(--sp-2); padding: var(--sp-3); box-sizing: border-box;
+  border: 1px dashed var(--c-line-strong); border-radius: var(--r-sm); background: var(--c-surface-2);
+}
+.qr-off-title { font-size: var(--fs-sm); font-weight: 600; }
 .lan-urls { display: flex; flex-direction: column; gap: var(--sp-2); flex: 1 1 260px; min-width: 0; }
 .addr-pick { display: flex; flex-direction: column; gap: var(--sp-1); margin-bottom: var(--sp-1); }
 .addr-pick .inp { width: 100%; }

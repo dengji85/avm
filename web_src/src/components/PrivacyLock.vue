@@ -9,8 +9,8 @@
  *     所以刷新、重开标签页、直接调接口都无法绕过。
  *
  * 三种触发：空闲自动锁定（privacy.idle_lock_minutes）、紧急遮挡键（privacy.panic_key）、
- * 启动即遮挡（privacy.lock_on_start）。解锁方式见 privacy.lock_unlock：
- * click = 点击即解锁 / pin = 简单密码 / token = 访问令牌。
+ * 启动即遮挡（privacy.lock_on_start）。
+ * 解锁只有两种凭据：pin = 快速解锁码（设了就用它）/ token = 访问令牌（始终可兜底）。
  */
 import { ref, onMounted, onBeforeUnmount } from 'vue'
 import { getConfig, onLocked, privacyLock, privacyState, privacyUnlock } from '../api.js'
@@ -33,7 +33,7 @@ const DEFAULT_CFG = {
 const cfg = ref({ ...DEFAULT_CFG })
 const locked = ref(false)          // 服务端锁定的本地镜像
 const reason = ref('idle')         // idle / panic / start / server
-const unlockMode = ref('token')    // click / pin / token（按服务端状态计算，pin 未设置时回退 token）
+const unlockMode = ref('token')    // pin / token（按服务端状态计算，未设解锁码时回退 token）
 const secret = ref('')
 const showSecret = ref(false) // 解锁输入框的明文 / 密文切换
 const err = ref('')
@@ -91,8 +91,8 @@ function resumePlayback() {
 function applyState(st) {
   if (!st) return
   const m = st.unlock_mode || 'token'
-  // 选了「简单密码」但尚未设置时按「访问令牌」处理，不会变成敞开
-  unlockMode.value = m === 'click' ? 'click' : (m === 'pin' && st.has_pin ? 'pin' : 'token')
+  // 选了「快速解锁码」但尚未设置时按「访问令牌」处理，不会变成敞开
+  unlockMode.value = (m === 'pin' && st.has_pin) ? 'pin' : 'token'
   if (st.locked && !locked.value) {
     locked.value = true
     reason.value = st.reason || 'idle'
@@ -147,7 +147,6 @@ async function doUnlock(credential) {
 
 async function tryUnlock() {
   if (busy.value) return
-  if (unlockMode.value === 'click') { await doUnlock(''); return }
   const isPin = unlockMode.value === 'pin'
   const v = secret.value.trim()
   if (!v) { err.value = isPin ? t('privacy.pinWrong') : t('common.token.failed'); return }
@@ -200,9 +199,7 @@ function onKeydown(e) {
     if (!locked.value) lockNow('panic')
     return
   }
-  if (isTyping(e.target)) return
-  // 只有「点击即解锁」模式才允许任意键解锁；pin / token 必须输入，避免被一下子解开
-  if (locked.value && unlockMode.value === 'click') tryUnlock()
+  // 锁定时任何按键都不自动解锁：解锁码 / 令牌必须手动输入
 }
 
 /* ---------------------------------------------------------------- 生命周期 */
@@ -266,41 +263,34 @@ onBeforeUnmount(() => {
       <div class="pv-title">{{ reason === 'panic' ? $t('privacy.panicTitle') : $t('privacy.locked') }}</div>
       <p class="pv-desc">{{ reason === 'panic' ? $t('privacy.panicHint') : $t('privacy.lockedHint') }}</p>
 
-      <template v-if="unlockMode === 'click'">
-        <button class="btn primary" :disabled="busy" @click="tryUnlock">{{ $t('privacy.unlockBtn') }}</button>
-        <p class="pv-hint">{{ $t('privacy.clickHint') }}</p>
-      </template>
-
-      <template v-else>
-        <div class="pv-unlock">
-          <div class="pv-input">
-            <input
-              v-model="secret"
-              :type="showSecret ? 'text' : 'password'"
-              name="avm-code"
-              autocomplete="new-password"
-              autocapitalize="off"
-              spellcheck="false"
-              data-lpignore="true"
-              data-1p-ignore
-              data-bwignore
-              :placeholder="unlockMode === 'pin' ? $t('privacy.pinPh') : $t('privacy.unlockPh')"
-              @keyup.enter="tryUnlock"
-              autofocus
-            />
-            <button
-              type="button"
-              class="pv-eye"
-              :title="$t(showSecret ? 'privacy.hideSecret' : 'privacy.showSecret')"
-              :aria-label="$t(showSecret ? 'privacy.hideSecret' : 'privacy.showSecret')"
-              @click="showSecret = !showSecret"
-            >{{ showSecret ? '🙈' : '👁' }}</button>
-          </div>
-          <button class="btn primary large block" :disabled="busy" @click="tryUnlock">{{ $t('privacy.unlockBtn') }}</button>
+      <div class="pv-unlock">
+        <div class="pv-input">
+          <input
+            v-model="secret"
+            :type="showSecret ? 'text' : 'password'"
+            name="avm-code"
+            autocomplete="new-password"
+            autocapitalize="off"
+            spellcheck="false"
+            data-lpignore="true"
+            data-1p-ignore
+            data-bwignore
+            :placeholder="unlockMode === 'pin' ? $t('privacy.pinPh') : $t('privacy.unlockPh')"
+            @keyup.enter="tryUnlock"
+            autofocus
+          />
+          <button
+            type="button"
+            class="pv-eye"
+            :title="$t(showSecret ? 'privacy.hideSecret' : 'privacy.showSecret')"
+            :aria-label="$t(showSecret ? 'privacy.hideSecret' : 'privacy.showSecret')"
+            @click="showSecret = !showSecret"
+          >{{ showSecret ? '🙈' : '👁' }}</button>
         </div>
-        <p v-if="err" class="pv-err">{{ err }}</p>
-        <p class="pv-hint">{{ unlockMode === 'pin' ? $t('privacy.pinHint') : $t('privacy.unlockHint') }}</p>
-      </template>
+        <button class="btn primary large block" :disabled="busy" @click="tryUnlock">{{ $t('privacy.unlockBtn') }}</button>
+      </div>
+      <p v-if="err" class="pv-err">{{ err }}</p>
+      <p class="pv-hint">{{ unlockMode === 'pin' ? $t('privacy.pinHint') : $t('privacy.unlockHint') }}</p>
     </div>
   </div>
 </template>

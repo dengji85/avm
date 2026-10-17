@@ -175,22 +175,43 @@ def cmd_serve(args) -> int:
     app.state.bind_host = args.host
     # 将本次实际监听地址写回配置，供设置页/接口准确展示
     update_config({"server": {"host": args.host, "port": args.port}})
-    url = f"http://{args.host}:{args.port}/"
+    protect = True
+    try:
+        protect = bool(load_config().get("server", {}).get("token_required", True))
+    except Exception:
+        protect = True
+    # 展示用地址：0.0.0.0 在浏览器里打不开，统一显示回环地址
+    shown_host = "127.0.0.1" if args.host in ("0.0.0.0", "") else args.host
+    url = f"http://{shown_host}:{args.port}/"
     print(f"片匣已启动： {url}")
     print("浏览器已自动打开；如需手动访问，复制上面的地址到浏览器。")
-    # 容器 / NAS 部署时来源 IP 不是本机、无法豁免令牌，这里直接打印方便首次登录
-    # （也可用环境变量 AVM_ACCESS_TOKEN 预设一个固定令牌）
+    # 本机也不再免令牌：完整令牌写在文件里（0600），日志只打印掩码
     try:
         print(f"数据目录： {DATA_DIR}")
-        if load_config().get("server", {}).get("require_token_remote", True):
-            # 完整令牌写在文件里（权限 0600），日志只打印掩码，避免泄漏进日志/工单
+        if protect:
             from .config import TOKEN_FILE, mask_token
-            print(f"远程访问令牌： {mask_token(ensure_access_token())}（完整值见 {TOKEN_FILE}）")
+            print(f"访问令牌： {mask_token(ensure_access_token())}（完整值见 {TOKEN_FILE}）")
+        else:
+            print("⚠ 访问保护已关闭：任何能连上的设备都可直接访问")
     except Exception:
         pass
     print("按 Ctrl+C 退出服务。")
     if not args.no_browser:
-        threading.Timer(1.5, lambda: webbrowser.open(url)).start()
+        def _open() -> None:
+            """用一次性短链打开浏览器：本机也要令牌，但体验保持无感。
+
+            令牌不放进 URL（会进浏览器历史 / 反代日志），改用 5 分钟一次性的 ?c=。
+            --reload 时服务跑在子进程里，父进程生成的 code 无效，故直接开裸地址。
+            """
+            target = url
+            if protect and not getattr(args, "reload", False):
+                try:
+                    from . import auth
+                    target = f"{url}?c={auth.new_login_link()}"
+                except Exception:
+                    target = url
+            webbrowser.open(target)
+        threading.Timer(1.5, _open).start()
     # proxy_headers：让 uvicorn 依据可信代理（server.trusted_proxies）还原真实客户端 IP；
     # 否则同机反向代理时所有请求来源都会是 127.0.0.1，访问控制会被整体绕过
     # （详见 docs/安全与隐私设计.md）。

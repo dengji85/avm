@@ -224,6 +224,40 @@ def prune(idle_days: int, abs_days: int) -> int:
     return len(dead)
 
 
+# ------------------------------------------------------------------ 一次性登录短链
+# 二维码里不再放长期令牌：改为一次性 code（默认 5 分钟、用一次即废）。
+# 好处：容器 / NAS 部署也能用二维码（不必放宽「本机」限制），
+# 且扫码设备拿到的不是永久凭据 —— 比把长期令牌印在二维码里更安全。
+_LINKS: Dict[str, float] = {}   # code -> 过期时间戳
+LINK_TTL = 300                  # 有效期（秒）
+LINK_MAX = 200                  # 上限，防止异常调用把内存撑大
+
+
+def new_login_link(ttl: int = LINK_TTL) -> str:
+    """生成一次性登录 code（只存内存，进程重启即全部失效）。"""
+    code = secrets.token_urlsafe(18)
+    now = time.time()
+    with _LOCK:
+        for k in [k for k, exp in _LINKS.items() if exp <= now]:
+            _LINKS.pop(k, None)
+        if len(_LINKS) >= LINK_MAX:
+            # 淘汰最先过期的一批；正常使用几乎不会触发
+            for k, _exp in sorted(_LINKS.items(), key=lambda kv: kv[1])[: max(1, LINK_MAX // 10)]:
+                _LINKS.pop(k, None)
+        _LINKS[code] = now + max(30, int(ttl or LINK_TTL))
+    return code
+
+
+def consume_login_link(code: str) -> bool:
+    """消费一次性短链：命中即删除（原子），过期 / 已用过返回 False。"""
+    if not code:
+        return False
+    now = time.time()
+    with _LOCK:
+        exp = _LINKS.pop(code, None)
+    return bool(exp) and float(exp) > now
+
+
 def list_sessions() -> List[Dict[str, Any]]:
     """活跃会话列表；id 为指纹前 12 位（对外的可操作标识）。"""
     now = time.time()

@@ -117,8 +117,7 @@ export const getSession = () => get('/auth/session')
 export const listSessions = () => get('/auth/sessions')
 export const revokeSession = (sid) => del(`/auth/sessions/${encodeURIComponent(sid)}`)
 export const getAudit = (limit = 50) => get(`/auth/audit?limit=${encodeURIComponent(limit)}`)
-/* 隐私解锁：简单密码（只存哈希在服务端，前端只发送明文校验） */
-export const pinStatus = () => get('/auth/pin-status')
+/* 隐私解锁：快速解锁码（只存哈希在服务端；校验统一走 /privacy/unlock） */
 export const setPin = (pin) => post('/auth/set-pin', { pin })
 /* 两步验证（TOTP）：密钥与备用码只存在服务端，前端仅提交验证码 */
 export const totpStatus = () => get('/auth/totp')
@@ -137,7 +136,11 @@ export const privacyUnlock = (credential = '') => post('/privacy/unlock', { cred
 
 /* ---------------- 服务/访问控制 ---------------- */
 export const getServerInfo = () => get('/server/info')
-export const resetToken = () => post('/server/reset-token')
+/* 容器内已挂载的目录（宿主机 X → 容器 Y），供首次向导 / 设置页挑选媒体库路径 */
+export const fsMounts = () => get('/fs/mounts')
+/* 查看 / 更换令牌都要再输一次当前令牌（防会话被劫持后抄走长期凭据） */
+export const revealToken = (token) => post('/server/reveal-token', { token })
+export const rotateToken = (token) => post('/server/reset-token', { token })
 export const checkUpdate = (channel = 'stable') => get(`/server/check-update?channel=${encodeURIComponent(channel)}`)
 
 /* 女优头像 / 影片背景大图（fanart）：统一走后端接口，兼容本地文件名与远程 URL（墙内代理） */

@@ -17,7 +17,16 @@ const totpCode = ref('')
 // 第二步输入框由 v-if 动态挂载，原生 autofocus 对动态节点无效，需手动聚焦
 const totpInput = ref(null)
 
-function open() { err.value = ''; step.value = 'token'; visible.value = true }
+function open() {
+  // 两步验证进行中不要重置：令牌校验通过后会话尚未签发，页面上其它请求仍会 401，
+  // 它们会再次触发 open()，若在这里把 step 打回 token，第二步输入框就被冲掉了
+  // （表现就是"刚输完验证码又让我重输令牌"）。
+  if (visible.value && step.value === 'totp') return
+  if (visible.value) return
+  err.value = ''
+  step.value = 'token'
+  visible.value = true
+}
 function close() { visible.value = false; totpCode.value = ''; step.value = 'token' }
 
 async function submit() {

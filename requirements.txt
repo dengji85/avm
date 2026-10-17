@@ -4,4 +4,6 @@ requests>=2.31.0
 beautifulsoup4>=4.12.0
 python-multipart>=0.0.9
 qrcode>=7.0
+# qrcode 生成 PNG 需要 Pillow（二维码接口）；封面亮度分析也用到
+pillow>=10.0
 Send2Trash>=1.8.0

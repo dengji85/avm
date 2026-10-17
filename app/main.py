@@ -5,19 +5,32 @@ from __future__ import annotations
 import time
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.types import Scope, Receive, Send
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import __version__, auth
+from . import __version__, auth, lockpage
 from .api import router
 from .api_auth import privacy_router, router as auth_router
 from .config import (WEB_DIR, ensure_dirs, DATA_DIR, CONFIG_PATH, TOKEN_FILE,
-                     load_config, ensure_access_token, mask_token)
+                     load_config, ensure_access_token, current_access_token, mask_token,
+                     session_cookie_name)
 from .db import init_db
 
-app = FastAPI(title="片匣 · 本地 AV 收藏管理", version=__version__, docs_url="/api/docs")
+# 会话 Cookie 名按实例区分：同机多实例（开发 8770 + 容器 8771）互不覆盖
+auth.SESSION_COOKIE = session_cookie_name()
+
+# API 文档自托管：不引用任何 CDN（国内 / 离线 / 纯 http 都能打开）。
+# docs_url/redoc_url 关掉 FastAPI 自带的 Swagger 页面（它从 cdn.jsdelivr.net 拉脚本，
+# 既被本项目的 CSP 拦、国内也常常打不开），改由 /api/docs 返回我们自己的页面。
+app = FastAPI(
+    title="片匣 · 本地 AV 收藏管理",
+    version=__version__,
+    docs_url=None,
+    redoc_url=None,
+    openapi_url="/api/openapi.json",
+)
 
 # 跨源白名单：默认空 = 不启用 CORS（前后端同源部署本不需要 CORS）。
 # 如需跨源访问，在 server.cors_origins 里显式列出；改动需重启生效。
@@ -42,6 +55,10 @@ _PUBLIC_PATHS = {
     "/", "/index.html",
     "/api/health",
     "/api/auth/login", "/api/auth/logout", "/api/auth/session",
+    # 自托管 API 文档的静态脚本（纯前端渲染，不含任何数据）
+    "/api-docs.js",
+    # 锁屏页脚本（锁定状态下页面本身必须能加载）
+    "/lock.js",
 }
 
 # 隐私锁定期间仍可访问的路径（否则页面与解锁接口本身会被自己挡住）。
@@ -50,9 +67,7 @@ _PUBLIC_PATHS = {
 # /api/auth/audit（读登录记录），等于绕过了锁定本身。
 # 登录 / 登出 / 会话状态查询已在 _PUBLIC_PREFIXES 中，不受锁定影响。
 _LOCK_ALLOWED = (
-    "/api/privacy/",           # state / unlock / lock
-    "/api/auth/pin-status",    # 前端据此决定是否回退到「访问令牌」解锁
-    "/api/auth/verify-pin",    # 简单密码解锁
+    "/api/privacy/",           # state / unlock / lock（解锁凭据由该接口统一校验）
 )
 
 # 事务 API Key **不可**访问的凭据管理接口：Key 是机器凭据，一旦泄露若还能
@@ -76,14 +91,20 @@ def _cookie_token(raw: str) -> str:
     return ""
 
 
-def _query_token(scope: Scope) -> str:
-    """取出 URL 查询串里的 token=xxx（兼容脚本、旧客户端与扫码链接）。"""
+def _query_param(scope: Scope, name: str) -> str:
+    """取出 URL 查询串里的指定参数（不解析 '+' 为空格，避免改写 code）。"""
     from urllib.parse import unquote
     qs = scope.get("query_string", b"").decode("latin-1")
+    prefix = name + "="
     for pair in qs.split("&"):
-        if pair.startswith("token="):
+        if pair.startswith(prefix):
             return unquote(pair.split("=", 1)[1])
     return ""
+
+
+def _query_token(scope: Scope) -> str:
+    """取出 URL 查询串里的 token=xxx（兼容脚本、旧客户端与旧二维码链接）。"""
+    return _query_param(scope, "token")
 
 
 def _api_key_from(scope: Scope) -> str:
@@ -99,7 +120,7 @@ def _token_valid(scope: Scope, cfg_token: str) -> bool:
     """校验「访问令牌」通道（兼容脚本、旧客户端与二维码链接）。
 
     支持 X-Access-Token 头、?token= 查询、旧版 avm_token Cookie。
-    令牌为空时不放行——是否关闭访问保护由 server.require_token_remote 决定，
+    令牌为空时不放行——是否关闭访问保护由 server.token_required 决定，
     避免「配置里没有令牌」意外变成完全开放。
     """
     if not cfg_token:
@@ -146,7 +167,7 @@ class AccessTokenMiddleware(BaseHTTPMiddleware):
         #    换成 HttpOnly 会话 Cookie 后，后续请求（含 <img>/<video>）自动通过，也不必每次带参数。
         #    必须放在下面的公开白名单**之前** —— 首页本身是公开的，放后面这段永远不会执行。
         if (path in ("/", "/index.html") and _query_token(request.scope)
-                and _token_valid(request.scope, (server.get("access_token") or "").strip())):
+                and _token_valid(request.scope, current_access_token())):
             idle, _absd = _session_limits(server)
             sid, _info = auth.new_session(ip, ua, idle, _absd)
             auth.audit("login", ip, ua, "通过 URL 令牌换取会话", ok=True)
@@ -156,12 +177,42 @@ class AccessTokenMiddleware(BaseHTTPMiddleware):
                                 "%s=; Path=/; Max-Age=0; SameSite=Lax" % auth.COOKIE_TOKEN)
             return resp
 
+        # 0b) 用一次性短链 ?c=<code> 打开首页（二维码扫码）：消费即失效，
+        #     不落进长期令牌。有效期与上限见 app/auth.py 的 new_login_link。
+        link_code = _query_param(request.scope, "c")
+        if path in ("/", "/index.html") and link_code:
+            if auth.consume_login_link(link_code):
+                idle, _absd = _session_limits(server)
+                sid, _info = auth.new_session(ip, ua, idle, _absd)
+                auth.audit("login", ip, ua, "通过一次性短链换取会话", ok=True)
+                resp = RedirectResponse("/", status_code=302)
+                resp.headers.append("Set-Cookie", auth.session_cookie(sid, auth.is_https(request.scope), idle))
+                resp.headers.append("Set-Cookie",
+                                    "%s=; Path=/; Max-Age=0; SameSite=Lax" % auth.COOKIE_TOKEN)
+                return resp
+            auth.audit("login", ip, ua, "一次性短链无效或已过期", ok=False)
+
+        # 隐私锁定期间，首页直接返回「锁屏页」而不是 SPA：
+        # 否则前端要先下载、启动、再请求 /api/privacy/state 才知道被锁，
+        # 中间会闪一下封面 / 标题（刷新时尤其明显）。锁屏页不含任何应用数据。
+        if path in ("/", "/index.html") and auth.privacy_locked():
+            st = auth.privacy_state()
+            privacy = load_config().get("privacy") or {}
+            return HTMLResponse(
+                lockpage.render_lock_page(
+                    request.headers.get("accept-language", ""),
+                    str(st.get("reason") or ""),
+                    bool((privacy.get("pin_hash") or "").strip()),
+                ),
+                headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
+            )
+
         if (path.startswith(_PUBLIC_PREFIXES) or path in _PUBLIC_PATHS
                 or (bool(server.get("expose_docs"))
-                    and path.startswith(("/api/docs", "/api/openapi.json")))):
+                    and path in ("/api/docs", "/api/openapi.json", "/openapi.json"))):
             return await call_next(request)
 
-        if server.get("require_token_remote", True):
+        if server.get("token_required", True):
             allowed = False
             # 1) 会话 Cookie（登录后签发；默认仅内存，server.session_persist 可落盘）
             sid = auth.cookie_value(request.scope, auth.SESSION_COOKIE)
@@ -169,13 +220,14 @@ class AccessTokenMiddleware(BaseHTTPMiddleware):
                 idle, absd = _session_limits(server)
                 if auth.touch_session(sid, idle, absd):
                     allowed = True
-            # 2) 访问令牌（兼容脚本 / 旧客户端）
-            if not allowed and _token_valid(request.scope, (server.get("access_token") or "").strip()):
+                    request.scope["avm_session_ok"] = True
+                    request.scope["avm_auth_type"] = "session"
+            # 2) 访问令牌（兼容脚本 / 旧客户端；环境变量 AVM_ACCESS_TOKEN 优先）
+            #    不再有「本机免令牌」：本机、手机、NAS 一视同仁，令牌是唯一凭据。
+            if not allowed and _token_valid(request.scope, current_access_token()):
                 allowed = True
-            # 3) 本机豁免（容器内默认关闭：端口映射与同机反代无法区分「真本机」）
-            if not allowed and bool(server.get("local_bypass", True)) and auth.is_local_ip(ip):
-                allowed = True
-            # 4) 事务 API Key（Authorization: Bearer / X-API-Key），供脚本与自动化。
+                request.scope["avm_auth_type"] = "token"
+            # 3) 事务 API Key（Authorization: Bearer / X-API-Key），供脚本与自动化。
             #    与登录会话分离：可命名、可单独吊销、scope=read 时只允许读取。
             #    注意 API Key **不受两步验证约束** —— 它是机器凭据，要求交互式验证码
             #    会让自动化不可用；代价是「多了一把不需要两步验证的钥匙」，设置页已提示。
@@ -196,17 +248,25 @@ class AccessTokenMiddleware(BaseHTTPMiddleware):
                         allowed = True
                         request.scope["avm_api_scope"] = key_info.get("scope") or "full"
                         request.scope["avm_api_name"] = key_info.get("name") or ""
+                        request.scope["avm_auth_type"] = "key"
 
             if not allowed:
                 auth.audit("deny", ip, ua, path, ok=False)
-                return JSONResponse(
+                resp = JSONResponse(
                     status_code=401,
                     content={"detail": "需要访问令牌", "code": "NO_TOKEN"},
                 )
+                # 顺手清掉已失效的会话 Cookie：否则浏览器会一直带着作废的 sid 重试，
+                # 表现为「刷新 / 点开播放又要求输令牌」（重启、换实例之后尤其明显）。
+                resp.headers.append(
+                    "Set-Cookie",
+                    "%s=; Path=/; Max-Age=0; SameSite=Lax" % auth.SESSION_COOKIE,
+                )
+                return resp
 
         # 5) 隐私锁定（状态在服务端）：除解锁相关接口外一律拒绝。
         #    锁定状态不存前端，所以刷新页面 / 重开标签页 / 直接调接口都拿不到内容。
-        #    这一段刻意放在 require_token_remote 判断**之外**：关掉访问保护做本机调试时，
+        #    这一段刻意放在 token_required 判断**之外**：关掉访问保护做本机调试时，
         #    锁定仍须生效，否则「锁定」在关闭访问控制后就形同虚设。
         if auth.privacy_locked() and not path.startswith(_LOCK_ALLOWED):
             return JSONResponse(
@@ -323,13 +383,13 @@ def _startup() -> None:
     keys = auth.load_api_keys()
     host = server.get("host", "127.0.0.1")
     if host in ("0.0.0.0", ""):
-        local_bypass = bool(server.get("local_bypass", True))
         print("=" * 60)
-        print("远程访问已开启。访问令牌（完整值见文件，日志只打印掩码）：")
-        print("  掩码：%s" % mask_token(tok))
-        print("  文件：%s" % TOKEN_FILE)
-        print("  也可用环境变量 AVM_ACCESS_TOKEN 预设；登录后可在设置页退出登录 / 管理会话。")
-        print("  本机免令牌：%s（server.local_bypass）" % ("是" if local_bypass else "否"))
+        if bool(server.get("token_required", True)):
+            print("访问保护已开启：所有设备（含本机）都需要访问令牌。")
+            print("  令牌掩码：%s（完整值见 %s）" % (mask_token(tok), TOKEN_FILE))
+            print("  也可用环境变量 AVM_ACCESS_TOKEN 预设；登录后可在设置页退出登录 / 管理会话。")
+        else:
+            print("⚠ 访问保护已关闭：任何能连上的设备都可直接访问（设置 → 访问 可重新开启）。")
         if restored:
             print("  已恢复 %d 个持久会话（server.session_persist=true）" % restored)
         if keys:
@@ -408,6 +468,44 @@ def index() -> FileResponse:
         WEB_DIR / "index.html",
         headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
     )
+
+
+# ------------------------------------------------------------------ API 文档（自托管）
+# 不引用任何 CDN：脚本与样式都在本地，纯 http、国内网络、离线环境都能打开。
+# 页面受访问保护约束（未登录 401）；server.expose_docs = true 时允许匿名查看。
+@app.get("/api/docs", include_in_schema=False)
+def api_docs_page() -> FileResponse:
+    p = WEB_DIR / "api-docs.html"
+    if not p.exists():
+        raise HTTPException(404, "文档页面缺失（web_dist/api-docs.html）")
+    return FileResponse(p, media_type="text/html; charset=utf-8",
+                        headers={"Cache-Control": "no-cache"})
+
+
+@app.get("/api-docs.js", include_in_schema=False)
+def api_docs_script() -> FileResponse:
+    """文档页脚本单独成文件：CSP 禁止内联脚本（script-src 'self'）。"""
+    p = WEB_DIR / "api-docs.js"
+    if not p.exists():
+        raise HTTPException(404, "文档脚本缺失（web_dist/api-docs.js）")
+    return FileResponse(p, media_type="application/javascript; charset=utf-8",
+                        headers={"Cache-Control": "no-cache"})
+
+
+@app.get("/lock.js", include_in_schema=False)
+def lock_script() -> FileResponse:
+    """锁屏页脚本：锁定状态下必须能加载（含解锁逻辑，不含任何应用数据）。"""
+    p = WEB_DIR / "lock.js"
+    if not p.exists():
+        raise HTTPException(404, "锁屏脚本缺失（web_dist/lock.js）")
+    return FileResponse(p, media_type="application/javascript; charset=utf-8",
+                        headers={"Cache-Control": "no-cache"})
+
+
+@app.get("/openapi.json", include_in_schema=False)
+def openapi_alias():
+    """旧链接兼容：规格的真实地址是 /api/openapi.json。"""
+    return JSONResponse(app.openapi())
 
 
 # Vite 构建产物：模块脚本与静态资源位于 /assets 下

@@ -174,14 +174,15 @@ def session_info(request: Request) -> Dict[str, Any]:
 
     token_ok = False
     if not info:
-        tok = (server.get("access_token") or "").strip()
+        from .config import current_access_token
+        tok = current_access_token()
         hdrs = auth.http_headers(request.scope)
         token_ok = bool(tok) and hdrs.get("x-access-token") == tok
 
     local = auth.is_local_ip(ip)
-    bypass = bool(server.get("local_bypass", True))
-    need_auth = bool(server.get("require_token_remote", True))
-    via = "session" if info else ("token" if token_ok else ("local" if (local and bypass) else ""))
+    need_auth = bool(server.get("token_required", True))
+    # 不再有「本机免令牌」：未登录就是未登录，本机也一样（令牌是唯一凭据）
+    via = "session" if info else ("token" if token_ok else "")
     authenticated = bool(via) or not need_auth
 
     return {
@@ -227,57 +228,24 @@ def audit_log(limit: int = 50) -> Dict[str, Any]:
     return {"items": auth.recent_audit(limit)}
 
 
-# ------------------------------------------------------------------ 隐私解锁（简单密码）
-@router.get("/pin-status")
-def pin_status() -> Dict[str, Any]:
-    """是否已设置隐私解锁「简单密码」（不下发任何凭据）。"""
-    return {"has_pin": bool((_privacy_cfg().get("pin_hash") or "").strip())}
-
-
+# ------------------------------------------------------------------ 隐私解锁（快速解锁码）
 @router.post("/set-pin")
 def set_pin(payload: Dict[str, Any]) -> Dict[str, Any]:
-    """设置 / 清除隐私解锁简单密码（需已登录；pin 为空表示清除）。
+    """设置 / 清除「快速解锁码」（需已登录；pin 为空表示清除）。
 
     磁盘只保存 PBKDF2 哈希，明文永不落盘、也不会下发到前端。
+    遮挡层解锁凭据统一由 /api/privacy/unlock 校验，这里只负责写入。
     """
     pin = str((payload or {}).get("pin") or "").strip()
     if pin and len(pin) < 4:
-        raise HTTPException(400, "简单密码至少 4 位")
+        raise HTTPException(400, "解锁码至少 4 位")
     if len(pin) > 64:
-        raise HTTPException(400, "简单密码过长")
-    update_config({"privacy": {"pin_hash": auth.hash_pin(pin)}})
-    auth.audit("set-pin", detail="已更新隐私解锁简单密码" if pin else "已清除隐私解锁简单密码")
+        raise HTTPException(400, "解锁码过长")
+    # 设置解锁码即切到「快速解锁码」；清除后回落到「访问令牌」，不会出现空档
+    update_config({"privacy": {"pin_hash": auth.hash_pin(pin),
+                               "lock_unlock": "pin" if pin else "token"}})
+    auth.audit("set-pin", detail="已更新快速解锁码" if pin else "已清除快速解锁码")
     return {"ok": True, "has_pin": bool(pin)}
-
-
-@router.post("/verify-pin")
-def verify_pin(payload: Dict[str, Any], request: Request) -> Dict[str, Any]:
-    """校验隐私解锁简单密码（遮挡层解锁用），带失败限速。"""
-    server = _server_cfg()
-    # 简单密码保存在 privacy 段（server 段只放访问控制与会话配置）
-    stored = (_privacy_cfg().get("pin_hash") or "").strip()
-    if not stored:
-        raise HTTPException(400, "尚未设置简单密码")
-    ip = _client(request, server)
-    ua = _ua(request)
-    max_fails = int(server.get("login_max_fails") or 0)
-    block_min = int(server.get("login_block_minutes") or 0)
-    until = auth.blocked_until(ip, max_fails, block_min)
-    now = time.time()
-    if until > now:
-        auth.audit("unlock", ip, ua, "处于封禁期，拒绝解锁尝试", ok=False)
-        raise HTTPException(429, "尝试次数过多，请 %d 分钟后再试" % (int((until - now) // 60) + 1))
-    pin = str((payload or {}).get("pin") or "").strip()
-    if not auth.verify_pin(pin, stored):
-        n = _record_fail(ip)
-        auth.audit("unlock", ip, ua, "简单密码错误（第 %d 次）" % n, ok=False)
-        msg = "简单密码不正确"
-        if max_fails and max_fails - n > 0:
-            msg += "，还可尝试 %d 次" % (max_fails - n)
-        raise HTTPException(401, msg)
-    auth.clear_fails(ip)
-    auth.audit("unlock", ip, ua, "已用简单密码解锁", ok=True)
-    return {"ok": True}
 
 
 # ------------------------------------------------------------------ 隐私锁定（服务端强制）
@@ -307,15 +275,22 @@ def _throttle(server: Dict[str, Any], ip: str, ua: str, what: str) -> None:
 
 @privacy_router.get("/state")
 def privacy_state() -> Dict[str, Any]:
-    """隐私锁定状态：前端刷新页面后据此决定是否继续显示遮挡层。"""
+    """隐私锁定状态：前端刷新页面后据此决定是否继续显示遮挡层。
+
+    unlock_mode 只有两种：pin（快速解锁码，已设置时）/ token（访问令牌，始终可用）。
+    """
     st = auth.privacy_state()
     privacy = _privacy_cfg()
+    has_pin = bool((privacy.get("pin_hash") or "").strip())
+    mode = str(privacy.get("lock_unlock") or "token")
+    if mode != "pin" or not has_pin:
+        mode = "token"
     return {
         "locked": bool(st.get("locked")),
         "since": st.get("since", 0),
         "reason": st.get("reason", ""),
-        "unlock_mode": privacy.get("lock_unlock", "token"),
-        "has_pin": bool((privacy.get("pin_hash") or "").strip()),
+        "unlock_mode": mode,
+        "has_pin": has_pin,
     }
 
 
@@ -335,43 +310,38 @@ def privacy_lock(payload: Dict[str, Any], request: Request) -> Dict[str, Any]:
 
 @privacy_router.post("/unlock")
 def privacy_unlock(payload: Dict[str, Any], request: Request) -> Dict[str, Any]:
-    """解锁：按 privacy.lock_unlock（click / pin / token）校验后解除服务端锁定。"""
+    """解锁遮挡层：凭据可以是**快速解锁码**，也可以直接用**访问令牌**。
+
+    访问令牌始终可兜底 —— 忘记解锁码时不必去改 config.json；反之只有解锁码
+    没有令牌也无所谓，两者任一即可。不再有「点击即解锁」模式。
+    """
+    from .config import current_access_token
     server = _server_cfg()
     privacy = _privacy_cfg()
-    mode = str(privacy.get("lock_unlock") or "token")
     ip = _client(request, server)
     ua = _ua(request)
     credential = str((payload or {}).get("credential") or "").strip()
+    stored = (privacy.get("pin_hash") or "").strip()
 
-    if mode in ("pin", "token"):
-        _throttle(server, ip, ua, "解锁尝试")
+    _throttle(server, ip, ua, "解锁尝试")
 
-    if mode == "pin":
-        stored = (privacy.get("pin_hash") or "").strip()
-        # 逃生通道：忘记简单密码时，可用「访问令牌」解锁。
-        #   令牌本身就是登录凭据（强度高于 4 位简单密码），用它兜底不会降低安全性；
-        #   而没有这条通道，用户忘密码后会连设置页都打不开（锁定期间中间件拒绝所有接口），
-        #   只能手动去改 data/config.json。解锁后可进设置重置简单密码。
-        expected = (server.get("access_token") or "").strip()
-        if expected and credential == expected:
-            auth.audit("unlock", ip, ua, "已用访问令牌兜底解锁（简单密码模式）", ok=True)
-        else:
-            if not stored:
-                raise HTTPException(400, "尚未设置简单密码")
-            if not auth.verify_pin(credential, stored):
-                n = _record_fail(ip)
-                auth.audit("unlock", ip, ua, "简单密码错误（第 %d 次）" % n, ok=False)
-                raise HTTPException(401, "简单密码不正确")
-    elif mode == "token":
-        expected = (server.get("access_token") or "").strip()
-        if not expected or credential != expected:
-            n = _record_fail(ip)
-            auth.audit("unlock", ip, ua, "访问令牌错误（第 %d 次）" % n, ok=False)
-            raise HTTPException(401, "访问令牌不正确")
+    expected = current_access_token()
+    if expected and credential == expected:
+        auth.audit("unlock", ip, ua, "已用访问令牌解锁", ok=True)
+    elif stored and auth.verify_pin(credential, stored):
+        auth.audit("unlock", ip, ua, "已用快速解锁码解锁", ok=True)
+    else:
+        n = _record_fail(ip)
+        auth.audit("unlock", ip, ua, "解锁凭据错误（第 %d 次）" % n, ok=False)
+        msg = "解锁码或访问令牌不正确"
+        max_fails = int(server.get("login_max_fails") or 0)
+        if max_fails and max_fails - n > 0:
+            msg += "，还可尝试 %d 次" % (max_fails - n)
+        raise HTTPException(401, msg)
 
     auth.clear_fails(ip)
     auth.privacy_unlock()
-    auth.audit("privacy-unlock", ip, ua, "已解锁（%s）" % mode)
+    auth.audit("privacy-unlock", ip, ua, "已解锁")
     return {"ok": True, "locked": False}
 
 
@@ -399,8 +369,19 @@ def totp_setup(request: Request) -> Dict[str, Any]:
         raise HTTPException(400, "两步验证已启用，请先关闭再重新绑定")
     secret = totp_mod.new_secret()
     auth.totp_stash(ip, secret)
-    account = "avm@%s" % (server.get("host") or "localhost")
-    return {"ok": True, "secret": secret, "uri": totp_mod.provisioning_uri(secret, account)}
+    # 账号名固定为 ASCII（不要塞 IP / 邮箱样式）：微软验证器对这类标签兼容性差
+    account = totp_mod.DEFAULT_ACCOUNT
+    return {
+        "ok": True,
+        "secret": secret,
+        "uri": totp_mod.provisioning_uri(secret, account),
+        # 前端显示服务器时间，便于和手机时间对比（时钟偏差是验证码对不上的头号原因）
+        "issuer": totp_mod.ISSUER,
+        "account": account,
+        "server_time": int(time.time()),
+        "period": totp_mod.STEP,
+        "digits": totp_mod.DIGITS,
+    }
 
 
 @router.get("/totp/qr")
@@ -419,8 +400,9 @@ def totp_qr(request: Request) -> Response:
     secret = auth.totp_peek(ip)
     if not secret:
         raise HTTPException(400, "绑定已过期，请重新生成二维码")
-    uri = totp_mod.provisioning_uri(secret, "avm@%s" % (server.get("host") or "localhost"))
-    img = qrcode.QRCode(box_size=6, border=2, error_correction=qrcode.constants.ERROR_CORRECT_M)
+    uri = totp_mod.provisioning_uri(secret, totp_mod.DEFAULT_ACCOUNT)
+    # box_size 8 而不是 6：手机上扫屏更容易对上焦（微软验证器的扫码框较小）
+    img = qrcode.QRCode(box_size=8, border=2, error_correction=qrcode.constants.ERROR_CORRECT_M)
     img.add_data(uri)
     img.make(fit=True)
     buf = io.BytesIO()
