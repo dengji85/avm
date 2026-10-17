@@ -17,13 +17,15 @@ import sys
 import hashlib
 import tempfile
 import uuid
+import secrets
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from datetime import datetime
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import quote, urljoin, urlsplit, urlunsplit
 
 from fastapi import APIRouter, Body, File, HTTPException, Query, Request, UploadFile
-from fastapi.responses import FileResponse, PlainTextResponse, Response, StreamingResponse
+from fastapi.responses import (FileResponse, PlainTextResponse, RedirectResponse, Response,
+                               StreamingResponse)
 
 from . import ai as ai_mod
 from . import dedupe, images, nfo as nfo_mod, plugins, providers, scanner, scraper, scrape_diag, store, subtitles
@@ -171,6 +173,18 @@ def _open_path(path: str, reveal: bool = False) -> Optional[int]:
         return subprocess.Popen(["xdg-open", path]).pid
 
 
+def _open_url(url: str) -> Optional[int]:
+    """用系统默认程序打开网络地址（.strm 的「系统播放器」入口）。"""
+    system = platform.system()
+    if system == "Windows":
+        os.startfile(url)  # type: ignore[attr-defined]
+        return None
+    elif system == "Darwin":
+        return subprocess.Popen(["open", url]).pid
+    else:
+        return subprocess.Popen(["xdg-open", url]).pid
+
+
 @router.post("/movies/{movie_id}/play")
 def play_movie(movie_id: int, payload: Dict[str, Any] = Body(default={})) -> Dict[str, Any]:
     reveal = bool(payload.get("reveal"))
@@ -187,6 +201,24 @@ def play_movie(movie_id: int, payload: Dict[str, Any] = Body(default={})) -> Dic
             target = next((f for f in usable if f["id"] == int(file_id)), target)
         if not os.path.exists(target["path"]):
             raise HTTPException(404, f"文件已不存在：{target['path']}")
+
+        # .strm：本地只有一个文本文件，用系统播放器打开它没有意义，直接打开网络地址
+        strm_url = (target.get("strm_url") or "").strip()
+        if strm_url:
+            try:
+                _open_url(strm_url)
+            except Exception as exc:
+                raise HTTPException(500, f"打开串流失败：{exc}")
+            if not reveal:
+                session_id = store.start_session(conn, movie_id, 0.0, "external")
+                conn.execute(
+                    "UPDATE movies SET play_count = play_count + 1, watched = 1, "
+                    "last_played = datetime('now','localtime') WHERE id = ?",
+                    (movie_id,),
+                )
+                return {"ok": True, "path": strm_url, "stream": True, "session_id": session_id}
+            return {"ok": True, "path": strm_url, "stream": True}
+
         try:
             pid = _open_path(target["path"], reveal)
         except Exception as exc:
@@ -743,6 +775,8 @@ def extract_cover(movie_id: int) -> Dict[str, Any]:
         mv = store.movie_detail(conn, movie_id)
         if not mv:
             raise HTTPException(404, "影片不存在")
+        if mv.get("files") and (mv["files"][0].get("strm_url") or ""):
+            raise HTTPException(400, "网络串流无法抽帧，请手动上传封面")
         name = store.extract_cover_from_video(conn, movie_id, ffmpeg)
     if not name:
         raise HTTPException(400, "抽帧失败：ffmpeg 不可用、视频无法读取或无有效帧")
@@ -1570,6 +1604,9 @@ def movie_previews(movie_id: int, generate: bool = False) -> Dict[str, Any]:
     current_q = (load_config().get("previews_quality") or "smart").strip() or "smart"
     regenerating = False
     target = mv["files"][0]["path"] if mv.get("files") else None
+    # 网络串流没有本地文件，抽帧只会得到 ffmpeg 报错
+    if mv.get("files") and (mv["files"][0].get("strm_url") or ""):
+        return {"available": False, "error": "网络串流不支持预览图", "paths": [], "urls": []}
     if generate:
         # 手动生成（详情页按钮）：强制按当前档位抽
         if not target or not os.path.exists(target):
@@ -1607,6 +1644,8 @@ def generate_previews_bg(movie_id: int, body: dict = Body(default={})) -> Dict[s
             raise HTTPException(404, "影片不存在")
         paths = store.get_previews(conn, movie_id)
         target = mv["files"][0]["path"] if mv.get("files") else None
+        if mv.get("files") and (mv["files"][0].get("strm_url") or ""):
+            return {"started": False, "message": "网络串流不支持预览图"}
         if not target or not os.path.exists(target):
             raise HTTPException(400, "找不到可播放的文件")
     if paths and not force:
@@ -1699,17 +1738,197 @@ def watch_analytics():
         return store.watch_analytics(conn)
 
 
+# ------------------------------------------------------------------ 网络串流（.strm）
+# .strm 文件里只有一行网络地址（mp4 / m3u8）。播放走三条路：
+#   1) 渐进式直链 → 302，让浏览器直连（省服务器带宽，最常用）
+#   2) 渐进式 + 防盗链 → 服务端代理，透传 Range，可配置 UA / Referer
+#   3) HLS → hls.js 需要同源且能读分片，走 /api/strm/hls + /api/strm/seg 改写代理
+# 分片地址用一次性 token 映射，避免接口变成「任意 URL 代理」（SSRF / 开放代理）。
+_STRM_SEG: Dict[str, tuple] = {}
+_STRM_LOCK = threading.Lock()
+_STRM_TTL = 600          # 分片 token 有效期（秒）
+_STRM_MAX = 5000         # token 上限，防止长片把内存撑大
+_STRM_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
+
+
+def _stream_cfg() -> Dict[str, Any]:
+    return load_config().get("stream") or {}
+
+
+def _is_hls(url: str) -> bool:
+    return urlsplit(url).path.lower().endswith(".m3u8")
+
+
+def _strm_source(movie_id: int) -> str:
+    with db() as conn:
+        src = store.movie_play_source(conn, movie_id)
+    return (src or {}).get("strm_url") or ""
+
+
+def _strm_headers(target: str) -> Dict[str, str]:
+    """串流请求头：默认用浏览器 UA + 同源 Referer，绕开常见的防盗链。"""
+    cfg = _stream_cfg()
+    parts = urlsplit(target)
+    return {
+        "User-Agent": str(cfg.get("strm_user_agent") or _STRM_UA),
+        "Accept": "*/*",
+        "Referer": str(cfg.get("strm_referer") or ("%s://%s/" % (parts.scheme, parts.netloc))),
+    }
+
+
+def _proxy_upstream(target: str, request: Request) -> Response:
+    """代理上游字节流：透传 Range，原样返回 200 / 206。"""
+    import requests
+    headers = _strm_headers(target)
+    rng = request.headers.get("range")
+    if rng:
+        headers["Range"] = rng
+    try:
+        up = requests.get(target, headers=headers, stream=True,
+                          timeout=(8, 30), allow_redirects=True)
+    except Exception as exc:
+        raise HTTPException(502, "串流源不可达：%s" % exc)
+    if up.status_code >= 400:
+        up.close()
+        raise HTTPException(502, "串流源返回 HTTP %d" % up.status_code)
+    resp_headers = {}
+    for key in ("Content-Length", "Content-Range", "Accept-Ranges", "ETag", "Last-Modified"):
+        val = up.headers.get(key)
+        if val:
+            resp_headers[key] = val
+    # 分片类型按扩展名归一：上游常给 octet-stream / text/plain，甚至
+    # video/vnd.dlna.mpeg-tts 这类变体，VHS 对非标准类型比较挑剔
+    media = up.headers.get("Content-Type") or ""
+    seg_types = {".ts": "video/mp2t", ".m4s": "video/iso.segment", ".vtt": "text/vtt",
+                 ".aac": "audio/aac", ".m4a": "audio/mp4", ".mp3": "audio/mpeg"}
+    ext = os.path.splitext(urlsplit(target).path)[1].lower()
+    if ext in seg_types:
+        media = seg_types[ext]
+    elif not media or media.lower().startswith(("application/octet-stream", "text/plain")):
+        media = "application/octet-stream"
+
+    def body():
+        try:
+            for chunk in up.iter_content(64 * 1024):
+                if chunk:
+                    yield chunk
+        finally:
+            up.close()
+
+    return StreamingResponse(body(), status_code=up.status_code,
+                             media_type=media, headers=resp_headers)
+
+
+def _seg_token(movie_id: int, url: str) -> str:
+    token = secrets.token_urlsafe(12)
+    now = time.time()
+    with _STRM_LOCK:
+        if len(_STRM_SEG) >= _STRM_MAX:
+            for k in [k for k, v in _STRM_SEG.items() if v[2] < now][: _STRM_MAX // 4]:
+                _STRM_SEG.pop(k, None)
+        _STRM_SEG[token] = (movie_id, url, now + _STRM_TTL)
+    return token
+
+
+def _seg_path(movie_id: int, url: str) -> str:
+    """分片代理地址：保留原文件名后缀（.ts / .m4s / .m3u8）。
+
+    后缀很重要：Safari 原生 HLS 与 ffprobe 都按扩展名判断分片类型，
+    去掉后缀会得到 "not in allowed_segment_extensions"。
+    """
+    name = os.path.basename(urlsplit(url).path) or "seg.ts"
+    return "/api/strm/seg/%d/%s?t=%s" % (
+        movie_id, quote(name, safe=""), _seg_token(movie_id, url))
+
+
+def _rewrite_playlist(text: str, base: str, movie_id: int) -> str:
+    """把 m3u8 里的分片 / 密钥 / 子播放列表地址换成本地代理地址。"""
+    import re as _re
+    out = []
+    for line in text.splitlines():
+        s = line.strip()
+        if not s:
+            out.append("")
+        elif s.startswith("#"):
+            # data: 内联密钥 / 内联 init 段不需要代理，原样保留
+            out.append(_re.sub(
+                r'URI="(?!data:)([^"]+)"',
+                lambda m: 'URI="%s"' % _seg_path(movie_id, urljoin(base, m.group(1))),
+                s))
+        else:
+            out.append(_seg_path(movie_id, urljoin(base, s)))
+    return "\n".join(out)
+
+
+def _serve_playlist(target: str, movie_id: int) -> Response:
+    import requests
+    try:
+        r = requests.get(target, headers=_strm_headers(target), timeout=(8, 20))
+    except Exception as exc:
+        raise HTTPException(502, "播放列表获取失败：%s" % exc)
+    if r.status_code >= 400:
+        raise HTTPException(502, "播放列表返回 HTTP %d" % r.status_code)
+    body = _rewrite_playlist(r.text, r.url or target, movie_id)
+    return Response(body, media_type="application/vnd.apple.mpegurl",
+                    headers={"Cache-Control": "no-store"})
+
+
+@router.get("/movies/{movie_id}/stream-info")
+def stream_info(movie_id: int) -> Dict[str, Any]:
+    """轻量判断：这部片是不是网络串流、要不要按 HLS 处理（不做 ffprobe）。"""
+    with db() as conn:
+        src = store.movie_play_source(conn, movie_id)
+    if not src:
+        raise HTTPException(404, "影片不存在或未入库")
+    target = src["strm_url"]
+    return {"stream": bool(target), "hls": bool(target and _is_hls(target))}
+
+
+@router.get("/strm/hls/{movie_id}")
+def strm_hls(movie_id: int):
+    """HLS 播放列表（已改写成同源分片地址，供 hls.js 使用）。"""
+    target = _strm_source(movie_id)
+    if not target or not _is_hls(target):
+        raise HTTPException(404, "该影片不是 HLS 串流")
+    return _serve_playlist(target, movie_id)
+
+
+@router.get("/strm/seg/{movie_id}/{name}")
+def strm_seg(movie_id: int, name: str, t: str, request: Request):
+    """转发放行过的分片（token 由服务端生成，避免任意 URL 代理）。"""
+    with _STRM_LOCK:
+        item = _STRM_SEG.get(t)
+    if not item or item[0] != movie_id or item[2] < time.time():
+        raise HTTPException(404, "分片地址已失效，请重新播放")
+    url = item[1]
+    if _is_hls(url):
+        return _serve_playlist(url, movie_id)
+    return _proxy_upstream(url, request)
+
+
 @router.get("/stream/{movie_id}")
 def stream_movie(movie_id: int, request: Request):
     """流式播放主视频文件（支持 Range 断点续传）。
 
-    若该片已被「播放兼容层」重封装（MKV 容器 / AC3·DTS 音轨等浏览器不兼容的情况），
-    优先返回重封装产物，从而在网页内直接播放。
+    * 普通文件：直接返回（必要时用「播放兼容层」重封装后的 MP4）；
+    * ``.strm``：302 直连目标地址；``stream.strm_proxy`` / ``?proxy=1`` 时改走代理；
+      HLS 由前端改用 ``/api/strm/hls/{id}``。
     """
     with db() as conn:
-        path = store.movie_primary_file(conn, movie_id)
-    if not path or not os.path.exists(path):
+        src = store.movie_play_source(conn, movie_id)
+    if not src or not os.path.exists(src["path"]):
         raise HTTPException(status_code=404, detail="视频文件不存在或未入库")
+
+    target = src["strm_url"]
+    if target:
+        if _is_hls(target):
+            raise HTTPException(status_code=409, detail="HLS 串流请改用 /api/strm/hls/%d" % movie_id)
+        if bool(_stream_cfg().get("strm_proxy")) or str(request.query_params.get("proxy") or "") in ("1", "true"):
+            return _proxy_upstream(target, request)
+        return RedirectResponse(target, status_code=302)
+
+    path = src["path"]
     from . import remux as remux_mod
     if remux_mod.is_ready(movie_id, path):
         path = str(remux_mod.remuxed_path(movie_id))
@@ -1729,12 +1948,29 @@ def playback_info(movie_id: int) -> Dict[str, Any]:
     """
     cfg = load_config(refresh=True)
     with db() as conn:
-        path = store.movie_primary_file(conn, movie_id)
-    if not path or not os.path.exists(path):
+        src = store.movie_play_source(conn, movie_id)
+    if not src or not os.path.exists(src["path"]):
         raise HTTPException(404, "视频文件不存在或未入库")
+    # 网络串流：没有本地文件可分析，也不能重封装，直接告诉前端走直连 / HLS
+    if src["strm_url"]:
+        return {
+            "stream": True,
+            "hls": _is_hls(src["strm_url"]),
+            "strm": True,
+            "auto_remux": False,
+            "prepared": False,
+            "status": "ready",
+            "percent": 100,
+            "message": "网络串流",
+            "formats": [], "ext": "strm", "vcodec": "", "acodec": "", "duration": 0,
+        }
+    path = src["path"]
     from . import remux as remux_mod
     st = remux_mod.status(movie_id)
     return {
+        "stream": False,
+        "hls": False,
+        "strm": False,
         "auto_remux": bool((cfg.get("stream") or {}).get("auto_remux", True)),
         "prepared": remux_mod.is_ready(movie_id, path),
         "status": st.get("status"),
@@ -1751,9 +1987,12 @@ def prepare_stream(movie_id: int) -> Dict[str, Any]:
     if not bool((cfg.get("stream") or {}).get("auto_remux", True)):
         raise HTTPException(400, "播放兼容层未启用")
     with db() as conn:
-        path = store.movie_primary_file(conn, movie_id)
-    if not path or not os.path.exists(path):
+        src = store.movie_play_source(conn, movie_id)
+    if not src or not os.path.exists(src["path"]):
         raise HTTPException(404, "视频文件不存在或未入库")
+    if src["strm_url"]:
+        raise HTTPException(400, "网络串流无需重封装")
+    path = src["path"]
     from . import remux as remux_mod
     if remux_mod.is_ready(movie_id, path):
         return {"ok": True, "status": "done", "percent": 100, "message": "已就绪"}

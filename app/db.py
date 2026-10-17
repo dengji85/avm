@@ -250,6 +250,9 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE movie_files ADD COLUMN quick_hash INTEGER DEFAULT 0")
     if "missing_since" not in file_cols:
         conn.execute("ALTER TABLE movie_files ADD COLUMN missing_since TEXT DEFAULT ''")
+    if "strm_url" not in file_cols:
+        # .strm（网络串流）文件里那一行目标地址；普通文件为空
+        conn.execute("ALTER TABLE movie_files ADD COLUMN strm_url TEXT DEFAULT ''")
     # 依赖新列的索引统一在迁移阶段补齐（此时列已存在），避免旧库 executescript 时报错
     conn.execute("CREATE INDEX IF NOT EXISTS idx_files_hash ON movie_files(quick_hash)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_movies_res ON movies(resolution)")

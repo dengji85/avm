@@ -461,6 +461,7 @@ export default {
     fRuntime: '时长',
     fResolution: '分辨率',
     fSize: '体积',
+    fSource: '串流来源',
     fAdded: '入库',
     minute: '分钟',
     filesCount: '{n} 个文件',

@@ -452,6 +452,7 @@ export default {
     fRuntime: 'Runtime',
     fResolution: 'Resolution',
     fSize: 'Size',
+    fSource: 'Stream source',
     fAdded: 'Added',
     minute: 'min',
     filesCount: '{n} files',

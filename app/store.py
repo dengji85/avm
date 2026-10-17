@@ -166,8 +166,12 @@ def _find_moved_file(conn: sqlite3.Connection, movie_id: int, parsed: Dict[str, 
 
 
 def upsert_scanned_file(conn: sqlite3.Connection, parsed: Dict[str, Any],
-                        path: str, size: int, mtime: float, quick_hash: int = 0) -> str:
-    """把一个扫描到的视频文件写入库，返回 'added' / 'updated' / 'unchanged'。"""
+                        path: str, size: int, mtime: float, quick_hash: int = 0,
+                        strm_url: str = "") -> str:
+    """把一个扫描到的视频文件写入库，返回 'added' / 'updated' / 'unchanged'。
+
+    ``strm_url`` 仅对 ``.strm`` 有值：文件里那一行网络地址，播放时据此直连 / 代理。
+    """
     movie = query_one(conn, "SELECT * FROM movies WHERE key = ?", (parsed["key"],))
     if movie is None:
         cur = conn.execute(
@@ -206,26 +210,29 @@ def upsert_scanned_file(conn: sqlite3.Connection, parsed: Dict[str, Any],
         if moved:
             conn.execute(
                 """UPDATE movie_files SET path = ?, filename = ?, ext = ?, part = ?,
-                       size = ?, mtime = ?, missing = 0, missing_since = '', quick_hash = ?
+                       size = ?, mtime = ?, missing = 0, missing_since = '', quick_hash = ?,
+                       strm_url = ?
                    WHERE id = ?""",
                 (path, parsed["filename"], parsed["ext"], parsed["part"],
-                 size, mtime, quick_hash, moved["id"]),
+                 size, mtime, quick_hash, strm_url, moved["id"]),
             )
             result = "updated"
         else:
             conn.execute(
-                """INSERT INTO movie_files(movie_id, path, filename, ext, size, mtime, part, missing, quick_hash)
-                   VALUES(?,?,?,?,?,?,?,0,?)""",
+                """INSERT INTO movie_files(movie_id, path, filename, ext, size, mtime, part,
+                                           missing, quick_hash, strm_url)
+                   VALUES(?,?,?,?,?,?,?,0,?,?)""",
                 (movie_id, path, parsed["filename"], parsed["ext"], size, mtime,
-                 parsed["part"], quick_hash),
+                 parsed["part"], quick_hash, strm_url),
             )
             result = "added"
     elif abs(float(existing["size"] or 0) - size) > 0.5 or abs(float(existing["mtime"] or 0) - mtime) > 1 \
-            or existing["missing"] or int(existing.get("quick_hash") or 0) != quick_hash:
+            or existing["missing"] or int(existing.get("quick_hash") or 0) != quick_hash \
+            or (existing.get("strm_url") or "") != (strm_url or ""):
         conn.execute(
             "UPDATE movie_files SET size = ?, mtime = ?, missing = 0, missing_since = '', "
-            "movie_id = ?, quick_hash = ? WHERE id = ?",
-            (size, mtime, movie_id, quick_hash, existing["id"]),
+            "movie_id = ?, quick_hash = ?, strm_url = ? WHERE id = ?",
+            (size, mtime, movie_id, quick_hash, strm_url, existing["id"]),
         )
         result = "updated"
     else:
@@ -554,14 +561,24 @@ def movie_sessions(conn: sqlite3.Connection, movie_id: int, limit: int = 60) -> 
     return rows
 
 
-def movie_primary_file(conn: sqlite3.Connection, movie_id: int):
-    # 只挑仍然存在的文件：缺 missing 过滤时，移动/改名后残留的旧记录会排在前面，
-    # 导致流式播放 404「视频文件不存在」。
+def movie_play_source(conn: sqlite3.Connection, movie_id: int):
+    """播放源：主文件路径 + （.strm 才有）目标网络地址。
+
+    只挑仍然存在的文件：缺 missing 过滤时，移动/改名后残留的旧记录会排在前面，
+    导致流式播放 404「视频文件不存在」。
+    """
     row = query_one(conn,
-        "SELECT path FROM movie_files WHERE movie_id=? AND missing=0 "
-        "ORDER BY part ASC, size DESC LIMIT 1",
-        (int(movie_id),))
-    return row['path'] if row else None
+                    "SELECT path, strm_url FROM movie_files WHERE movie_id=? AND missing=0 "
+                    "ORDER BY part ASC, size DESC LIMIT 1",
+                    (int(movie_id),))
+    if not row:
+        return None
+    return {"path": row["path"], "strm_url": (row["strm_url"] or "").strip()}
+
+
+def movie_primary_file(conn: sqlite3.Connection, movie_id: int):
+    src = movie_play_source(conn, movie_id)
+    return src["path"] if src else None
 
 
 def watch_analytics(conn: sqlite3.Connection) -> Dict[str, Any]:
@@ -1020,7 +1037,7 @@ def movie_detail(conn: sqlite3.Connection, movie_id: int) -> Optional[Dict[str, 
     row["tags"] = get_relations(conn, movie_id, "tag")
     row["files"] = query_all(
         conn,
-        "SELECT id, path, filename, ext, size, mtime, part, missing FROM movie_files "
+        "SELECT id, path, filename, ext, size, mtime, part, missing, strm_url FROM movie_files "
         "WHERE movie_id = ? ORDER BY missing ASC, part, filename",
         (movie_id,),
     )

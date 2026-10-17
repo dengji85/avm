@@ -119,6 +119,11 @@ const progressPct = computed(() => {
 })
 
 const mainFile = computed(() => (mv.value?.files || [])[0] || null)
+
+/** 网络串流只展示域名，避免把带签名的完整地址摊在界面上 */
+function hostOf(url) {
+  try { return new URL(url).host } catch (e) { return url }
+}
 const totalSize = computed(() => (mv.value?.files || []).reduce((s, f) => s + (Number(f.size) || 0), 0))
 const quality = computed(() => qualityTag(mv.value?.resolution))
 
@@ -723,6 +728,10 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', onKey) })
                   <template v-if="mv.runtime"><dt>{{ $t('detail.fRuntime') }}</dt><dd>{{ mv.runtime }} {{ $t('detail.minute') }}</dd></template>
                   <template v-if="mv.resolution"><dt>{{ $t('detail.fResolution') }}</dt><dd>{{ mv.resolution }}</dd></template>
                   <dt>{{ $t('detail.fSize') }}</dt><dd>{{ fmtSize(totalSize) }}<span v-if="mv.files && mv.files.length > 1" class="dim"> · {{ $t('detail.filesCount', { n: mv.files.length }) }}</span></dd>
+                  <template v-if="mainFile && mainFile.strm_url">
+                    <dt>{{ $t('detail.fSource') }}</dt>
+                    <dd class="mono dim">🌐 {{ hostOf(mainFile.strm_url) }}</dd>
+                  </template>
                   <template v-if="mv.added_at"><dt>{{ $t('detail.fAdded') }}</dt><dd>{{ fmtAgo(mv.added_at) }}</dd></template>
                 </dl>
 

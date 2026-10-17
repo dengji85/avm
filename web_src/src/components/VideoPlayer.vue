@@ -2,7 +2,7 @@
 import { ref, onMounted, onBeforeUnmount, watch, nextTick } from 'vue'
 import videojs from 'video.js'
 import 'video.js/dist/video-js.css'
-import { streamUrl, setProgress, playMovie, markPlayed, startSession, updateSession, endSession, getPreviews, genPreviews, playbackInfo, prepareStream, prepareStreamStatus } from '../api.js'
+import { streamUrl, strmHlsUrl, streamInfo, setProgress, playMovie, markPlayed, startSession, updateSession, endSession, getPreviews, genPreviews, playbackInfo, prepareStream, prepareStreamStatus } from '../api.js'
 import { toast, fmtClock } from '../utils.js'
 import { t } from '../i18n/index.js'
 
@@ -40,6 +40,29 @@ let tipTimeEl = null      // 预览时间标签
 let previewUrls = []      // 预览图 URL 数组（与后端等距抽帧顺序一致）
 let hoverBound = false    // 是否已绑定进度条 hover 事件
 
+// 网络串流（.strm）：'' = 普通文件；'strm' = 直连地址；'hls' = m3u8（走同源代理播放列表）
+const streamMode = ref('')
+let proxyTried = false
+let sourceReady = false
+
+/** 播放前问一次后端：这部片是不是网络串流、要不要按 HLS 处理（轻量接口，无 ffprobe） */
+async function resolveSource() {
+  streamMode.value = ''
+  proxyTried = false
+  try {
+    const info = await streamInfo(props.movieId)
+    if (info && info.stream) streamMode.value = info.hls ? 'hls' : 'strm'
+  } catch (e) { /* 忽略：按普通文件处理 */ }
+  sourceReady = true
+}
+
+function currentSource() {
+  if (streamMode.value === 'hls') {
+    return { src: strmHlsUrl(props.movieId), type: 'application/x-mpegURL' }
+  }
+  return { src: streamUrl(props.movieId), type: 'video/mp4' }
+}
+
 // 仅当访问地址为 localhost/127.0.0.1 时才提供"系统播放器"（远程设备点了也无效）
 const isRemote = !['localhost', '127.0.0.1'].includes(location.hostname)
 // 触摸设备检测（移动端/平板）：播放器交互策略与桌面不同
@@ -52,7 +75,8 @@ function onLoaded() {
   // 在元数据就绪后显式设置初始音量（video.js 的 volume 选项在 autoplay 下常被忽略，
   // 这里强制设为较小音量，避免一打开声音过大）
   if (player) { player.muted(false); player.volume(0.3) }
-  dur.value = v.duration || 0
+  // 直播流（HLS）duration 为 Infinity：不要写进 dur，否则进度条会算错
+  dur.value = Number.isFinite(v.duration) ? v.duration : 0
   // 重封装后重新加载：只恢复播放进度，不重复计数、不重复开会话
   if (reloading) {
     reloading = false
@@ -85,13 +109,14 @@ function onTime() {
   }
   lastTick = now
   cur.value = now
-  dur.value = v.duration || dur.value
+  if (Number.isFinite(v.duration)) dur.value = v.duration
 }
 
 /** 每 10 秒回写一次进度与观看时长 */
 async function saveProgress(force = false) {
   const v = videoEl
-  if (!v || !v.duration) return
+  // 直播流时长为 Infinity：没有"进度"可存，跳过（否则后端会存进一个巨大数）
+  if (!v || !Number.isFinite(v.duration) || v.duration <= 0) return
   const pos = v.currentTime
   if (!force && Math.abs(pos - lastSaved) < 10) return
   lastSaved = pos
@@ -127,6 +152,16 @@ async function onError() {
   // 解锁后会恢复播放（见 PrivacyLock 的 resumePlayback），避免误触发降级。
   if (window.__avmLocked) return
   failed.value = true
+  // 网络串流：直连被防盗链 / CORS 拦时，自动改用服务端代理重试一次
+  if (streamMode.value === 'strm' && !proxyTried) {
+    proxyTried = true
+    failed.value = false
+    if (player) {
+      player.src({ src: streamUrl(props.movieId) + '?proxy=1', type: 'video/mp4' })
+      player.play().catch(() => {})
+    }
+    return
+  }
   if (remuxTried) { fallbackExternal(); return }
   try {
     const info = await playbackInfo(props.movieId)
@@ -174,12 +209,14 @@ async function pollPrepare() {
 /** 重封装完成后，把播放器源切到已就绪的流，并恢复播放位置 */
 function reloadSource() {
   nextTick(() => {
-    if (!player) return
+    // 网络串流没有本地重封装产物，重载没有意义
+    if (!player || streamMode.value) return
     const v = videoEl
     const pos = v && v.currentTime > 1 ? v.currentTime : (props.startAt || 0)
     reloading = true
     player.trigger('resize')
     player.src({ src: streamUrl(props.movieId) + '?r=' + Date.now(), type: 'video/mp4' })
+
     player.one('loadedmetadata', () => {
       const el = videoEl
       if (el && pos > 0 && pos < (el.duration || 0) - 5) el.currentTime = pos
@@ -493,10 +530,7 @@ function initPlayer() {
       // 自带 click→play 行为，会与我们的单击 pause 竞争，导致"暂停不到一秒又播放"。
       bigPlayButton: false,
       playbackRates: [0.5, 1, 1.25, 1.5, 2],
-      sources: [{
-        src: streamUrl(props.movieId),
-        type: 'video/mp4',
-      }],
+      sources: [currentSource()],
       controlBar: {
         pictureInPictureToggle: true,
       },
@@ -659,7 +693,7 @@ function onPauseRequest() {
 
 onMounted(() => {
   window.addEventListener('avm-pause-player', onPauseRequest)
-  nextTick(initPlayer)
+  nextTick(async () => { await resolveSource(); initPlayer() })
 })
 
 onBeforeUnmount(() => {
@@ -682,7 +716,8 @@ watch(() => props.movieId, () => {
   lastSaved = 0
   sessionId = null
   watchedSec = 0
-  nextTick(initPlayer)
+  sourceReady = false
+  nextTick(async () => { await resolveSource(); initPlayer() })
 })
 </script>
 

@@ -63,6 +63,30 @@ def _compute_quick_hash(path, size, sample=262144):
         return 0
 
 
+STRM_MAX_BYTES = 8192
+
+
+def read_strm_target(path: str) -> str:
+    """读取 ``.strm`` 里的目标地址（约定是一行 http/https 链接，可指向 mp4 / m3u8）。
+
+    返回空串表示这个 .strm 不可用（空文件 / 不是网络地址），扫描时直接跳过，
+    避免往库里塞一条永远放不出来的记录。只读前 8KB，防止误把大文件当 strm 读。
+    """
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            for _ in range(20):
+                line = f.readline(STRM_MAX_BYTES)
+                if not line:
+                    break
+                s = line.strip().lstrip("\ufeff")
+                if not s or s.startswith("#"):
+                    continue
+                return s if s.lower().startswith(("http://", "https://")) else ""
+    except OSError:
+        return ""
+    return ""
+
+
 def quick_scan(progress_cb=None):
     cfg = load_config()
     exts = {e.lower().lstrip(".") for e in video_exts(cfg)}
@@ -106,7 +130,8 @@ def run_scan(progress_cb=None, incremental=True, workers=None, hash_files=False,
         existing = {
             row["path"]: row
             for row in conn.execute(
-                "SELECT id, movie_id, path, size, mtime, missing, quick_hash FROM movie_files"
+                "SELECT id, movie_id, path, size, mtime, missing, quick_hash, strm_url "
+                "FROM movie_files"
             )
         }
     finally:
@@ -121,11 +146,18 @@ def run_scan(progress_cb=None, incremental=True, workers=None, hash_files=False,
         except OSError:
             continue
         size, mtime = st.st_size, st.st_mtime
-        if size < min_bytes:
+        is_strm = path.lower().endswith(".strm")
+        # .strm 本身只有一行 URL、体积几十字节，不能按「最小体积」过滤掉
+        if is_strm:
+            if not read_strm_target(path):
+                continue
+        elif size < min_bytes:
             continue
         enumerated += 1
         rec = existing.get(path)
-        if incremental and rec and not rec["missing"] \
+        # 旧的 .strm 记录还没解析出地址时，即使 size/mtime 没变也要走一遍
+        stale_strm = bool(is_strm and rec and not (rec["strm_url"] or ""))
+        if incremental and rec and not rec["missing"] and not stale_strm \
                 and abs(float(rec["size"] or 0) - size) < 0.5 \
                 and abs(float(rec["mtime"] or 0) - mtime) < 1:
             alive.add(path)
@@ -170,7 +202,9 @@ def run_scan(progress_cb=None, incremental=True, workers=None, hash_files=False,
         path, size, mtime = item
         parsed = parse_file(path)
         qh = _compute_quick_hash(path, size, sample) if hash_files else 0
-        return {"parsed": parsed, "path": path, "size": size, "mtime": mtime, "qh": qh}
+        strm = read_strm_target(path) if path.lower().endswith(".strm") else ""
+        return {"parsed": parsed, "path": path, "size": size, "mtime": mtime,
+                "qh": qh, "strm": strm}
 
     parsed_items = []
     with ThreadPoolExecutor(max_workers=workers) as ex:
@@ -187,7 +221,8 @@ def run_scan(progress_cb=None, incremental=True, workers=None, hash_files=False,
     try:
         for r in parsed_items:
             try:
-                act = store_upsert(conn, r["parsed"], r["path"], r["size"], r["mtime"], r["qh"])
+                act = store_upsert(conn, r["parsed"], r["path"], r["size"], r["mtime"], r["qh"],
+                                   strm_url=r.get("strm") or "")
                 conn.commit()
                 if act == "added":
                     added += 1
@@ -258,10 +293,11 @@ def auto_cleanup_after_scan(alive_paths: set, roots: list, progress_cb=None):
     return cleaned
 
 
-def store_upsert(conn, parsed, path, size, mtime, qh):
+def store_upsert(conn, parsed, path, size, mtime, qh, strm_url=""):
     # 延迟导入，避免循环依赖
     from . import store
-    return store.upsert_scanned_file(conn, parsed, path, size, mtime, quick_hash=qh)
+    return store.upsert_scanned_file(conn, parsed, path, size, mtime,
+                                     quick_hash=qh, strm_url=strm_url)
 
 
 def batch_local_covers(progress_cb=None):

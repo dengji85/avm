@@ -444,6 +444,7 @@ export default {
     fRuntime: '時長',
     fResolution: '解析度',
     fSize: '體積',
+    fSource: '串流來源',
     fAdded: '入庫',
     minute: '分鐘',
     filesCount: '{n} 個檔案',

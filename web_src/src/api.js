@@ -100,9 +100,13 @@ export const coverUrl = (id) => `${API}/cover/${id}`
 export const coverThumbUrl = (id, w = 360) => `${API}/cover/${id}?w=${w}`
 export const previewUrl = (movieId, fname) => `${API}/covers/preview/${movieId}/${encodeURIComponent(fname)}`
 export const streamUrl = (id) => `${API}/stream/${id}`
+/* .strm 的 HLS 播放列表（服务端已把分片改写成同源地址，供 video.js / VHS 直接播） */
+export const strmHlsUrl = (id) => `${API}/strm/hls/${id}`
 
 /* ---------------- 播放兼容：浏览器不认的容器/音轨 → 重封装为 MP4 后再播 ---------------- */
 export const playbackInfo = (id) => get(`/movies/${id}/playback-info`)
+/* 轻量判断：是否网络串流 / 是否 HLS（不做 ffprobe，播放前调用不拖慢） */
+export const streamInfo = (id) => get(`/movies/${id}/stream-info`)
 export const prepareStream = (id) => post(`/movies/${id}/prepare-stream`, {})
 export const prepareStreamStatus = (id) => get(`/movies/${id}/prepare-stream/status`)
 export const streamCacheStats = () => get('/stream-cache')

@@ -444,6 +444,7 @@ export default {
     fRuntime: '時間',
     fResolution: '解像度',
     fSize: 'サイズ',
+    fSource: 'ストリーム元',
     fAdded: '登録',
     minute: '分',
     filesCount: '{n} ファイル',

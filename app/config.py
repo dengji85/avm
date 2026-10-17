@@ -133,6 +133,12 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "auto_remux": True,
         # 重封装缓存目录（data/remux）大小上限 MB；超出后按最久未访问清理，0=不限制
         "remux_cache_mb": 4096,
+        # 网络串流（.strm）：默认让浏览器直连目标地址（省服务器带宽）；
+        # 源站有防盗链 / 不允许跨域时打开代理，视频字节全部经本服务中转。
+        "strm_proxy": False,
+        # 代理 / 拉播放列表时附加的 Referer 与 UA；留空 = 目标站自身 origin + 浏览器 UA
+        "strm_referer": "",
+        "strm_user_agent": "",
     },
     "scraper": {
         "enabled": True,
