@@ -11,6 +11,10 @@
   <img src="https://img.shields.io/badge/frontend-Vue%203%20%2F%20Vite-42b883.svg"/>
   <img src="https://img.shields.io/badge/database-SQLite-003b57.svg"/>
   <img src="https://img.shields.io/badge/license-MIT-blue.svg"/>
+  <img src="https://img.shields.io/github/stars/dengji85/avm?style=flat&amp;color=1f6feb"/>
+  <img src="https://img.shields.io/github/forks/dengji85/avm?style=flat"/>
+  <img src="https://img.shields.io/github/downloads/dengji85/avm/total?style=flat&amp;color=2ea043"/>
+  <img src="https://img.shields.io/github/last-commit/dengji85/avm?style=flat"/>
 </p>
 
 <p align="center">
@@ -235,6 +239,17 @@ python build.py                # 生成 dist/片匣/片匣.exe
 | 前端 | Vue 3 · Vite · 原生 CSS 變數主題 |
 | 抓取 | Chrome DevTools Protocol（headless Chrome）· 多源適配器 |
 | 打包 | PyInstaller · npm run build |
+
+## 📈 專案數據
+
+<p align="center">
+  <a href="https://star-history.com/#dengji85/avm&amp;Date">
+    <img src="https://api.star-history.com/svg?repos=dengji85/avm&amp;type=Date" alt="Star History" width="640"/>
+  </a>
+</p>
+
+- **Star 成長曲線**：由 [star-history.com](https://star-history.com) 依據 GitHub 公開 API 繪製
+- **安裝包下載量**：GitHub Releases 的累計下載次數（上方 Downloads 徽章）
 
 ## 📄 授權
 

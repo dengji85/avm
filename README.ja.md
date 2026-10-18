@@ -11,6 +11,10 @@
   <img src="https://img.shields.io/badge/frontend-Vue%203%20%2F%20Vite-42b883.svg"/>
   <img src="https://img.shields.io/badge/database-SQLite-003b57.svg"/>
   <img src="https://img.shields.io/badge/license-MIT-blue.svg"/>
+  <img src="https://img.shields.io/github/stars/dengji85/avm?style=flat&amp;color=1f6feb"/>
+  <img src="https://img.shields.io/github/forks/dengji85/avm?style=flat"/>
+  <img src="https://img.shields.io/github/downloads/dengji85/avm/total?style=flat&amp;color=2ea043"/>
+  <img src="https://img.shields.io/github/last-commit/dengji85/avm?style=flat"/>
 </p>
 
 <p align="center">
@@ -235,6 +239,17 @@ python build.py                # dist/片匣/片匣.exe を生成
 | フロントエンド | Vue 3 · Vite · ネイティブ CSS 変数テーマ |
 | スクレイピング | Chrome DevTools Protocol（headless Chrome）· 複数ソースアダプタ |
 | パッケージ | PyInstaller · npm run build |
+
+## 📈 プロジェクト統計
+
+<p align="center">
+  <a href="https://star-history.com/#dengji85/avm&amp;Date">
+    <img src="https://api.star-history.com/svg?repos=dengji85/avm&amp;type=Date" alt="Star History" width="640"/>
+  </a>
+</p>
+
+- **Star の推移** — [star-history.com](https://star-history.com) が GitHub の公開 API から描画
+- **インストール数** — GitHub Releases の累計ダウンロード数（上の Downloads バッジ）
 
 ## 📄 ライセンス
 
