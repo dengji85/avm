@@ -35,7 +35,26 @@ const canExternal = computed(() => state.capabilities?.external_player !== false
 const canReveal = computed(() => state.capabilities?.reveal_folder !== false)
 const editing = ref(false)
 const draft = ref({})
-const lightbox = ref('')
+/* 放大查看：支持整组预览图左右翻页（← → / 按钮 / 底部缩略图） */
+const lightboxList = ref([])
+const lightboxIndex = ref(0)
+const lightboxSrc = computed(() => lightboxList.value[lightboxIndex.value] || '')
+const lightboxNav = computed(() => lightboxList.value.length > 1)
+function openLightbox(urls, index = 0) {
+  const list = (urls || []).filter(Boolean)
+  if (!list.length) return
+  lightboxList.value = list
+  lightboxIndex.value = Math.min(Math.max(index, 0), list.length - 1)
+}
+function closeLightbox() {
+  lightboxList.value = []
+  lightboxIndex.value = 0
+}
+function stepLightbox(delta) {
+  const n = lightboxList.value.length
+  if (n < 2) return
+  lightboxIndex.value = (lightboxIndex.value + delta + n) % n
+}
 const aiReady = ref(false)
 const aiBusy = ref(false)
 
@@ -159,7 +178,7 @@ async function load() {
 function close() {
   state.currentId = null
   playing.value = false
-  lightbox.value = ''
+  closeLightbox()
 }
 
 /* ---------- 操作 ---------- */
@@ -577,7 +596,14 @@ function onKey(e) {
   if (e.key === 'Escape') {
     if (actressModal.value) { actressModal.value = ''; return }
     if (sitesMoreOpen.value) { sitesMoreOpen.value = false; return }
-    lightbox.value ? (lightbox.value = '') : close()
+    if (lightboxSrc.value) { closeLightbox(); return }
+    close()
+    return
+  }
+  // 放大查看时用方向键翻页（只在图层打开时生效，避免干扰播放器快捷键）
+  if (lightboxSrc.value && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
+    e.preventDefault()
+    stepLightbox(e.key === 'ArrowLeft' ? -1 : 1)
   }
 }
 onMounted(() => { window.addEventListener('keydown', onKey) })
@@ -614,7 +640,7 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', onKey) })
             <!-- 主区 -->
             <div class="dd-top">
               <div class="dd-cover">
-                <img :src="coverSrc" alt="" @error="coverFallback" @click="lightbox = coverSrc" />
+                <img :src="coverSrc" alt="" @error="coverFallback" @click="openLightbox([coverSrc], 0)" />
                 <div v-if="progressPct > 0" class="cw-bar"><i :style="{ width: progressPct + '%' }"></i></div>
                 <span v-if="isVideoCover" class="cover-src-badge" :title="$t('detail.videoCoverTip')">{{ $t('detail.videoCover') }}</span>
                 <div class="cov-acts">
@@ -863,7 +889,7 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', onKey) })
                   <span class="muted">{{ $t('detail.needFfmpeg') }}</span>
                 </div>
                 <div v-if="previews.length" class="pv-grid">
-                  <img v-for="(u, i) in previews" :key="i" :src="u" alt="" @click="lightbox = u" />
+                  <img v-for="(u, i) in previews" :key="i" :src="u" alt="" @click="openLightbox(previews, i)" />
                 </div>
                 <div v-else-if="!pvLoading" class="empty"><div class="icon">▤</div><div class="desc">{{ $t('detail.noPreview') }}</div></div>
               </template>
@@ -914,8 +940,21 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', onKey) })
     </aside>
 
     <!-- 灯箱 -->
-    <div v-if="lightbox" class="lightbox" @click="lightbox = ''">
-      <img :src="lightbox" alt="" />
+    <div v-if="lightboxSrc" class="lightbox" @click.self="closeLightbox">
+      <div class="lb-box">
+        <div class="lb-main">
+          <button v-if="lightboxNav" class="lb-nav" :title="$t('detail.prevImage')"
+                  :aria-label="$t('detail.prevImage')" @click.stop="stepLightbox(-1)">‹</button>
+          <img :src="lightboxSrc" alt="" @click.stop />
+          <button v-if="lightboxNav" class="lb-nav" :title="$t('detail.nextImage')"
+                  :aria-label="$t('detail.nextImage')" @click.stop="stepLightbox(1)">›</button>
+        </div>
+        <div v-if="lightboxNav" class="lb-count">{{ lightboxIndex + 1 }} / {{ lightboxList.length }}</div>
+        <div v-if="lightboxNav" class="lb-thumbs" @click.stop>
+          <img v-for="(u, i) in lightboxList" :key="i" :src="u" :class="{ on: i === lightboxIndex }"
+               :alt="String(i + 1)" @click="lightboxIndex = i" />
+        </div>
+      </div>
     </div>
 
     <!-- 女优弹框：在详情页内查看女优介绍，不关闭当前详情 -->
@@ -1173,13 +1212,41 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', onKey) })
 
 .lightbox {
   position: fixed; inset: 0; z-index: var(--z-toast);
-  background: rgba(0,0,0,.88);
-  display: grid; place-items: center;
-  padding: var(--sp-6);
-  cursor: zoom-out;
+  background: rgba(0,0,0,.92);
+  display: flex; align-items: center; justify-content: center;
+  padding: 16px;
   animation: fade-in var(--t-base);
 }
-.lightbox img { max-width: 100%; max-height: 100%; object-fit: contain; border-radius: var(--r-sm); }
+/* 整组预览图：左右翻页 + 计数 + 底部缩略图，避免一次只能看一张 */
+.lb-box { display: flex; flex-direction: column; align-items: center; gap: 10px;
+  max-width: 100%; max-height: 100%; min-height: 0; }
+.lb-main { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.lb-main img {
+  max-width: min(88vw, 1500px); max-height: calc(100vh - 190px);
+  object-fit: contain; border-radius: 6px; cursor: default;
+}
+.lb-nav {
+  flex: 0 0 auto; width: 40px; height: 40px; border-radius: 50%;
+  border: 1px solid rgba(255,255,255,.28); background: rgba(0,0,0,.45);
+  color: #fff; font-size: 22px; line-height: 1; cursor: pointer;
+}
+.lb-nav:hover { background: rgba(255,255,255,.16); }
+.lb-count { color: rgba(255,255,255,.72); font-size: 12px; font-variant-numeric: tabular-nums; }
+.lb-thumbs { display: flex; gap: 6px; max-width: min(88vw, 1500px); overflow-x: auto; padding: 2px; }
+.lb-thumbs img {
+  flex: 0 0 auto; width: 88px; height: 50px; object-fit: cover;
+  border-radius: 4px; opacity: .55; cursor: pointer;
+  border: 2px solid transparent; transition: opacity .15s, border-color .15s;
+}
+.lb-thumbs img:hover { opacity: .85; }
+.lb-thumbs img.on { opacity: 1; border-color: var(--c-primary); }
+
+@media (max-width: 640px) {
+  .lb-nav { width: 34px; height: 34px; font-size: 18px; }
+  .lb-main { gap: 6px; }
+  .lb-main img { max-width: 82vw; max-height: calc(100vh - 210px); }
+  .lb-thumbs img { width: 64px; height: 38px; }
+}
 
 @media (max-width: 760px) {
   .dd-top { flex-direction: column; }

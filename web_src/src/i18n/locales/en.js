@@ -383,6 +383,8 @@ export default {
   detail: {
     tabInfo: 'Info',
     tabPreview: 'Previews',
+    prevImage: 'Previous image',
+    nextImage: 'Next image',
     tabFiles: 'Files',
     rescrape: 'Re-scrape',
     exportNfo: 'Export NFO',

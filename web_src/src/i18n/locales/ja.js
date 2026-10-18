@@ -375,6 +375,8 @@ export default {
   detail: {
     tabInfo: '概要',
     tabPreview: 'プレビュー',
+    prevImage: '前の画像',
+    nextImage: '次の画像',
     tabFiles: 'ファイル',
     rescrape: '再スクレイピング',
     exportNfo: 'NFO 出力',

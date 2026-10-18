@@ -375,6 +375,8 @@ export default {
   detail: {
     tabInfo: '簡介',
     tabPreview: '預覽圖',
+    prevImage: '上一張',
+    nextImage: '下一張',
     tabFiles: '檔案',
     rescrape: '重新刮削',
     exportNfo: '匯出 NFO',

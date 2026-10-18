@@ -392,6 +392,8 @@ export default {
   detail: {
     tabInfo: '简介',
     tabPreview: '预览图',
+    prevImage: '上一张',
+    nextImage: '下一张',
     tabFiles: '文件',
     rescrape: '重新刮削',
     exportNfo: '导出 NFO',
