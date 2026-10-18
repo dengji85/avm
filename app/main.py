@@ -55,10 +55,14 @@ _PUBLIC_PATHS = {
     "/", "/index.html",
     "/api/health",
     "/api/auth/login", "/api/auth/logout", "/api/auth/session",
+    # 解锁接口自带凭据校验（解锁码 / 访问令牌）与失败限速：
+    # 登出后刷新进入锁屏页时没有会话，若不公开就永远解不开（只能重启服务）。
+    "/api/privacy/unlock",
     # 自托管 API 文档的静态脚本（纯前端渲染，不含任何数据）
     "/api-docs.js",
-    # 锁屏页脚本（锁定状态下页面本身必须能加载）
+    # 锁屏页 / 登录页脚本（页面本身必须能加载，且不含任何应用数据）
     "/lock.js",
+    "/login.js",
 }
 
 # 隐私锁定期间仍可访问的路径（否则页面与解锁接口本身会被自己挡住）。
@@ -206,6 +210,22 @@ class AccessTokenMiddleware(BaseHTTPMiddleware):
                 ),
                 headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
             )
+
+        # 未登录（含刚登出）：首页直接返回登录页，而不是先加载 SPA 再弹窗。
+        # 否则登出后会闪一下应用外壳、再在角上浮出一个小登录框，与锁屏页完全是
+        # 两套观感。登录页与锁屏页共用同一套 .pv-* 卡片，且不含任何应用数据。
+        if path in ("/", "/index.html") and server.get("token_required", True):
+            sid0 = auth.cookie_value(request.scope, auth.SESSION_COOKIE)
+            idle0, absd0 = _session_limits(server)
+            signed = bool(sid0) and auth.touch_session(sid0, idle0, absd0)
+            if not signed and not _token_valid(request.scope, current_access_token()):
+                totp_on = (bool(server.get("totp_enabled"))
+                           and bool((server.get("totp_secret") or "").strip()))
+                return HTMLResponse(
+                    lockpage.render_login_page(
+                        request.headers.get("accept-language", ""), totp_on),
+                    headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
+                )
 
         if (path.startswith(_PUBLIC_PREFIXES) or path in _PUBLIC_PATHS
                 or (bool(server.get("expose_docs"))
@@ -498,6 +518,16 @@ def lock_script() -> FileResponse:
     p = WEB_DIR / "lock.js"
     if not p.exists():
         raise HTTPException(404, "锁屏脚本缺失（web_dist/lock.js）")
+    return FileResponse(p, media_type="application/javascript; charset=utf-8",
+                        headers={"Cache-Control": "no-cache"})
+
+
+@app.get("/login.js", include_in_schema=False)
+def login_script() -> FileResponse:
+    """登录页脚本：未登录时页面必须能加载（含两步验证切换，不含任何应用数据）。"""
+    p = WEB_DIR / "login.js"
+    if not p.exists():
+        raise HTTPException(404, "登录脚本缺失（web_dist/login.js）")
     return FileResponse(p, media_type="application/javascript; charset=utf-8",
                         headers={"Cache-Control": "no-cache"})
 

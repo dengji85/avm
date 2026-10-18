@@ -309,7 +309,7 @@ def privacy_lock(payload: Dict[str, Any], request: Request) -> Dict[str, Any]:
 
 
 @privacy_router.post("/unlock")
-def privacy_unlock(payload: Dict[str, Any], request: Request) -> Dict[str, Any]:
+def privacy_unlock(payload: Dict[str, Any], request: Request, response: Response) -> Dict[str, Any]:
     """解锁遮挡层：凭据可以是**快速解锁码**，也可以直接用**访问令牌**。
 
     访问令牌始终可兜底 —— 忘记解锁码时不必去改 config.json；反之只有解锁码
@@ -326,7 +326,8 @@ def privacy_unlock(payload: Dict[str, Any], request: Request) -> Dict[str, Any]:
     _throttle(server, ip, ua, "解锁尝试")
 
     expected = current_access_token()
-    if expected and credential == expected:
+    by_token = bool(expected) and credential == expected
+    if by_token:
         auth.audit("unlock", ip, ua, "已用访问令牌解锁", ok=True)
     elif stored and auth.verify_pin(credential, stored):
         auth.audit("unlock", ip, ua, "已用快速解锁码解锁", ok=True)
@@ -341,6 +342,16 @@ def privacy_unlock(payload: Dict[str, Any], request: Request) -> Dict[str, Any]:
 
     auth.clear_fails(ip)
     auth.privacy_unlock()
+
+    # 用「访问令牌」解锁本身就证明持有凭据：顺手签发会话。
+    # 否则未登录状态下（例如登出后又触发锁定）解锁完刷新会被登录页再要一次令牌。
+    if by_token:
+        sid = auth.cookie_value(request.scope, auth.SESSION_COOKIE)
+        idle, absd = _idle_abs(server)
+        if not (sid and auth.touch_session(sid, idle, absd)):
+            newsid, _info = auth.new_session(ip, ua, idle, absd)
+            _set_session_cookie(response, newsid, auth.is_https(request.scope), idle)
+
     auth.audit("privacy-unlock", ip, ua, "已解锁")
     return {"ok": True, "locked": False}
 
