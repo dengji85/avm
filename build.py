@@ -84,6 +84,15 @@ try:
     "--hidden-import", "email.mime.text",
     "--hidden-import", "email.mime.multipart",
     "--hidden-import", "charset_normalizer",
+    # 语音对白提取是可选组件（依赖约 170MB + 模型 460MB），
+    # 绝不打进主程序：用户需要时另装，用 AVM_ASR_LIBS 指向即可。
+    "--exclude-module", "faster_whisper",
+    "--exclude-module", "ctranslate2",
+    "--exclude-module", "onnxruntime",
+    "--exclude-module", "tokenizers",
+    "--exclude-module", "huggingface_hub",
+    "--exclude-module", "hf_xet",
+    "--exclude-module", "av",
     "--clean",
     "--noconfirm",
 ])

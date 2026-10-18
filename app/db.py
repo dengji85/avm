@@ -53,6 +53,9 @@ CREATE TABLE IF NOT EXISTS movies (
     scraped_at      TEXT    DEFAULT '',
     scrape_source   TEXT    DEFAULT '',
     note            TEXT    DEFAULT '',
+    -- 片头 / 片尾跳过点（秒）：播放器里一键标记，播放时自动跳过
+    skip_intro      REAL    DEFAULT 0,
+    skip_outro      REAL    DEFAULT 0,
     created_at      TEXT    DEFAULT (datetime('now','localtime')),
     updated_at      TEXT    DEFAULT (datetime('now','localtime'))
 );
@@ -207,6 +210,18 @@ CREATE TABLE IF NOT EXISTS watch_sessions (
 );
 
 CREATE INDEX IF NOT EXISTS idx_ws_movie ON watch_sessions(movie_id);
+
+-- 详情页「AI 剧情问答」历史：保留每次提问与依据，便于回看
+CREATE TABLE IF NOT EXISTS ai_qa (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    movie_id   INTEGER NOT NULL,
+    question   TEXT DEFAULT '',
+    answer     TEXT DEFAULT '',
+    refs       TEXT DEFAULT '',
+    source     TEXT DEFAULT '',
+    created_at TEXT DEFAULT (datetime('now','localtime'))
+);
+CREATE INDEX IF NOT EXISTS idx_aiqa_movie ON ai_qa(movie_id, id);
 """
 
 
@@ -259,6 +274,11 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE movies ADD COLUMN plot_source TEXT DEFAULT ''")
     if "ai_plot_at" not in movie_cols:
         conn.execute("ALTER TABLE movies ADD COLUMN ai_plot_at TEXT DEFAULT ''")
+    # 片头/片尾跳过点（秒）：详情页播放器里一键标记，播放时自动跳过
+    if "skip_intro" not in movie_cols:
+        conn.execute("ALTER TABLE movies ADD COLUMN skip_intro REAL DEFAULT 0")
+    if "skip_outro" not in movie_cols:
+        conn.execute("ALTER TABLE movies ADD COLUMN skip_outro REAL DEFAULT 0")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_movies_embedzh ON movies(embed_sub_zh)")
     file_cols = {r[1] for r in conn.execute("PRAGMA table_info(movie_files)").fetchall()}
     if "quick_hash" not in file_cols:

@@ -2,7 +2,7 @@
 import { ref, onMounted, onBeforeUnmount, watch, nextTick } from 'vue'
 import videojs from 'video.js'
 import 'video.js/dist/video-js.css'
-import { streamUrl, strmHlsUrl, streamInfo, setProgress, playMovie, markPlayed, startSession, updateSession, endSession, getPreviews, genPreviews, playbackInfo, prepareStream, prepareStreamStatus } from '../api.js'
+import { streamUrl, strmHlsUrl, streamInfo, setProgress, playMovie, markPlayed, startSession, updateSession, endSession, getPreviews, genPreviews, playbackInfo, prepareStream, prepareStreamStatus, subtitleTracks, setSkipPoints } from '../api.js'
 import { toast, fmtClock } from '../utils.js'
 import { t } from '../i18n/index.js'
 
@@ -20,6 +20,167 @@ const cur = ref(0)
 const dur = ref(0)
 let player = null          // video.js player 实例
 let videoEl = null         // 底层 <video> 元素
+/* ---- 播放器浮层：字幕轨 / 片头片尾 ---- */
+const uiReady = ref(false)
+const subOpen = ref(false)
+const markOpen = ref(false)
+const subTracks = ref([])
+const activeSub = ref('')
+const subStyle = ref({ size: 'm', bg: '1' })
+const skipIntro = ref(0)
+const skipOutro = ref(0)
+const skipToast = ref('')
+let skipUndoAt = 0
+/* 每次加载只自动跳一次，避免用户想回看片头/片尾时被反复拉走 */
+let introJumped = false
+let outroJumped = false
+const canMarkIntro = ref(true)
+const canMarkOutro = ref(false)
+
+const PREF_KEY = 'avm.player.prefs'
+
+function loadPrefs() {
+  try {
+    const p = JSON.parse(localStorage.getItem(PREF_KEY) || '{}')
+    if (p.subStyle) subStyle.value = Object.assign(subStyle.value, p.subStyle)
+    if (p.sub) activeSub.value = p.sub || ''
+  } catch (e) { /* 忽略 */ }
+}
+function savePrefs() {
+  try {
+    localStorage.setItem(PREF_KEY, JSON.stringify({
+      subStyle: subStyle.value, sub: activeSub.value,
+      volume: player ? Math.round(player.volume() * 100) : undefined,
+      rate: player ? player.playbackRate() : undefined,
+    }))
+  } catch (e) { /* 忽略 */ }
+}
+function applySubStyle() {
+  const sizes = { s: '16px', m: '22px', l: '30px' }
+  const bgs = { '0': 'transparent', '1': 'rgba(0,0,0,.55)', '2': 'rgba(0,0,0,.9)' }
+  const el = containerEl.value
+  if (!el) return
+  el.style.setProperty('--vp-sub-size', sizes[subStyle.value.size] || sizes.m)
+  el.style.setProperty('--vp-sub-bg', bgs[subStyle.value.bg] || bgs['1'])
+}
+/** 恢复上次的播放偏好（音量 / 倍速 / 字幕），没有则给保守默认 */
+function restorePrefs() {
+  if (!player) return
+  let p = {}
+  try { p = JSON.parse(localStorage.getItem(PREF_KEY) || '{}') } catch (e) { p = {} }
+  player.muted(false)
+  player.volume(typeof p.volume === 'number' ? Math.min(1, Math.max(0, p.volume / 100)) : 0.3)
+  if (typeof p.rate === 'number') player.playbackRate(p.rate)
+}
+
+/** 系统媒体控制（手机锁屏 / 耳机按键）：显示标题封面，可播放暂停与 seek */
+function setupMediaSession() {
+  if (!('mediaSession' in navigator)) return
+  try {
+    navigator.mediaSession.metadata = new MediaMetadata({
+      title: props.movieId ? ('#' + props.movieId) : '片匣',
+      artist: 'AVM',
+    })
+    navigator.mediaSession.setActionHandler('play', () => player && player.play())
+    navigator.mediaSession.setActionHandler('pause', () => player && player.pause())
+    navigator.mediaSession.setActionHandler('seekbackward', () => {
+      if (videoEl) videoEl.currentTime = Math.max(0, videoEl.currentTime - 10)
+    })
+    navigator.mediaSession.setActionHandler('seekforward', () => {
+      if (videoEl) videoEl.currentTime = videoEl.currentTime + 10
+    })
+  } catch (e) { /* 旧浏览器忽略 */ }
+}
+
+async function loadSubtitleTracks() {
+  try {
+    const r = await subtitleTracks(props.movieId)
+    subTracks.value = r.tracks || []
+    skipIntro.value = r.skip_intro || 0
+    skipOutro.value = r.skip_outro || 0
+    applySubStyle()
+    // 偏好命中则用它，否则默认第一条（优先中文）
+    const want = activeSub.value
+    const pick = (want && subTracks.value.find((x) => x.id === want))
+      || subTracks.value.find((x) => (x.lang || '').startsWith('zh'))
+      || subTracks.value[0]
+    subTracks.value.forEach((track) => {
+      player.addRemoteTextTrack({
+        kind: 'subtitles', src: track.url, srclang: track.lang || 'und',
+        label: track.label, default: !!pick && track.id === pick.id,
+      }, false)
+    })
+    activeSub.value = pick ? pick.id : ''
+  } catch (e) { /* 没有字幕轨时忽略 */ }
+  finally { uiReady.value = true }
+}
+function selectSub(id) {
+  activeSub.value = id
+  const list = subTracks.value
+  const tracks = (videoEl && videoEl.textTracks) || []
+  for (let i = 0; i < tracks.length; i++) {
+    const tt = tracks[i]
+    if (tt.kind !== 'subtitles') continue
+    // 按 label 对齐（video.js 会在原生轨之后追加远程轨，不能按下标猜）
+    const hit = list.find((x) => x.label === tt.label)
+    tt.mode = (hit && hit.id === id) ? 'showing' : 'disabled'
+  }
+  savePrefs()
+}
+function fmtSkip(sec) {
+  const s = Math.max(0, Math.round(sec || 0))
+  return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0')
+}
+function markSkip(kind) {
+  const v = videoEl
+  if (!v) return
+  const sec = Math.round(v.currentTime)
+  const payload = kind === 'intro' ? { intro_end: sec } : { outro_start: sec }
+  setSkipPoints(props.movieId, payload).then(() => {
+    if (kind === 'intro') { skipIntro.value = sec; toast(t('player.markIntroDone', { t: fmtSkip(sec) }), 'ok') }
+    else { skipOutro.value = sec; toast(t('player.markOutroDone', { t: fmtSkip(sec) }), 'ok') }
+    markOpen.value = false
+  }).catch((e) => toast(e.message, 'err'))
+}
+function clearSkip(kind) {
+  const payload = kind === 'intro' ? { intro_end: 0 } : kind === 'outro' ? { outro_start: 0 } : { intro_end: 0, outro_start: 0 }
+  setSkipPoints(props.movieId, payload).then(() => {
+    if (kind !== 'outro') skipIntro.value = 0
+    if (kind !== 'intro') skipOutro.value = 0
+    markOpen.value = false
+    toast(t('player.skipCleared'), 'ok')
+  }).catch((e) => toast(e.message, 'err'))
+}
+function markIntro() { markSkip('intro') }
+function markOutro() { markSkip('outro') }
+function showSkipToast(msg, target) {
+  skipToast.value = msg
+  skipUndoAt = target
+  clearTimeout(showSkipToast._t)
+  showSkipToast._t = setTimeout(() => { skipToast.value = '' }, 6000)
+}
+function undoSkip() {
+  const v = videoEl
+  if (v && skipUndoAt > 0) v.currentTime = skipUndoAt
+  skipToast.value = ''
+}
+function checkSkip() {
+  const v = videoEl
+  if (!v || !Number.isFinite(v.duration)) return
+  const now = v.currentTime
+  if (!introJumped && skipIntro.value > 5 && now > 1 && now < skipIntro.value - 1) {
+    introJumped = true
+    v.currentTime = skipIntro.value
+    showSkipToast(t('player.skippedIntro', { t: fmtSkip(skipIntro.value) }), now)
+    return
+  }
+  // skipOutro 存的是「片尾开始」的绝对秒数，不能当成距结束的剩余时长来比较
+  if (!outroJumped && skipOutro.value > 0 && now >= skipOutro.value && v.duration - now > 2) {
+    outroJumped = true
+    v.currentTime = v.duration
+    showSkipToast(t('player.skippedOutro', { t: fmtSkip(skipOutro.value) }), now)
+  }
+}
 let saveTimer = null
 let lastSaved = 0
 let sessionId = null      // 当前观看会话 id（用于写入观看明细）
@@ -74,16 +235,24 @@ function onLoaded() {
   if (!v) return
   // 在元数据就绪后显式设置初始音量（video.js 的 volume 选项在 autoplay 下常被忽略，
   // 这里强制设为较小音量，避免一打开声音过大）
-  if (player) { player.muted(false); player.volume(0.3) }
+  restorePrefs()
   // 直播流（HLS）duration 为 Infinity：不要写进 dur，否则进度条会算错
   dur.value = Number.isFinite(v.duration) ? v.duration : 0
+  introJumped = false
+  outroJumped = false
+  canMarkOutro.value = dur.value > 0 && v.currentTime > dur.value * 0.5
+  setupMediaSession()
+  // AI 问答里点的时间戳：优先于「继续观看」的起始位置
+  const jump = pendingSeek
+  pendingSeek = 0
+  if (jump > 0 && jump < (v.duration || 0) - 2) v.currentTime = jump
   // 重封装后重新加载：只恢复播放进度，不重复计数、不重复开会话
   if (reloading) {
     reloading = false
-    if (props.startAt > 0 && props.startAt < (v.duration || 0) - 5) v.currentTime = props.startAt
+    if (!jump && props.startAt > 0 && props.startAt < (v.duration || 0) - 5) v.currentTime = props.startAt
     return
   }
-  if (props.startAt > 0 && props.startAt < (v.duration || 0) - 5) {
+  if (!jump && props.startAt > 0 && props.startAt < (v.duration || 0) - 5) {
     v.currentTime = props.startAt
     toast(t('player.jumpedTo', { time: fmtClock(props.startAt) }), '', 2200)
   }
@@ -110,6 +279,8 @@ function onTime() {
   lastTick = now
   cur.value = now
   if (Number.isFinite(v.duration)) dur.value = v.duration
+  if (dur.value > 0) canMarkOutro.value = now > dur.value * 0.5
+  checkSkip()
 }
 
 /** 每 10 秒回写一次进度与观看时长 */
@@ -553,6 +724,7 @@ function initPlayer() {
     // 桌面：鼠标滚轮调音量 + 按下拖动调音量
     overlayEl.addEventListener('wheel', onWheel, { passive: false })
     overlayEl.addEventListener('mousedown', onMouseDown)
+    loadSubtitleTracks()
     // 移动端：画面横滑快进/快退 + 垂直滑动调音量（passive:false 以便阻止默认/页面滚动）
     overlayEl.addEventListener('touchstart', onTouchStart, { passive: true })
     buildVolumeOsd()
@@ -691,13 +863,34 @@ function onPauseRequest() {
   if (player && !player.paused()) player.pause()
 }
 
+/* 外部请求跳转：AI 问答的时间戳依据点一下就跳到片中那一刻 */
+let pendingSeek = 0
+function onSeekRequest(e) {
+  const sec = Number(e && e.detail && e.detail.seconds)
+  if (!Number.isFinite(sec) || sec < 0) return
+  const v = videoEl
+  if (v && v.readyState > 0) {
+    v.currentTime = sec
+    if (player && player.paused()) player.play()
+  } else {
+    // 播放器还没就绪：先记下来，onLoaded 时应用
+    pendingSeek = sec
+  }
+}
+
 onMounted(() => {
+  // 先恢复字幕样式/选中轨偏好，再初始化播放器，避免加载轨道时用默认值
+  loadPrefs()
   window.addEventListener('avm-pause-player', onPauseRequest)
+  window.addEventListener('avm-seek', onSeekRequest)
   nextTick(async () => { await resolveSource(); initPlayer() })
 })
 
 onBeforeUnmount(() => {
+  // 离开播放器时保存当前的音量/倍速/字幕偏好（音量拖动过程不写盘，避免频繁 IO）
+  savePrefs()
   window.removeEventListener('avm-pause-player', onPauseRequest)
+  window.removeEventListener('avm-seek', onSeekRequest)
   clearInterval(saveTimer)
   destroyPlayer()
 })
@@ -723,7 +916,51 @@ watch(() => props.movieId, () => {
 
 <template>
   <div class="player">
-    <div v-show="!failed" ref="containerEl" class="vjs-wrap"></div>
+    <div v-show="!failed" ref="containerEl" class="vjs-wrap">
+      <!-- 播放器浮层：字幕轨选择/样式、片头片尾跳过标记 -->
+      <div v-if="uiReady" class="vp-ui">
+        <div class="vp-btn" :class="{ on: subOpen }" @click.stop="subOpen = !subOpen">
+          CC
+          <div v-if="subOpen" class="vp-menu" @click.stop>
+            <button class="vp-item" :class="{ on: !activeSub }" @click="selectSub(null)">{{ $t('player.subOff') }}</button>
+            <button v-for="t in subTracks" :key="t.id" class="vp-item"
+                    :class="{ on: activeSub === t.id }" @click="selectSub(t.id)">
+              <span class="ellipsis">{{ t.label }}</span>
+            </button>
+            <div class="vp-sep"></div>
+            <div class="vp-row">
+              <span>{{ $t('player.subSize') }}</span>
+              <select v-model="subStyle.size" @change="savePrefs">
+                <option value="s">小</option><option value="m">中</option><option value="l">大</option>
+              </select>
+            </div>
+            <div class="vp-row">
+              <span>{{ $t('player.subBg') }}</span>
+              <select v-model="subStyle.bg" @change="savePrefs">
+                <option value="0">{{ $t('player.subBgNone') }}</option>
+                <option value="1">{{ $t('player.subBgHalf') }}</option>
+                <option value="2">{{ $t('player.subBgFull') }}</option>
+              </select>
+            </div>
+          </div>
+        </div>
+        <div v-if="skipIntro" class="vp-btn" :title="$t('player.skipIntroClear')" @click.stop="clearSkip('intro')">片头</div>
+        <div v-if="skipOutro" class="vp-btn" :title="$t('player.skipOutroClear')" @click.stop="clearSkip('outro')">片尾</div>
+        <div v-if="canMarkIntro || canMarkOutro" class="vp-btn" :class="{ on: markOpen }" @click.stop="markOpen = !markOpen">
+          ⚑
+          <div v-if="markOpen" class="vp-menu" @click.stop>
+            <button v-if="canMarkIntro" class="vp-item" @click="markIntro">{{ $t('player.markIntro') }}</button>
+            <button v-if="canMarkOutro" class="vp-item" @click="markOutro">{{ $t('player.markOutro') }}</button>
+            <button v-if="skipIntro || skipOutro" class="vp-item" @click="clearSkip('both')">{{ $t('player.skipClear') }}</button>
+          </div>
+        </div>
+      </div>
+
+      <div v-if="skipToast" class="vp-toast" @click.stop>
+        <span>{{ skipToast }}</span>
+        <button class="vp-undo" @click.stop="undoSkip">{{ $t('player.undo') }}</button>
+      </div>
+    </div>
 
     <!-- 浏览器不兼容的容器/音轨：正在快速重封装为 MP4（只复制视频流，不重编码） -->
     <div v-if="preparing" class="p-fail">
@@ -839,6 +1076,68 @@ watch(() => props.movieId, () => {
 :-webkit-full-screen .vjs-click-overlay {
   bottom: 3.2em;
   z-index: 5;
+}
+/* ---- 播放器浮层：字幕轨 / 片头片尾标记 ---- */
+.vp-ui {
+  position: absolute; top: 8px; right: 10px; z-index: 12;
+  display: flex; align-items: center; gap: 6px;
+}
+.vp-btn {
+  min-width: 30px; height: 26px; padding: 0 7px;
+  display: inline-flex; align-items: center; justify-content: center;
+  border-radius: 5px; border: 1px solid rgba(255,255,255,.22);
+  background: rgba(0,0,0,.5); color: rgba(255,255,255,.85);
+  font-size: 12px; cursor: pointer; user-select: none;
+}
+.vp-btn:hover, .vp-btn.on { background: rgba(255,255,255,.18); }
+.vp-menu {
+  position: absolute; top: 30px; right: 0; z-index: 13;
+  min-width: 190px; max-height: 46vh; overflow: auto;
+  padding: 6px; border-radius: 8px;
+  background: rgba(14,16,22,.96); border: 1px solid rgba(255,255,255,.14);
+  box-shadow: 0 8px 26px rgba(0,0,0,.45);
+}
+.vp-item {
+  display: block; width: 100%; text-align: left;
+  padding: 6px 8px; border: 0; border-radius: 6px;
+  background: transparent; color: rgba(255,255,255,.86);
+  font-size: 12px; cursor: pointer;
+}
+.vp-item:hover { background: rgba(255,255,255,.12); }
+.vp-item.on { color: #fff; background: var(--c-primary); }
+.vp-sep { height: 1px; margin: 5px 2px; background: rgba(255,255,255,.12); }
+.vp-row {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  padding: 5px 8px; font-size: 12px; color: rgba(255,255,255,.7);
+}
+.vp-row select {
+  background: rgba(255,255,255,.1); color: #fff;
+  border: 1px solid rgba(255,255,255,.2); border-radius: 5px;
+  font-size: 12px; padding: 2px 4px;
+}
+.vp-toast {
+  position: absolute; left: 50%; bottom: 64px; transform: translateX(-50%);
+  z-index: 14; display: flex; align-items: center; gap: 10px;
+  padding: 7px 12px; border-radius: 999px;
+  background: rgba(0,0,0,.78); color: #fff; font-size: 13px;
+  white-space: nowrap;
+}
+.vp-undo {
+  border: 0; border-radius: 999px; padding: 3px 10px; cursor: pointer;
+  background: var(--c-primary); color: #fff; font-size: 12px;
+}
+/* 字幕显示样式（大小 / 背景由浮层控制） */
+.vjs-wrap :deep(.vjs-text-track-display) {
+  --vp-sub-size: 22px;
+  --vp-sub-bg: rgba(0,0,0,.55);
+}
+.vjs-wrap :deep(.vjs-text-track-cue) {
+  font-size: var(--vp-sub-size, 22px) !important;
+  background: var(--vp-sub-bg, rgba(0,0,0,.55)) !important;
+  line-height: 1.35 !important;
+}
+.vjs-wrap :deep(.vjs-text-track-cue > div) {
+  background: var(--vp-sub-bg, rgba(0,0,0,.55)) !important;
 }
 /* 手机/平板：视频铺满可用高度；控制条（含进度条）常驻可见，便于拖动定位 */
 @media (max-width: 768px) {

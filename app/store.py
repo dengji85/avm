@@ -616,6 +616,81 @@ def movie_primary_file(conn: sqlite3.Connection, movie_id: int):
     return src["path"] if src else None
 
 
+def similar_candidates(conn: sqlite3.Connection, movie_id: int,
+                       limit: int = 400) -> List[Dict[str, Any]]:
+    """AI 相似推荐的候选集：带剧情文本与分类关系（女优/类型/标签/厂商/系列）。
+
+    候选池由两部分组成，避免「只看最近更新」时老片永远不出现：
+    1) 与目标影片共享女优 / 类型 / 标签 / 系列 / 厂商的影片（按命中数排序，最多 300 部）；
+    2) 最近更新的 N 部（兜底：目标影片没有任何共同分类时仍有候选）。
+    评分交给 app/ai_extra.py 的规则，这里只负责把候选捞全。
+    """
+    mid = int(movie_id)
+    related = query_all(
+        conn,
+        """WITH tgt AS (SELECT series_id, studio_id FROM movies WHERE id = ?)
+           SELECT m.id,
+                  (SELECT COUNT(*) FROM movie_actress x WHERE x.movie_id = m.id
+                     AND x.actress_id IN (SELECT actress_id FROM movie_actress WHERE movie_id = ?))
+                + (SELECT COUNT(*) FROM movie_genre x WHERE x.movie_id = m.id
+                     AND x.genre_id IN (SELECT genre_id FROM movie_genre WHERE movie_id = ?))
+                + (SELECT COUNT(*) FROM movie_tag x WHERE x.movie_id = m.id
+                     AND x.tag_id IN (SELECT tag_id FROM movie_tag WHERE movie_id = ?)) AS hits
+           FROM movies m, tgt
+           WHERE m.id <> ?
+             AND ((tgt.series_id IS NOT NULL AND m.series_id = tgt.series_id)
+               OR (tgt.studio_id IS NOT NULL AND m.studio_id = tgt.studio_id)
+               OR EXISTS(SELECT 1 FROM movie_actress x WHERE x.movie_id = m.id
+                         AND x.actress_id IN (SELECT actress_id FROM movie_actress WHERE movie_id = ?))
+               OR EXISTS(SELECT 1 FROM movie_genre x WHERE x.movie_id = m.id
+                         AND x.genre_id IN (SELECT genre_id FROM movie_genre WHERE movie_id = ?))
+               OR EXISTS(SELECT 1 FROM movie_tag x WHERE x.movie_id = m.id
+                         AND x.tag_id IN (SELECT tag_id FROM movie_tag WHERE movie_id = ?)))
+           ORDER BY hits DESC, m.updated_at DESC
+           LIMIT 300""",
+        (mid,) * 8)
+    ids: List[int] = [int(r["id"]) for r in related]
+    seen = set(ids)
+    for r in query_all(conn, "SELECT id FROM movies WHERE id <> ? "
+                             "ORDER BY updated_at DESC LIMIT ?",
+                       (mid, max(10, min(2000, limit)))):
+        i = int(r["id"])
+        if i not in seen:
+            seen.add(i)
+            ids.append(i)
+    if not ids:
+        return []
+    marks = ",".join("?" * len(ids))
+    rows = query_all(
+        conn,
+        "SELECT m.id, m.code, m.title, m.cover, m.rating, m.plot, "
+        "       st.name AS studio, se.name AS series "
+        "FROM movies m "
+        "LEFT JOIN studios st ON st.id = m.studio_id "
+        "LEFT JOIN series se ON se.id = m.series_id "
+        "WHERE m.id IN (%s)" % marks,
+        ids)
+
+    def rel_map(sql: str) -> Dict[int, set]:
+        out: Dict[int, set] = {}
+        for r in query_all(conn, sql % marks, ids):
+            out.setdefault(int(r["movie_id"]), set()).add(str(r["name"]))
+        return out
+
+    genres = rel_map("SELECT movie_id, g.name AS name FROM movie_genre x "
+                     "JOIN genres g ON g.id = x.genre_id WHERE x.movie_id IN (%s)")
+    tags = rel_map("SELECT movie_id, t.name AS name FROM movie_tag x "
+                   "JOIN tags t ON t.id = x.tag_id WHERE x.movie_id IN (%s)")
+    actress = rel_map("SELECT movie_id, a.name AS name FROM movie_actress x "
+                       "JOIN actresses a ON a.id = x.actress_id WHERE x.movie_id IN (%s)")
+    for r in rows:
+        mid = int(r["id"])
+        r["genres"] = sorted(genres.get(mid, ()))
+        r["tags"] = sorted(tags.get(mid, ()))
+        r["actresses"] = sorted(actress.get(mid, ()))
+    return rows
+
+
 def watch_analytics(conn: sqlite3.Connection) -> Dict[str, Any]:
     """基于真实观看时长，分析用户的观影偏好与习惯。"""
     tot = query_one(conn, """

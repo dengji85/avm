@@ -1,0 +1,10 @@
+# 可选组件：语音对白提取（只用于 AI 剧情理解，不生成字幕）
+#
+# 安装：pip install -r requirements-asr.txt
+# 模型：python tools/fetch_asr_model.py
+#
+# 为什么锁 ctranslate2==4.5.0：
+#   4.8.x 在部分 Windows / CPU 组合上加载 Whisper 模型会直接崩（0xC0000005 段错误），
+#   4.5.0 实测稳定。
+faster-whisper==1.2.1
+ctranslate2==4.5.0

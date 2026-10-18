@@ -130,18 +130,103 @@ def match_subtitle_files(conn, paths: List[str]) -> Dict[str, Any]:
     return {"matched": matched, "unmatched": unmatched, "total": len(paths)}
 
 
-def _register_subtitle(conn, movie_id: int, path: str, source: str = "matched") -> None:
+def _register_subtitle(conn, movie_id: int, path: str, source: str = "matched") -> bool:
+    """登记一条字幕（幂等）。返回是否真的新增。"""
     existing = query_one(
         conn,
         "SELECT id FROM movie_subtitles WHERE movie_id=? AND file_path=?",
         (movie_id, path),
     )
-    if existing is None:
-        conn.execute(
-            "INSERT INTO movie_subtitles(movie_id, file_path, filename, lang, source) "
-            "VALUES(?,?,?,?,?)",
-            (movie_id, path, os.path.basename(path), _lang_of(os.path.basename(path)), source),
-        )
+    if existing is not None:
+        return False
+    conn.execute(
+        "INSERT INTO movie_subtitles(movie_id, file_path, filename, lang, source) "
+        "VALUES(?,?,?,?,?)",
+        (movie_id, path, os.path.basename(path), _lang_of(os.path.basename(path)), source),
+    )
+    return True
+
+
+# 自动登记外挂字幕时接受的扩展名。故意不含 .txt：同目录的说明文件太容易被误当字幕。
+SIDECAR_EXTS = {".srt", ".ass", ".ssa", ".vtt", ".sub", ".smi"}
+
+
+def _norm_key(name: str) -> str:
+    """归一化文件名主干：小写并去掉分隔符，让 JUL185C.srt 匹配 jul-185-C.mp4。"""
+    return "".join(ch for ch in (name or "").lower() if ch.isalnum())
+
+
+def _sidecar_files(folder: Path) -> List[Path]:
+    try:
+        return [p for p in folder.iterdir()
+                if p.is_file() and p.suffix.lower() in SIDECAR_EXTS]
+    except OSError:
+        return []
+
+
+def _dir_video_count(folder: Path, exts: set) -> int:
+    """目录里有多少个视频文件：决定能否用「单视频目录」兜底规则。"""
+    try:
+        return sum(1 for p in folder.iterdir()
+                   if p.is_file() and p.suffix.lower() in exts)
+    except OSError:
+        return 0
+
+
+def register_sidecars(conn, movie_id: int, video_paths: List[str], code: str = "") -> int:
+    """把与视频同目录、能确定归属的外挂字幕登记进库（幂等），返回新增条数。
+
+    归属判定从强到弱：
+    1. 字幕主干等于视频主干，或以视频主干开头（`video.chs.srt`、`video.zh-CN.srt`）；
+    2. 字幕主干包含该片番号（`jul185.srt` → JUL-185）；
+    3. 目录里只有一个视频文件时，目录内其余字幕都归给它（应付「字幕.srt」这种随意命名）。
+
+    同目录有多部影片时不做第 3 条，避免把 A 片的字幕登记到 B 片身上。
+    """
+    from .config import load_config, video_exts
+
+    vids = [Path(p) for p in (video_paths or []) if p]
+    if not vids:
+        return 0
+    by_dir: Dict[Path, List[Path]] = {}
+    for v in vids:
+        by_dir.setdefault(v.parent, []).append(v)
+
+    exts = video_exts(load_config())
+    code_key = _norm_key(code)
+    added = 0
+    for folder, vlist in by_dir.items():
+        files = _sidecar_files(folder)
+        if not files:
+            continue
+        vkeys = [(v, _norm_key(v.stem)) for v in vlist]
+        # 用磁盘上真实的视频数量判断，而不是调用方传进来的路径数量：
+        # 扫描器按「影片」调用，一个合集目录里可能有别的影片。
+        only_one = _dir_video_count(folder, exts) <= 1
+        for sp in files:
+            sk = _norm_key(sp.stem)
+            if not sk:
+                continue
+            # 0 字节字幕（下载失败 / 占位文件）登记后只会得到一条空轨，直接跳过
+            try:
+                if sp.stat().st_size <= 0:
+                    continue
+            except OSError:
+                continue
+            owner: Optional[Path] = None
+            for v, vk in vkeys:
+                if vk and (sk == vk or sk.startswith(vk)):
+                    owner = v
+                    break
+            if owner is None and code_key and code_key in sk:
+                owner = vlist[0]
+            if owner is None and only_one:
+                owner = vlist[0]
+            if owner is None:
+                continue
+            if _register_subtitle(conn, movie_id, str(sp), "sidecar"):
+                added += 1
+    return added
 
 
 def align_subtitle(conn, subtitle_path: str, movie_id: int,

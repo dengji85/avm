@@ -16,6 +16,9 @@ services:
     #     # 1=内置 chromium（av-wiki 的 CDP 抓取可用，镜像更大）
     #     # 0=精简，不含 chromium（其余数据源不受影响）
     #     INSTALL_CHROMIUM: "1"
+    #     # 1=内置语音对白提取（+约 170MB 依赖；仅 x86_64 可用）
+    #     # 模型不随镜像，放到挂载的 /data/models/faster-whisper-small
+    #     WITH_ASR: "0"
     container_name: avm
     restart: unless-stopped
     environment:

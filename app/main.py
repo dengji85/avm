@@ -49,7 +49,8 @@ if _cors_origins:
     )
 
 # 公开的静态资源目录（前缀匹配，路径由 Vite 构建产物决定）
-_PUBLIC_PREFIXES = ("/assets", "/icons", "/favicon", "/logo")
+# /api/cast/media：DLNA 投屏的媒体出口，电视没有会话，只能靠投屏短时令牌鉴权
+_PUBLIC_PREFIXES = ("/assets", "/icons", "/favicon", "/logo", "/api/cast/media")
 
 # 无需登录即可访问的**精确**路径：首页、健康检查、登录 / 登出 / 会话状态查询。
 # 必须精确匹配 —— 早先写成前缀匹配时，`/api/auth/session` 会顺带放行

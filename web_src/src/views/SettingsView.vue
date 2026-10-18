@@ -2,7 +2,7 @@
 import { ref, reactive, computed, onBeforeUnmount, onMounted, watch } from 'vue'
 import { state } from '../state.js'
 import {
-  API, getConfig, putConfig, listProviders, testScraper as apiTest,
+  API, getConfig, putConfig, listProviders, testScraper as apiTest, aiAsrStatus,
   parsePreview as apiParse, fsList, sniffCovers, extractAllCovers, csvUrl, cacheAvatars,
   fillActressAvatars, rescanLocalCovers, fetchActressProfile, getServerInfo, revealToken, rotateToken, checkUpdate,
   fsMounts,
@@ -55,6 +55,7 @@ const cfg = reactive({
   ffmpeg_path: '',
   previews_quality: 'smart',
   ai: { enabled: false, base_url: 'https://api.openai.com/v1', api_key: '', model: 'gpt-4o-mini', temperature: 0.4 },
+  asr: { libs_dir: '', model_dir: '', model: 'small', language: 'ja' },
   stream: { auto_remux: true, remux_cache_mb: 4096 },
   wiki: { languages: ['ja', 'zh'] },
   online_sites: [],
@@ -158,6 +159,7 @@ async function load() {
     )
     loadStreamCache()
     loadSecurity()
+    loadAsr()
     // 先拿到「是否已设置简单密码」，否则解锁方式下拉的校验会误判
     await loadPinStatus()
     state.config = cfg
@@ -776,6 +778,17 @@ async function saveScraper() {
 // 此前该面板只画了 UI：模板里的 @click="save" 与 aiOk 在脚本中都未定义，
 // 点保存没有任何反应（刷新后依旧显示关闭）。这里补齐真正的保存逻辑。
 const aiOk = ref(null)
+
+/* 语音对白提取（可选组件）的路径配置与环境探测 */
+const asrInfo = ref(null)
+async function loadAsr() {
+  try {
+    asrInfo.value = await aiAsrStatus()
+  } catch (e) {
+    asrInfo.value = null
+  }
+}
+
 async function save() {
   saving.value = true
   aiOk.value = null
@@ -788,7 +801,14 @@ async function save() {
         model: (cfg.ai.model || '').trim(),
         temperature: Number(cfg.ai.temperature) || 0,
       },
+      asr: {
+        libs_dir: (cfg.asr.libs_dir || '').trim(),
+        model_dir: (cfg.asr.model_dir || '').trim(),
+        model: cfg.asr.model || 'small',
+        language: cfg.asr.language || 'ja',
+      },
     })
+    await loadAsr()
     aiOk.value = true
     toast(t('settings.aiSaved'), 'ok')
     await load()
@@ -1496,6 +1516,46 @@ onMounted(async () => {
               <label>{{ $t('settings.aiTemp') }}</label>
               <input type="number" step="0.1" min="0" max="1" v-model.number="cfg.ai.temperature" style="width:100px" />
               <span class="muted">{{ $t('settings.aiTempSub') }}</span>
+            </div>
+
+            <!-- 语音对白提取（可选组件）：依赖与模型可以放在任意盘 -->
+            <div class="field">
+              <label>{{ $t('settings.asrTitle') }}</label>
+              <span class="hint">{{ $t('settings.asrSub') }}</span>
+            </div>
+            <div class="field">
+              <label>{{ $t('settings.asrLibs') }}</label>
+              <input v-model="cfg.asr.libs_dir" :placeholder="$t('settings.asrLibsPh')" />
+              <span class="hint">{{ $t('settings.asrLibsHint') }}</span>
+            </div>
+            <div class="field">
+              <label>{{ $t('settings.asrModelDir') }}</label>
+              <input v-model="cfg.asr.model_dir" :placeholder="$t('settings.asrModelDirPh')" />
+              <span class="hint">{{ $t('settings.asrModelDirHint') }}</span>
+            </div>
+            <div class="field-row">
+              <label>{{ $t('settings.asrSize') }}</label>
+              <select v-model="cfg.asr.model" style="width:130px">
+                <option value="small">small</option>
+                <option value="medium">medium</option>
+              </select>
+              <label>{{ $t('settings.asrLang') }}</label>
+              <select v-model="cfg.asr.language" style="width:130px">
+                <option value="ja">日本語</option>
+                <option value="zh">中文</option>
+                <option value="en">English</option>
+                <option value="auto">{{ $t('settings.asrAuto') }}</option>
+              </select>
+            </div>
+            <div class="field">
+              <span class="hint">
+                {{ asrInfo
+                  ? (asrInfo.lib_available
+                    ? (asrInfo.model_available ? $t('settings.asrReady') : $t('settings.asrNoModel', { dir: asrInfo.model_dir }))
+                    : $t('settings.asrNoLib'))
+                  : $t('settings.asrUnknown') }}
+              </span>
+              <button class="btn tiny ghost" @click="loadAsr">{{ $t('settings.asrRecheck') }}</button>
             </div>
           </div>
           <div class="panel-foot">

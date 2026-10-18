@@ -277,13 +277,39 @@ export const uploadAndMatchSubtitles = (formData) =>
 
 /* ---------------- AI 增强 ---------------- */
 export const aiStatus = () => get('/ai/status')
-export const aiGenerateSynopsis = (id) => post(`/ai/generate-synopsis/${id}`, {})
+export const aiGenerateSynopsis = (id, preview = false) => post(`/ai/generate-synopsis/${id}`, { preview })
+/* 采用预览生成的简介：写入 plot 并标记来源（不重新调用模型） */
+export const aiApplyPlot = (id, plot, source) => post(`/ai/plot/apply/${id}`, { plot, source })
 export const aiSuggestTags = (id) => post(`/ai/suggest-tags/${id}`, {})
 
 /* AI 字幕翻译：单部同步生成 */
 export const aiTranslate = (id, target = 'zh-Hans', bilingual = false) =>
   post(`/ai/translate/${id}?target=${encodeURIComponent(target)}&bilingual=${bilingual ? '1' : '0'}`, {})
 export const aiDeleteSubtitle = (id, subId) => del(`/movies/${id}/subtitles/${subId}`)
+/* 播放器字幕轨（内嵌轨 + 已登记字幕，均转 VTT）与片头片尾跳过点 */
+export const subtitleTracks = (id) => get(`/movies/${id}/subtitle-tracks`)
+/* 扫描视频同目录的外挂字幕并登记（幂等） */
+export const scanMovieSubtitles = (id) => post(`/movies/${id}/subtitles/scan`, {})
+export const setSkipPoints = (id, body) => put(`/movies/${id}/skip`, body)
+/* AI 剧情问答与相似推荐 */
+export const aiAsk = (id, question) => post(`/ai/ask/${id}`, { question })
+export const aiAskHistory = (id, limit = 10) => get(`/ai/ask/${id}`, { limit })
+export const aiSimilar = (id, limit = 5) => get(`/ai/similar/${id}`, { limit })
+/* 语音对白提取（只喂给 AI 剧情，不产出字幕） */
+export const aiAsrStatus = () => get('/ai/asr/status')
+export const movieDialog = (id, preview = 0) => get(`/movies/${id}/dialog`, { preview })
+export const startMovieDialog = (id, body = {}) => post(`/movies/${id}/dialog`, body)
+export const deleteMovieDialog = (id) => del(`/movies/${id}/dialog`)
+/* AI 提示词审查 / 修改，以及每次调用的提示词与原始返回 */
+export const aiPrompts = () => get('/ai/prompts')
+export const aiSavePrompt = (id, system) => put(`/ai/prompts/${id}`, { system })
+export const aiResetPrompt = (id) => del(`/ai/prompts/${id}`)
+export const aiTraces = (limit = 20, purpose = '') => get('/ai/traces', { limit, purpose })
+/* DLNA 投屏 */
+export const dlnaDevices = () => get('/dlna/devices')
+export const dlnaAddDevice = (ip, port = 1900) => post('/dlna/devices', { ip, port })
+export const dlnaCast = (id, usn) => post('/dlna/cast', { movie_id: id, usn })
+export const dlnaStop = (usn) => post('/dlna/stop', { usn })
 export const subtitleFileUrl = (id, subId) => `${API}/movies/${id}/subtitles/${subId}/file`
 /* AI 批量任务 */
 export const aiJobs = () => get('/ai/jobs')

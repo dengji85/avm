@@ -13,6 +13,7 @@ import subprocess
 import threading
 import time
 import json
+import re
 import sys
 import hashlib
 import tempfile
@@ -28,8 +29,8 @@ from fastapi.responses import (FileResponse, PlainTextResponse, RedirectResponse
                                StreamingResponse)
 
 from . import ai as ai_mod
-from . import (ai_jobs, dedupe, images, nfo as nfo_mod, plugins, providers, scanner,
-               scraper, scrape_diag, store, subtext, subtitles, translate)
+from . import (ai_extra, ai_jobs, asr, dedupe, dlna, images, nfo as nfo_mod, plugins, providers, scanner,
+               scraper, scrape_diag, store, subprobe, subtext, subtitles, translate, vtt)
 from .config import (COVER_DIR, DATA_DIR, IN_CONTAINER, avatar_dir, _deep_merge,
                      current_access_token, load_config, public_base_url, update_config)
 from .db import connect, db, query_all, query_one
@@ -1508,41 +1509,159 @@ def ai_status() -> Dict[str, Any]:
     }
 
 
-def _ai_plot_for_movie(movie_id: int) -> Dict[str, Any]:
-    """AI 剧情分析：字幕优先 → 元数据回退。单部同步接口与批量任务共用。"""
+@router.get("/ai/prompts")
+def ai_prompt_list() -> Dict[str, Any]:
+    """可审查的提示词清单：默认值 / 当前生效值 / 是否被自定义 / 变量说明。"""
+    from . import ai_prompts
+    return {"items": ai_prompts.list_prompts()}
+
+
+@router.put("/ai/prompts/{prompt_id}")
+def ai_prompt_save(prompt_id: str,
+                   payload: Dict[str, Any] = Body(default={})) -> Dict[str, Any]:
+    """保存自定义提示词；传空白等同于恢复默认。"""
+    from . import ai_prompts
+    try:
+        item = ai_prompts.save_prompt(prompt_id, str(payload.get("system") or ""))
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e.args[0] if e.args else "未知提示词"))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"ok": True, "item": item}
+
+
+@router.delete("/ai/prompts/{prompt_id}")
+def ai_prompt_reset(prompt_id: str) -> Dict[str, Any]:
+    """恢复默认提示词。"""
+    from . import ai_prompts
+    try:
+        item = ai_prompts.reset_prompt(prompt_id)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e.args[0] if e.args else "未知提示词"))
+    return {"ok": True, "item": item}
+
+
+@router.get("/ai/traces")
+def ai_trace_list(limit: int = 20, purpose: str = "") -> Dict[str, Any]:
+    """最近的 AI 调用轨迹：提示词、原始返回、耗时、是否命中缓存。"""
+    from . import ai_core
+    return {"items": ai_core.traces(limit=limit, purpose=purpose)}
+
+
+@router.get("/ai/asr/status")
+def ai_asr_status() -> Dict[str, Any]:
+    """语音对白提取能力：依赖是否安装、模型是否就位。"""
+    return asr.status()
+
+
+@router.get("/movies/{movie_id}/dialog")
+def movie_dialog(movie_id: int, preview: int = 0) -> Dict[str, Any]:
+    """对白提取状态与统计；preview>0 时附带前 N 字文本。"""
+    with db() as conn:
+        if not store.movie_detail(conn, movie_id):
+            raise HTTPException(status_code=404, detail="影片不存在")
+    return asr.summary(movie_id, preview=max(0, min(20000, int(preview or 0))))
+
+
+@router.post("/movies/{movie_id}/dialog")
+def extract_movie_dialog(movie_id: int,
+                         payload: Dict[str, Any] = Body(default={})) -> Dict[str, Any]:
+    """后台提取语音对白（只用于 AI 剧情，不产出外挂字幕）。"""
+    with db() as conn:
+        if not store.movie_detail(conn, movie_id):
+            raise HTTPException(status_code=404, detail="影片不存在")
+    video = asr.video_of(movie_id)
+    if not video or not os.path.isfile(video):
+        raise HTTPException(status_code=400,
+                            detail="没有可读取的视频文件（网络串流不支持语音提取）")
+    try:
+        job = asr.start(movie_id, video,
+                        max_seconds=int(payload.get("max_seconds") or 0),
+                        size=str(payload.get("model") or ""),
+                        language=str(payload.get("language") or ""),
+                        start_seconds=int(payload.get("start_seconds") or 0))
+    except RuntimeError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"ok": True, **job}
+
+
+@router.delete("/movies/{movie_id}/dialog")
+def delete_movie_dialog(movie_id: int) -> Dict[str, Any]:
+    asr.cancel(movie_id)
+    asr.clear(movie_id)
+    return {"ok": True}
+
+
+def _ai_plot_for_movie(movie_id: int, preview: bool = False) -> Dict[str, Any]:
+    """AI 剧情分析：字幕优先 → 元数据回退。
+
+    preview=True 时只返回结果、不写库，交给详情页先比对再决定是否采用。
+    单部同步接口与批量任务共用（批量任务始终写库）。
+    """
     cfg = load_config(refresh=True)
     if not ai_mod.is_available(cfg):
         raise ValueError("AI 未启用：请先在 设置 → AI 中配置接口与模型")
     with db() as conn:
         m = store.movie_detail(conn, movie_id)
-        if not m:
-            raise ValueError("影片不存在")
-        sub = subtext.collect(m.get("files") or [], m.get("subtitles") or [], cfg)
-        used = "meta"
-        if sub["text"]:
-            text = ai_mod.summarize_subtitles(sub["text"], m, cfg)
-            used = "subtitle"
+    if not m:
+        raise ValueError("影片不存在")
+    # 抽字幕会调用 ffmpeg，放到数据库连接之外，避免长时间占用
+    sub = subtext.collect(m.get("files") or [], m.get("subtitles") or [], cfg)
+    used = "meta"
+    if sub["text"]:
+        text = ai_mod.summarize_subtitles(sub["text"], m, cfg)
+        used = "subtitle"
+    else:
+        # 没有字幕时，用「语音对白提取」的结果（如果做过），比纯元数据信息量大得多
+        dlg = asr.dialog_text(movie_id)
+        if dlg:
+            text = ai_mod.summarize_dialog(dlg, m, cfg)
+            used = "dialog"
         else:
             text = ai_mod.generate_synopsis(m, cfg)
-        text = (text or "").strip()
-        if not text:
-            raise ValueError("AI 返回为空，请检查模型配置或稍后重试")
-        store.update_movie(conn, movie_id, {"plot": text})
-        conn.execute(
-            "UPDATE movies SET plot_source = ?, ai_plot_at = datetime('now','localtime') "
-            "WHERE id = ?",
-            ("ai-subtitle" if used == "subtitle" else "ai-meta", movie_id),
-        )
+    text = (text or "").strip()
+    if not text:
+        raise ValueError("AI 返回为空，请检查模型配置或稍后重试")
+    old_plot = (m.get("plot") or "").strip()
+    source = {"subtitle": "ai-subtitle", "dialog": "ai-dialog"}.get(used, "ai-meta")
+    if not preview:
+        with db() as conn:
+            store.update_movie(conn, movie_id, {"plot": text})
+            conn.execute(
+                "UPDATE movies SET plot_source = ?, ai_plot_at = datetime('now','localtime') "
+                "WHERE id = ?",
+                (source, movie_id),
+            )
+            conn.commit()
+    return {"ok": True, "plot": text, "old_plot": old_plot, "source": used,
+            "chars": sub["chars"], "track": sub["track"], "written": not preview}
+
+
+@router.post("/ai/plot/apply/{movie_id}")
+def ai_apply_plot(movie_id: int, payload: Dict[str, Any] = Body(default={})) -> Dict[str, Any]:
+    """采用 AI 预览结果：写入 plot 并标记来源，避免前端走人工编辑把来源改成 manual。"""
+    plot = str(payload.get("plot") or "").strip()
+    if not plot:
+        raise HTTPException(status_code=400, detail="简介内容为空")
+    if len(plot) > 8000:
+        raise HTTPException(status_code=400, detail="简介过长（上限 8000 字）")
+    source = "ai-subtitle" if str(payload.get("source") or "") == "subtitle" else "ai-meta"
+    with db() as conn:
+        if not store.movie_detail(conn, movie_id):
+            raise HTTPException(status_code=404, detail="影片不存在")
+        conn.execute("UPDATE movies SET plot = ?, plot_source = ?, "
+                     "ai_plot_at = datetime('now','localtime') WHERE id = ?",
+                     (plot, source, movie_id))
         conn.commit()
-    return {"ok": True, "plot": text, "source": used, "chars": sub["chars"],
-            "track": sub["track"]}
+    return {"ok": True, "plot": plot, "plot_source": source}
 
 
 @router.post("/ai/generate-synopsis/{movie_id}")
-def ai_generate_synopsis(movie_id: int) -> Dict[str, Any]:
-    """生成剧情简介并写回 movies.plot（优先字幕，失败回退元数据）。"""
+def ai_generate_synopsis(movie_id: int,
+                         payload: Dict[str, Any] = Body(default={})) -> Dict[str, Any]:
+    """生成剧情简介。默认写回 movies.plot；preview=true 时只预览不落库。"""
     try:
-        return _ai_plot_for_movie(movie_id)
+        return _ai_plot_for_movie(movie_id, preview=bool(payload.get("preview")))
     except ValueError as e:
         raise HTTPException(status_code=400 if "未启用" in str(e) or "不存在" in str(e) else 502,
                             detail=str(e))
@@ -1630,6 +1749,68 @@ def ai_translate_subtitle(movie_id: int, target: str = "zh-Hans",
     return r
 
 
+@router.post("/ai/ask/{movie_id}")
+def ai_ask_plot(movie_id: int, payload: Dict[str, Any] = Body(default={})) -> Dict[str, Any]:
+    """基于字幕回答剧情问题，返回答案与字幕时间戳依据。"""
+    question = str(payload.get("question") or "").strip()
+    if not question:
+        raise HTTPException(status_code=400, detail="请输入问题")
+    cfg = load_config(refresh=True)
+    if not ai_mod.is_available(cfg):
+        raise HTTPException(status_code=400, detail="AI 未启用：请先在 设置 → AI 中配置接口与模型")
+    with db() as conn:
+        mv = store.movie_detail(conn, movie_id)
+    if not mv:
+        raise HTTPException(status_code=404, detail="影片不存在")
+    # 抽字幕与调用模型都可能几十秒，放在数据库连接之外，避免长时间占用 SQLite 连接
+    cue_info = subtext.collect_cues(mv.get("files") or [], mv.get("subtitles") or [], cfg)
+    if not cue_info["cues"]:
+        raise HTTPException(status_code=400, detail="这部影片没有可用字幕，无法问答")
+    try:
+        ans = ai_extra.answer_about_plot(question, cue_info["cues"], mv, cfg=cfg)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    if ans.get("reason") == "no-match":
+        raise HTTPException(status_code=404, detail="字幕里没有找到与问题相关的内容")
+    with db() as conn:
+        conn.execute(
+            "INSERT INTO ai_qa(movie_id, question, answer, refs, source) VALUES(?,?,?,?,?)",
+            (movie_id, question, ans.get("answer") or "",
+             json.dumps(ans.get("refs") or [], ensure_ascii=False),
+             cue_info.get("source") or ""))
+        conn.commit()
+    return {"ok": True, **ans, "track": cue_info.get("track"),
+            "cue_count": cue_info.get("count")}
+
+
+@router.get("/ai/ask/{movie_id}")
+def ai_ask_history(movie_id: int, limit: int = 10) -> Dict[str, Any]:
+    with db() as conn:
+        rows = query_all(
+            conn,
+            "SELECT id, question, answer, refs, source, created_at FROM ai_qa "
+            "WHERE movie_id = ? ORDER BY id DESC LIMIT ?",
+            (movie_id, max(1, min(50, limit))))
+    for r in rows:
+        try:
+            r["refs"] = json.loads(r.get("refs") or "[]")
+        except ValueError:
+            r["refs"] = []
+    return {"items": rows}
+
+
+@router.get("/ai/similar/{movie_id}")
+def ai_similar(movie_id: int, limit: int = 5) -> Dict[str, Any]:
+    with db() as conn:
+        mv = store.movie_detail(conn, movie_id)
+        if not mv:
+            raise HTTPException(status_code=404, detail="影片不存在")
+        items = ai_extra.similar_movies(
+            mv, store.similar_candidates(conn, movie_id),
+            max(1, min(20, limit)))
+    return {"items": items}
+
+
 @router.get("/ai/glossary")
 def ai_glossary_list() -> Dict[str, Any]:
     return {"items": translate.list_glossary(), "targets": list(translate.TARGETS)}
@@ -1661,6 +1842,343 @@ def download_subtitle_file(movie_id: int, sub_id: int) -> FileResponse:
         raise HTTPException(status_code=403, detail="非法的字幕路径")
     return FileResponse(path, media_type="text/plain; charset=utf-8",
                         filename=os.path.basename(path))
+
+
+# ------------------------------------------------------------------ DLNA 投屏
+def _cast_base(request: Request) -> str:
+    """电视能访问到的地址：优先配置/环境变量，其次本次请求的 Host。"""
+    base = public_base_url()
+    if not base:
+        base = str(request.base_url).rstrip("/")
+    return base
+
+
+@router.get("/dlna/devices")
+def dlna_devices(timeout: float = 2.0) -> Dict[str, Any]:
+    """扫描局域网 DLNA 渲染器（组播）。容器内看不到组播时返回已缓存的设备。"""
+    try:
+        found = dlna.discover(max(0.5, min(5.0, timeout)))
+    except Exception as e:
+        found = []
+        dlna.log.warning("DLNA 发现失败：%s", e)
+    cached = dlna.list_cached()
+    merged = {d["usn"]: d for d in cached}
+    for d in found:
+        merged[d["usn"]] = d
+    return {"items": list(merged.values()), "multicast": bool(found)}
+
+
+@router.post("/dlna/devices")
+def dlna_add_device(payload: Dict[str, Any] = Body(default={})) -> Dict[str, Any]:
+    """按 IP 单播探测设备（容器 / 跨网段时组播不可用）。"""
+    ip = str(payload.get("ip") or "").strip()
+    port = int(payload.get("port") or 1900)
+    if not ip:
+        raise HTTPException(status_code=400, detail="请填写设备 IP")
+    try:
+        info = dlna.probe_ip(ip, port)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=502, detail="探测失败：%s" % e)
+    return info
+
+
+@router.post("/dlna/cast")
+def dlna_cast(payload: Dict[str, Any] = Body(default={}), request: Request = None) -> Dict[str, Any]:
+    """把某部影片推送到 DLNA 渲染器播放。"""
+    movie_id = int(payload.get("movie_id") or 0)
+    usn = str(payload.get("usn") or "").strip()
+    if not movie_id or not usn:
+        raise HTTPException(status_code=400, detail="缺少 movie_id / usn")
+    with db() as conn:
+        mv = store.movie_detail(conn, movie_id)
+        if not mv:
+            raise HTTPException(status_code=404, detail="影片不存在")
+        title = mv.get("title") or mv.get("code") or ""
+    link = dlna.make_token(movie_id, _cast_base(request))
+    try:
+        result = dlna.cast(usn, link["media_url"], title)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=502, detail="投屏失败：%s" % e)
+    result.update({"media_url": link["media_url"], "movie_id": movie_id})
+    return result
+
+
+@router.post("/dlna/stop")
+def dlna_stop(payload: Dict[str, Any] = Body(default={})) -> Dict[str, Any]:
+    usn = str(payload.get("usn") or "").strip()
+    if not usn:
+        raise HTTPException(status_code=400, detail="缺少 usn")
+    try:
+        return dlna.stop(usn)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=502, detail="停止失败：%s" % e)
+
+
+def _serve_local_range(path: str, media: str, request: Request) -> Response:
+    """本地文件 + Range：电视拖动进度条依赖 206，浏览器也能边下边播。"""
+    size = os.path.getsize(path)
+    rng = request.headers.get("range") or ""
+    m = re.match(r"bytes=(\d*)-(\d*)", rng.strip())
+    if m:
+        start_s, end_s = m.group(1), m.group(2)
+        start = int(start_s) if start_s else 0
+        end = int(end_s) if end_s else size - 1
+        end = min(end, size - 1)
+        if start > end or start >= size:
+            return Response(status_code=416, headers={"Content-Range": "bytes */%d" % size})
+        length = end - start + 1
+
+        def chunks():
+            with open(path, "rb") as f:
+                f.seek(start)
+                left = length
+                while left > 0:
+                    buf = f.read(min(64 * 1024, left))
+                    if not buf:
+                        break
+                    left -= len(buf)
+                    yield buf
+
+        return StreamingResponse(chunks(), status_code=206, media_type=media, headers={
+            "Content-Range": "bytes %d-%d/%d" % (start, end, size),
+            "Content-Length": str(length),
+            "Accept-Ranges": "bytes",
+        })
+    return FileResponse(path, media_type=media, headers={"Accept-Ranges": "bytes"})
+
+
+@router.get("/cast/media/{token}")
+def cast_media(token: str, request: Request):
+    """DLNA 投屏的媒体出口：短时令牌 → 影片，支持 Range。"""
+    movie_id = dlna.token_movie(token)
+    if not movie_id:
+        raise HTTPException(status_code=403, detail="投屏链接已失效，请在详情页重新投屏")
+    with db() as conn:
+        src = store.movie_play_source(conn, movie_id)
+    if not src:
+        raise HTTPException(status_code=404, detail="影片不存在或未入库")
+
+    if src["strm_url"]:
+        return _proxy_upstream(src["strm_url"], request)
+
+    path = src["path"]
+    if not os.path.isfile(path):
+        raise HTTPException(status_code=404, detail="视频文件不存在")
+    ext = os.path.splitext(path)[1].lower().lstrip(".")
+    media = {"mp4": "video/mp4", "webm": "video/webm", "mkv": "video/x-matroska",
+             "mov": "video/quicktime", "m4v": "video/mp4", "ts": "video/mp2t",
+             "avi": "video/x-msvideo", "flv": "video/x-flv"}.get(ext, "application/octet-stream")
+    return _serve_local_range(path, media, request)
+
+
+# ------------------------------------------------------------------ 播放器字幕轨
+def _vtt_cache_dir(movie_id: int) -> str:
+    d = os.path.join(str(DATA_DIR), "subs", str(movie_id), "vtt")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def _serve_vtt(cache_path: str, build) -> FileResponse:
+    """按需生成 VTT 并返回；空结果说明这条轨没有可用文本。"""
+    if not (os.path.isfile(cache_path) and os.path.getsize(cache_path) > 0):
+        text = build()
+        if not text:
+            raise HTTPException(status_code=404, detail="字幕转换结果为空")
+        # 并发请求各写各的临时文件再原子替换，避免共用 xxx.tmp 时互相截断
+        fd, tmp = tempfile.mkstemp(dir=os.path.dirname(cache_path), suffix=".vtt.tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(text)
+            os.replace(tmp, cache_path)
+        except Exception:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+            raise
+    return FileResponse(cache_path, media_type="text/vtt; charset=utf-8",
+                        headers={"Cache-Control": "max-age=3600"})
+
+
+@router.post("/movies/{movie_id}/subtitles/scan")
+def scan_movie_sidecars(movie_id: int) -> Dict[str, Any]:
+    """扫描该片同目录的外挂字幕并登记（幂等）。
+
+    典型场景：用 VSE / Subtitle Edit 把硬字幕 OCR 成 SRT，放到视频旁边，
+    点一下这里就能被播放器与 AI 剧情/问答用上，不用再手动上传对齐。
+    """
+    with db() as conn:
+        mv = store.movie_detail(conn, movie_id)
+        if not mv:
+            raise HTTPException(status_code=404, detail="影片不存在")
+        paths = [f["path"] for f in (mv.get("files") or [])
+                 if not f.get("missing") and not (f.get("strm_url") or "")]
+        added = subtitles.register_sidecars(conn, movie_id, paths, mv.get("code") or "")
+    return {"ok": True, "added": added,
+            "total": len((mv.get("subtitles") or [])) + added}
+
+
+@router.get("/movies/{movie_id}/subtitle-tracks")
+def movie_subtitle_tracks(movie_id: int) -> Dict[str, Any]:
+    """播放器可用的字幕轨：内嵌文本轨 + 已登记字幕（均转 VTT）。"""
+    with db() as conn:
+        mv = store.movie_detail(conn, movie_id)
+        if not mv:
+            raise HTTPException(status_code=404, detail="影片不存在")
+        tracks: List[Dict[str, Any]] = []
+        # 内嵌轨先按「中文优先、完整优先」排序，再按语言去重：
+        # 同一部片子常带多条同语种轨（正片 + forced + 章节），全塞进菜单只会让人选错。
+        emb: List[Dict[str, Any]] = []
+        for f in mv.get("files") or []:
+            if not f.get("sub_tracks"):
+                continue
+            try:
+                info = json.loads(f["sub_tracks"] or "{}")
+            except ValueError:
+                continue
+            for t in (info.get("tracks") or []):
+                if t.get("kind") != "text":
+                    continue
+                si = int(t.get("si") or 0)
+                lang = t.get("lang") or ""
+                title = (t.get("title") or "").strip()
+                emb.append({
+                    "prio": subtext._track_priority(t),
+                    "key": (lang or "").lower().strip() or ("si:%s:%d" % (f["id"], si)),
+                    "track": {
+                        "kind": "embedded",
+                        "id": "%d:%d" % (f["id"], si),
+                        "label": "内嵌 · %s" % (title or lang or ("轨道 %d" % (si + 1))),
+                        "lang": lang,
+                        "source": "embedded",
+                        "url": "/api/movies/%d/subtitle-tracks/emb/%d/%d.vtt" % (movie_id, f["id"], si),
+                    },
+                })
+        emb.sort(key=lambda x: x["prio"])
+        seen_emb: set = set()
+        for e in emb:
+            if e["key"] in seen_emb:
+                continue
+            seen_emb.add(e["key"])
+            tracks.append(e["track"])
+
+        # 文件字幕（外挂 / AI 译文）：同语言同来源只留一条，AI 译文与外挂原文并存。
+        # 语言未知时改用文件名做键，避免把内容不同的两条字幕合并成一条。
+        seen_file: set = set()
+        for s in mv.get("subtitles") or []:
+            name = os.path.splitext(s.get("filename") or "")[0]
+            lang_raw = (s.get("lang") or "").strip()
+            key_lang = lang_raw.lower() if lang_raw and lang_raw != "未知" else (name.lower() or str(s.get("id")))
+            # 0 字节 / 已丢失的字幕文件不进播放器菜单（登记记录仍保留，可在详情页删除）
+            try:
+                if os.path.getsize(s.get("path") or "") <= 0:
+                    continue
+            except OSError:
+                continue
+            key = (key_lang, s.get("source") or "")
+            if key in seen_file:
+                continue
+            seen_file.add(key)
+            prefix = "AI 译文 · " if s.get("source") == "ai-translate" else ""
+            tracks.append({
+                "kind": "file",
+                "id": str(s["id"]),
+                "label": prefix + (s.get("lang") or name or "字幕"),
+                "lang": s.get("lang") or "",
+                "source": s.get("source") or "",
+                "url": "/api/movies/%d/subtitles/%d/vtt" % (movie_id, s["id"]),
+            })
+        out = {"tracks": tracks,
+               "skip_intro": float(mv.get("skip_intro") or 0),
+               "skip_outro": float(mv.get("skip_outro") or 0)}
+    return out
+
+
+@router.get("/movies/{movie_id}/subtitle-tracks/emb/{file_id}/{si}.vtt")
+def embedded_subtitle_vtt(movie_id: int, file_id: int, si: int):
+    """抽取内嵌文本字幕轨并转成 VTT（带缓存，重复播放不重新抽）。"""
+    with db() as conn:
+        row = conn.execute(
+            "SELECT path, sub_tracks FROM movie_files WHERE id=? AND movie_id=?",
+            (int(file_id), int(movie_id))).fetchone()
+    if not row or not row["sub_tracks"]:
+        raise HTTPException(status_code=404, detail="字幕轨不存在")
+    try:
+        info = json.loads(row["sub_tracks"] or "{}")
+    except ValueError:
+        info = {}
+    # 注意：si 可能为 0，不能用 `t.get("si") or -1`（0 会被当成缺省值）
+    track = next((t for t in (info.get("tracks") or [])
+                  if int(t.get("si") or 0) == int(si) and t.get("kind") == "text"), None)
+    if not track:
+        raise HTTPException(status_code=404, detail="不是文本字幕轨")
+    cfg = load_config(refresh=True)
+    lang = track.get("lang") or ""
+    cache = os.path.join(_vtt_cache_dir(movie_id),
+                         "emb-%d-%d%s.vtt" % (file_id, si, ("-" + lang) if lang else ""))
+
+    def build() -> str:
+        raw = subprobe.extract_track_text(row["path"], int(si), cfg)
+        return vtt.srt_to_vtt(raw) if raw else ""
+
+    return _serve_vtt(cache, build)
+
+
+@router.get("/movies/{movie_id}/subtitles/{sub_id}/vtt")
+def file_subtitle_vtt(movie_id: int, sub_id: int):
+    """已登记字幕（外挂 / AI 译文）转 VTT，供 `<track>` 使用。"""
+    with db() as conn:
+        row = conn.execute(
+            "SELECT file_path FROM movie_subtitles WHERE id=? AND movie_id=?",
+            (int(sub_id), int(movie_id))).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="字幕不存在")
+    path = row["file_path"]
+    # 缓存名带上 mtime：字幕文件被替换/重新翻译后不会继续返回旧 VTT
+    try:
+        mtime = int(os.path.getmtime(path)) if os.path.isfile(path) else 0
+    except OSError:
+        mtime = 0
+    cache = os.path.join(_vtt_cache_dir(movie_id), "sub-%d-%d.vtt" % (sub_id, mtime))
+    return _serve_vtt(cache, lambda: vtt.file_to_vtt(path))
+
+
+@router.put("/movies/{movie_id}/skip")
+def set_skip_points(movie_id: int, payload: Dict[str, Any] = Body(default={})) -> Dict[str, Any]:
+    """设置片头 / 片尾跳过点（秒）。
+
+    只更新请求里出现的字段：详情页分别标记片头、片尾时不会把另一个清掉。
+    """
+    def _sec(key: str) -> Optional[float]:
+        if key not in payload:
+            return None
+        try:
+            return max(0.0, float(payload.get(key) or 0))
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="参数必须是秒数")
+
+    intro, outro = _sec("intro_end"), _sec("outro_start")
+    if intro is None and outro is None:
+        raise HTTPException(status_code=400, detail="缺少 intro_end / outro_start")
+    with db() as conn:
+        mv = store.movie_detail(conn, movie_id)
+        if not mv:
+            raise HTTPException(status_code=404, detail="影片不存在")
+        cur_intro = float(mv.get("skip_intro") or 0)
+        cur_outro = float(mv.get("skip_outro") or 0)
+        conn.execute("UPDATE movies SET skip_intro = ?, skip_outro = ? WHERE id = ?",
+                     (cur_intro if intro is None else intro,
+                      cur_outro if outro is None else outro, movie_id))
+        conn.commit()
+    return {"ok": True,
+            "skip_intro": cur_intro if intro is None else intro,
+            "skip_outro": cur_outro if outro is None else outro}
 
 
 @router.delete("/movies/{movie_id}/subtitles/{sub_id}")

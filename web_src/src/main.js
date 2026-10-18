@@ -12,3 +12,10 @@ const app = createApp(App)
 app.config.globalProperties.$t = t
 app.config.globalProperties.$setLang = setLang
 app.mount('#app')
+
+/* PWA：注册 Service Worker（仅 http/https 下生效；file:// 或调试时跳过） */
+if ('serviceWorker' in navigator && /^https?:$/.test(location.protocol)) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('./sw.js').catch(() => {})
+  })
+}

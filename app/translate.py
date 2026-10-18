@@ -20,7 +20,7 @@ import sqlite3
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
-from . import subtext
+from . import ai_prompts, subtext
 from .ai_core import AIConfig, AiError, chat, register_prompt
 from .config import DATA_DIR
 from .db import connect
@@ -222,12 +222,7 @@ def translate_cues(cues: List[Cue], cfg: Dict[str, Any], target: str) -> Tuple[L
     out: List[str] = [""] * len(cues)
     glossary = _glossary_text()
     sent = 0
-    sys_msg = (
-        "你是专业字幕翻译。把用户给出的字幕 JSON 数组逐条译成%s，"
-        "口语自然、贴合语境；术语表里的词必须严格照译；"
-        "不要合并、拆分或增删条目。只输出 JSON 数组，如 "
-        "[{\"i\":0,\"t\":\"译文\"}]，不要解释。" % target
-    )
+    sys_msg = ai_prompts.render("subtitle.translate", cfg, target=target)
 
     for batch in _batches(cues):
         payload = [{"i": i, "t": cues[i].text} for i in batch]

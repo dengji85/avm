@@ -25,6 +25,8 @@ FROM python:3.11-slim-bookworm
 
 # 是否内置 Chromium（av-wiki 数据源走 CDP 需要；纯精简镜像可设 0）
 ARG INSTALL_CHROMIUM=1
+# 是否内置语音对白提取（+约 170MB 依赖；模型不随镜像，需挂载到 /data/models）
+ARG WITH_ASR=0
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
@@ -49,8 +51,9 @@ RUN set -eux; \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
-COPY requirements.txt ./
-RUN pip install --no-cache-dir -r requirements.txt
+COPY requirements.txt requirements-asr.txt ./
+RUN pip install --no-cache-dir -r requirements.txt && \
+    if [ "$WITH_ASR" = "1" ]; then pip install --no-cache-dir -r requirements-asr.txt; fi
 
 COPY app ./app
 COPY run.py ./

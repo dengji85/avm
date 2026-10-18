@@ -273,6 +273,11 @@ def run_scan(progress_cb=None, incremental=True, workers=None, hash_files=False,
     SCAN.update(phase="local_nfo", current="正在导入本地 NFO/JSON…")
     local_nfo_hit = import_local_nfo_after_scan(progress_cb)
 
+    # 4.6) 外挂字幕登记：同目录的 .srt/.ass/... 直接入库，
+    #      AI 剧情/问答、播放器字幕菜单都不再需要手动上传对齐。
+    SCAN.update(phase="subtitles", current="正在登记外挂字幕…")
+    sidecar_subs = register_sidecar_subtitles_after_scan(progress_cb)
+
     # 5) 封面嗅探（单点执行，避免多线程竞争同一 movie 的封面）
     batch_local_covers(progress_cb)
 
@@ -285,13 +290,13 @@ def run_scan(progress_cb=None, incremental=True, workers=None, hash_files=False,
         cleaned = auto_cleanup_after_scan(alive, roots, progress_cb)
 
     SCAN.finish(
-        "扫描完成：新增 %d / 更新 %d / 跳过 %d / 本地元数据 %d / 缺失 %d / 清理 %d"
-        % (added, updated, skipped, local_nfo_hit, len(removed),
+        "扫描完成：新增 %d / 更新 %d / 跳过 %d / 本地元数据 %d / 外挂字幕 %d / 缺失 %d / 清理 %d"
+        % (added, updated, skipped, local_nfo_hit, sidecar_subs, len(removed),
            cleaned["files"] + cleaned["movies"] + sum(cleaned["orphans"].values()))
     )
     return {"total": enumerated, "added": added, "updated": updated,
             "unchanged": unchanged, "missing": len(removed), "errors": errors,
-            "local_nfo": local_nfo_hit, "cleaned": cleaned}
+            "local_nfo": local_nfo_hit, "sidecar_subs": sidecar_subs, "cleaned": cleaned}
 
 
 def auto_cleanup_after_scan(alive_paths: set, roots: list, progress_cb=None):
@@ -402,6 +407,50 @@ def import_local_nfo_after_scan(progress_cb=None):
     finally:
         conn.close()
     return hit
+
+
+def register_sidecar_subtitles_after_scan(progress_cb=None) -> int:
+    """扫描后登记同目录的外挂字幕（.srt/.ass/...）。
+
+    只做「登记」，不动磁盘：用户把字幕放到视频旁边，扫描一次就能在详情页看到、
+    播放器能选中、AI 剧情/问答/翻译也有输入。重复扫描是幂等的。
+    返回新增登记条数。
+    """
+    from . import subtitles
+    if progress_cb is None:
+        progress_cb = SCAN.update
+    conn = connect()
+    try:
+        rows = conn.execute(
+            "SELECT f.movie_id, f.path, m.code FROM movie_files f "
+            "JOIN movies m ON m.id = f.movie_id "
+            "WHERE COALESCE(f.missing, 0) = 0 AND COALESCE(f.strm_url, '') = ''"
+        ).fetchall()
+    finally:
+        conn.close()
+    if not rows:
+        return 0
+
+    by_movie: dict = {}
+    for r in rows:
+        item = by_movie.setdefault(r["movie_id"], {"code": r["code"] or "", "paths": []})
+        item["paths"].append(r["path"])
+
+    total = len(by_movie)
+    added = 0
+    conn = connect()
+    try:
+        for i, (mid, info) in enumerate(by_movie.items()):
+            try:
+                added += subtitles.register_sidecars(conn, mid, info["paths"], info["code"])
+            except Exception:
+                pass
+            if (i + 1) % 20 == 0 or i == total - 1:
+                progress_cb(sidecar_done=i + 1, sidecar_total=total)
+        conn.commit()
+    finally:
+        conn.close()
+    return added
 
 
 def remove_missing():

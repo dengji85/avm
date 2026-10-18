@@ -17,15 +17,16 @@
 """
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import logging
 import random
 import threading
 import time
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Deque, Dict, List, Optional
 
 import requests
 
@@ -147,6 +148,48 @@ def _cache_put(key: str, value: str) -> None:
             _CACHE.popitem(last=False)
 
 
+# ------------------------------------------------------------------ 调用轨迹
+# 最近若干次调用的「提示词 / 原始返回 / 耗时」：详情页的调用详情就是读这里。
+# 只在内存里，重启即清空；不落盘是为了避免把字幕正文长期留在磁盘上。
+_TRACE_MAX = 80
+_TRACES: Deque[Dict[str, Any]] = deque(maxlen=_TRACE_MAX)
+_TRACE_LOCK = threading.Lock()
+_TRACE_SEQ = 0
+
+
+def _record_trace(purpose: str, cfg: AIConfig, messages: List[Dict[str, str]], *,
+                  reply: str = "", error: str = "", ms: float = 0,
+                  cached: bool = False) -> None:
+    global _TRACE_SEQ
+    with _TRACE_LOCK:
+        _TRACE_SEQ += 1
+        _TRACES.appendleft({
+            "id": _TRACE_SEQ,
+            "at": int(time.time()),
+            "purpose": purpose or "chat",
+            "model": cfg.model,
+            "base_url": cfg.base_url,
+            "messages": [{"role": str(m.get("role") or ""),
+                          "content": str(m.get("content") or "")} for m in messages],
+            "reply": reply or "",
+            "error": error or "",
+            "ms": int(ms),
+            "cached": bool(cached),
+            "prompt_chars": sum(len(str(m.get("content") or "")) for m in messages),
+            "reply_chars": len(reply or ""),
+        })
+
+
+def traces(limit: int = 20, purpose: str = "") -> List[Dict[str, Any]]:
+    """最近的调用轨迹（新 → 旧）。purpose 非空时只取该用途。"""
+    n = max(1, min(100, int(limit or 20)))
+    with _TRACE_LOCK:
+        items = [copy.deepcopy(x) for x in _TRACES]
+    if purpose:
+        items = [x for x in items if x.get("purpose") == purpose]
+    return items[:n]
+
+
 # ------------------------------------------------------------------ 统一入口
 def chat(cfg: AIConfig, messages: List[Dict[str, str]], *,
          max_tokens: int = 800, purpose: str = "",
@@ -161,12 +204,15 @@ def chat(cfg: AIConfig, messages: List[Dict[str, str]], *,
         raise AiError("AI 未启用：请在 设置 → AI 中开启并填写接口与模型")
 
     temp = cfg.temperature if temperature is None else float(temperature)
+    t0 = time.time()
     key = _cache_key(cfg, messages, max_tokens, temp) if use_cache else ""
     if key:
         hit = _cache_get(key)
         if hit is not None:
             with _STATS_LOCK:
                 _STATS["cache_hits"] += 1
+            # 命中缓存也留一条轨迹：详情页能看到「这次没花钱，用的是缓存结果」
+            _record_trace(purpose, cfg, messages, reply=hit, cached=True)
             return hit
 
     headers = {"Content-Type": "application/json"}
@@ -182,7 +228,10 @@ def chat(cfg: AIConfig, messages: List[Dict[str, str]], *,
         "max_tokens": max_tokens,
     }
 
-    url = cfg.base_url + "/chat/completions"
+    # 兼容「填到 /v1」和「把完整端点也贴进来」两种写法：
+    # 后者再拼 /chat/completions 会变成 .../chat/completions/chat/completions → 404
+    base = (cfg.base_url or "").rstrip("/")
+    url = base if base.endswith("/chat/completions") else base + "/chat/completions"
     last = ""
     for attempt in range(1 + max(0, cfg.max_retries)):
         try:
@@ -191,7 +240,13 @@ def chat(cfg: AIConfig, messages: List[Dict[str, str]], *,
             if resp.status_code in (429, 500, 502, 503, 504) and attempt < cfg.max_retries:
                 raise AiError("HTTP %d" % resp.status_code)
             if resp.status_code >= 400:
-                raise AiError("HTTP %d：%s" % (resp.status_code, resp.text[:200]))
+                hint = {
+                    400: "（常见原因：模型名不存在、余额不足或参数不被支持）",
+                    401: "（API Key 无效或已过期）",
+                    403: "（Key 没有该模型的权限）",
+                    404: "（接口地址一般填到 /v1 为止；也可能是模型名不存在）",
+                }.get(resp.status_code, "")
+                raise AiError("HTTP %d：%s%s" % (resp.status_code, resp.text[:200], hint))
             data = resp.json()
             text = (data["choices"][0]["message"]["content"] or "")
             text = str(text).strip()
@@ -204,6 +259,8 @@ def chat(cfg: AIConfig, messages: List[Dict[str, str]], *,
                 _STATS["last_call_at"] = int(time.time())
             if key and text:
                 _cache_put(key, text)
+            _record_trace(purpose, cfg, messages, reply=text,
+                          ms=(time.time() - t0) * 1000)
             return text
         except AiError as e:
             last = str(e)
@@ -220,6 +277,8 @@ def chat(cfg: AIConfig, messages: List[Dict[str, str]], *,
         _STATS["failures"] += 1
         _STATS["last_error"] = last[:200]
     log.warning("AI 调用失败（%s）：%s", purpose or "chat", last)
+    _record_trace(purpose, cfg, messages, error=last,
+                  ms=(time.time() - t0) * 1000)
     raise AiError("AI 调用失败：%s" % (last or "未知错误"))
 
 

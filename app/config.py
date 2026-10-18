@@ -321,7 +321,23 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         # 单次请求读超时（秒）与失败重试次数；超时/重试只影响体验，不影响正确性
         "timeout": 60,
         "max_retries": 2,
+        # 用户自定义的 system 提示词：{prompt_id: text}，缺省用内置默认值
+        "prompts": {},
         },
+    # 语音对白提取（可选组件，需自行安装 faster-whisper 与模型）
+    "asr": {
+        # 模型档位：small（快）/ medium（准但慢约 3 倍）
+        "model": "small",
+        # 语言：automatic 检测在短音频/环境音上很容易跑偏（实测把日语片判成挪威语），
+        # 所以默认固定 ja；英文/中文片请自行改成 en / zh
+        "language": "ja",
+        # 依赖目录（pip --target 的安装位置）。留空则用系统 Python 环境。
+        # 例：D:\program my\avm-asr\libs
+        "libs_dir": "",
+        # 模型根目录，下面放 faster-whisper-small / faster-whisper-medium。
+        # 留空则用 data/models。例：D:\program my\avm-asr\models
+        "model_dir": "",
+    },
     # 隐私保护（桌面 / 大屏场景）：离开电脑时自动遮挡，避免"忘记关"的尴尬
     "privacy": {
         # 空闲自动锁定（分钟）：无操作达到该时长后遮挡全部内容并暂停播放；0 = 关闭。
