@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-theme="dark">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
@@ -10,6 +10,8 @@
     <link rel="icon" href="./favicon.ico" sizes="any" />
     <link rel="apple-touch-icon" href="./icons/apple-touch-icon.png" />
     <meta name="theme-color" content="#0b0d12" />
+    <!-- 默认暗色：首屏就带 data-theme，新用户 / 未设置过偏好的用户始终从暗色开始；
+         已手动选浅色的用户由 state.js 在挂载时切回浅色。 -->
   </head>
   <body>
     <div id="app"></div>

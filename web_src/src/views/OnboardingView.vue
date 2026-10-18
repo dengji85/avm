@@ -199,14 +199,21 @@ async function copyCmd() {
           </div>
         </div>
 
-        <ul v-if="paths.length" class="ob-path-list">
-          <li v-for="(p, i) in paths" :key="i">
-            <span class="pi">📁</span>
-            <span class="pp ellipsis" :title="p">{{ p }}</span>
-            <button class="btn tiny ghost" @click="removePath(i)">{{ t('settings.remove') }}</button>
-          </li>
-        </ul>
-        <p v-else class="muted">{{ env.inContainer ? t('onboarding.containerNoDir') : t('onboarding.noDirYet') }}</p>
+        <!-- 已添加的目录：始终显示（含数量），避免加完看不到结果 -->
+        <div class="ob-added">
+          <div class="ob-added-head">
+            <span class="ob-added-title">{{ t('onboarding.addedDirs', { n: paths.length }) }}</span>
+            <span v-if="paths.length" class="ob-added-hint">{{ t('onboarding.addedDirsHint') }}</span>
+          </div>
+          <ul v-if="paths.length" class="ob-path-list">
+            <li v-for="(p, i) in paths" :key="i">
+              <span class="pi">📁</span>
+              <span class="pp ellipsis" :title="p">{{ p }}</span>
+              <button class="btn tiny ghost" @click="removePath(i)">{{ t('settings.remove') }}</button>
+            </li>
+          </ul>
+          <p v-else class="ob-added-empty">{{ env.inContainer ? t('onboarding.containerNoDir') : t('onboarding.noDirYet') }}</p>
+        </div>
 
         <div class="hstack">
           <input
@@ -302,9 +309,12 @@ async function copyCmd() {
           <div
             v-for="d in browser.dirs"
             :key="d.path"
-            class="ob-dir"
+            :class="['ob-dir', paths.includes(d.path) ? 'added' : '']"
             @click="browse(d.path)"
-          >📁 {{ d.name }}</div>
+          >
+            <span class="ellipsis">📁 {{ d.name }}</span>
+            <span v-if="paths.includes(d.path)" class="ob-dir-tag">{{ t('onboarding.alreadyAdded') }}</span>
+          </div>
         </div>
         <div class="ob-browse-foot">
           <button class="btn" @click="pickDir" :disabled="!browser.path">{{ t('common.select') }}</button>
@@ -319,9 +329,12 @@ async function copyCmd() {
    旧变量名，它们已在 tokens.css 里被 --c-* 取代、不再有定义，于是全部
    fallback 到深色兜底色。浅色主题下表现为「深色卡片 + 继承来的深色文字」，
    已添加的路径完全看不清。现统一改用现行 design token。 */
+/* 引导页跟随应用主题（默认暗色，见 index.html 的 data-theme 与 state.js） */
 .ob-mask {
   position: fixed; inset: 0; z-index: 1000;
   background: var(--c-overlay);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
   display: flex; align-items: center; justify-content: center;
   padding: 16px;
 }
@@ -351,8 +364,23 @@ async function copyCmd() {
 .ob-tip { font-size: var(--fs-md); color: var(--c-text-2); margin: 0 0 10px; }
 .ob-tip-warn { color: var(--c-warn, #c08a2e); }
 .ob-tip-muted { color: var(--c-text-2); font-size: var(--fs-sm); }
-.ob-path-list { list-style: none; margin: 0 0 10px; padding: 0; }
-.ob-path-list li { display: flex; align-items: center; gap: var(--sp-2); padding: 6px 0; border-bottom: 1px dashed var(--c-line); }
+/* 已添加目录：标题 + 数量 + 列条（多了可滚动） */
+.ob-added { margin: 4px 0 10px; }
+.ob-added-head { display: flex; align-items: baseline; gap: 8px; margin-bottom: 4px; }
+.ob-added-title { font-size: var(--fs-md); font-weight: 600; color: var(--c-text); }
+.ob-added-hint { font-size: var(--fs-sm); color: var(--c-text-2); }
+.ob-added-empty { margin: 0; padding: 10px 0; font-size: var(--fs-sm); color: var(--c-text-2); }
+.ob-path-list {
+  list-style: none; margin: 0; padding: 0;
+  max-height: 176px; overflow-y: auto;
+  border: 1px solid var(--c-line); border-radius: var(--r-sm);
+  background: var(--c-surface-2);
+}
+.ob-path-list li {
+  display: flex; align-items: center; gap: var(--sp-2);
+  padding: 8px 10px; border-bottom: 1px dashed var(--c-line);
+}
+.ob-path-list li:last-child { border-bottom: 0; }
 /* 路径文字显式定色：此前未设 color，浅色主题下会继承到深色正文色而看不见 */
 .ob-path-list .pp { flex: 1; min-width: 0; color: var(--c-text); font-size: var(--fs-md); }
 .ob-foot { display: flex; align-items: center; gap: 10px; margin-top: 18px; flex-wrap: wrap; }
@@ -415,5 +443,12 @@ async function copyCmd() {
 .ob-browse-body { max-height: 320px; overflow: auto; padding: 6px 0; }
 .ob-dir { display: flex; align-items: center; gap: var(--sp-2); padding: 9px 14px; cursor: pointer; color: var(--c-text); }
 .ob-dir:hover { background: var(--c-surface-3); }
+.ob-dir.added { opacity: .72; }
+.ob-dir-tag {
+  margin-left: auto; flex: 0 0 auto;
+  padding: 1px 6px; border-radius: 999px;
+  font-size: 11px; color: var(--c-primary);
+  background: var(--c-primary-soft);
+}
 .ob-browse-foot { display: flex; justify-content: flex-end; gap: var(--sp-2); padding: 10px 12px; border-top: 1px solid var(--c-line); }
 </style>
