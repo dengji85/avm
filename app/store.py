@@ -13,7 +13,7 @@ import unicodedata
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
-from . import subtitles
+from . import subprobe, subtitles
 from .db import query_all, query_one, scalar
 
 _TAXONOMY = {"actresses", "genres", "studios", "series", "tags"}
@@ -42,6 +42,8 @@ SORTS = {
 
 FLAG_CLAUSES = {
     "subtitle": "m.subtitle = 1",
+    # 真实内嵌中文字幕（区别于 JavBus 标注的 subtitle）
+    "embedzh": "m.embed_sub_zh = 1",
     "uncensored": "m.uncensored = 1",
     "leak": "m.leak = 1",
     "hd4k": "m.hd4k = 1",
@@ -167,10 +169,13 @@ def _find_moved_file(conn: sqlite3.Connection, movie_id: int, parsed: Dict[str, 
 
 def upsert_scanned_file(conn: sqlite3.Connection, parsed: Dict[str, Any],
                         path: str, size: int, mtime: float, quick_hash: int = 0,
-                        strm_url: str = "") -> str:
+                        strm_url: str = "", sub_tracks: str = "",
+                        sub_probe_at: str = "") -> str:
     """把一个扫描到的视频文件写入库，返回 'added' / 'updated' / 'unchanged'。
 
     ``strm_url`` 仅对 ``.strm`` 有值：文件里那一行网络地址，播放时据此直连 / 代理。
+    ``sub_tracks`` / ``sub_probe_at`` 是内嵌字幕探测结果；为空表示本次没探测，
+    保留库里的旧值（避免不探测的调用把已有结果清空）。
     """
     movie = query_one(conn, "SELECT * FROM movies WHERE key = ?", (parsed["key"],))
     if movie is None:
@@ -211,32 +216,41 @@ def upsert_scanned_file(conn: sqlite3.Connection, parsed: Dict[str, Any],
             conn.execute(
                 """UPDATE movie_files SET path = ?, filename = ?, ext = ?, part = ?,
                        size = ?, mtime = ?, missing = 0, missing_since = '', quick_hash = ?,
-                       strm_url = ?
+                       strm_url = ?, sub_tracks = ?, sub_probe_at = ?
                    WHERE id = ?""",
                 (path, parsed["filename"], parsed["ext"], parsed["part"],
-                 size, mtime, quick_hash, strm_url, moved["id"]),
+                 size, mtime, quick_hash, strm_url, sub_tracks, sub_probe_at,
+                 moved["id"]),
             )
             result = "updated"
         else:
             conn.execute(
                 """INSERT INTO movie_files(movie_id, path, filename, ext, size, mtime, part,
-                                           missing, quick_hash, strm_url)
-                   VALUES(?,?,?,?,?,?,?,0,?,?)""",
+                                           missing, quick_hash, strm_url, sub_tracks,
+                                           sub_probe_at)
+                   VALUES(?,?,?,?,?,?,?,0,?,?,?,?)""",
                 (movie_id, path, parsed["filename"], parsed["ext"], size, mtime,
-                 parsed["part"], quick_hash, strm_url),
+                 parsed["part"], quick_hash, strm_url, sub_tracks, sub_probe_at),
             )
             result = "added"
-    elif abs(float(existing["size"] or 0) - size) > 0.5 or abs(float(existing["mtime"] or 0) - mtime) > 1 \
-            or existing["missing"] or int(existing.get("quick_hash") or 0) != quick_hash \
-            or (existing.get("strm_url") or "") != (strm_url or ""):
-        conn.execute(
-            "UPDATE movie_files SET size = ?, mtime = ?, missing = 0, missing_since = '', "
-            "movie_id = ?, quick_hash = ?, strm_url = ? WHERE id = ?",
-            (size, mtime, movie_id, quick_hash, strm_url, existing["id"]),
-        )
-        result = "updated"
     else:
-        result = "unchanged"
+        tracks_val = sub_tracks or (existing.get("sub_tracks") or "")
+        probe_val = sub_probe_at or (existing.get("sub_probe_at") or "")
+        if abs(float(existing["size"] or 0) - size) > 0.5 \
+                or abs(float(existing["mtime"] or 0) - mtime) > 1 \
+                or existing["missing"] or int(existing.get("quick_hash") or 0) != quick_hash \
+                or (existing.get("strm_url") or "") != (strm_url or "") \
+                or (sub_probe_at and sub_probe_at != (existing.get("sub_probe_at") or "")):
+            conn.execute(
+                "UPDATE movie_files SET size = ?, mtime = ?, missing = 0, missing_since = '', "
+                "movie_id = ?, quick_hash = ?, strm_url = ?, sub_tracks = ?, sub_probe_at = ? "
+                "WHERE id = ?",
+                (size, mtime, movie_id, quick_hash, strm_url, tracks_val, probe_val,
+                 existing["id"]),
+            )
+            result = "updated"
+        else:
+            result = "unchanged"
 
     refresh_aggregate(conn, movie_id)
     return result
@@ -247,9 +261,29 @@ def refresh_aggregate(conn: sqlite3.Connection, movie_id: int) -> None:
         "SELECT COALESCE(SUM(size),0), COUNT(*) FROM movie_files WHERE movie_id = ? AND missing = 0",
         (movie_id,),
     ).fetchone()
+    # 内嵌字幕：多文件取最优（文本中字 > 图形中字），语言取并集
+    sub_rows = conn.execute(
+        "SELECT sub_tracks FROM movie_files WHERE movie_id = ? AND missing = 0 "
+        "AND sub_tracks <> ''", (movie_id,),
+    ).fetchall()
+    best = ""
+    has_any = False
+    langs = set()
+    for r in sub_rows:
+        info = subprobe.summarize(r[0])
+        kind = info.get("zh") or ""
+        has_any = has_any or bool(info.get("any"))
+        if kind == "text":
+            best = "text"
+        elif kind == "image" and best != "text":
+            best = "image"
+        langs.update(info.get("langs") or [])
     conn.execute(
-        "UPDATE movies SET size = ?, file_count = ?, updated_at = datetime('now','localtime') WHERE id = ?",
-        (int(row[0]), int(row[1]), movie_id),
+        "UPDATE movies SET size = ?, file_count = ?, embed_sub = ?, embed_sub_zh = ?, "
+        "embed_sub_zh_kind = ?, embed_sub_langs = ?, updated_at = datetime('now','localtime') "
+        "WHERE id = ?",
+        (int(row[0]), int(row[1]), 1 if has_any else 0, 1 if best else 0, best,
+         ",".join(sorted(langs)), movie_id),
     )
 
 
@@ -341,7 +375,8 @@ def datetime_now() -> str:
 _LIST_SELECT = """
 SELECT m.id, m.key, m.code, m.has_code, m.title, m.original_title, m.release_date, m.year,
        m.runtime, m.rating, m.favorite, m.watched, m.watchlist, m.play_count, m.cover, m.size,
-       m.file_count, m.subtitle, m.uncensored, m.leak, m.hd4k, m.vr, m.scraped_at,
+       m.file_count, m.subtitle, m.embed_sub, m.embed_sub_zh, m.embed_sub_zh_kind,
+       m.uncensored, m.leak, m.hd4k, m.vr, m.scraped_at,
        m.created_at, m.folder,
        st.name AS studio, se.name AS series,
        (SELECT group_concat(a.name, '||') FROM movie_actress ma
@@ -1037,8 +1072,8 @@ def movie_detail(conn: sqlite3.Connection, movie_id: int) -> Optional[Dict[str, 
     row["tags"] = get_relations(conn, movie_id, "tag")
     row["files"] = query_all(
         conn,
-        "SELECT id, path, filename, ext, size, mtime, part, missing, strm_url FROM movie_files "
-        "WHERE movie_id = ? ORDER BY missing ASC, part, filename",
+        "SELECT id, path, filename, ext, size, mtime, part, missing, strm_url, sub_tracks "
+        "FROM movie_files WHERE movie_id = ? ORDER BY missing ASC, part, filename",
         (movie_id,),
     )
     row["progress"] = movie_progress(conn, movie_id)
@@ -1073,6 +1108,11 @@ def update_movie(conn: sqlite3.Connection, movie_id: int, payload: Dict[str, Any
         m = re.search(r"(\d{4})", str(payload.get("release_date") or ""))
         sets.append("year = ?")
         args.append(int(m.group(1)) if m else None)
+
+    # 人工改过简介后不再标记为 AI 生成（AI 接口随后会自己覆写来源）
+    if "plot" in payload:
+        sets.append("plot_source = ?")
+        args.append("manual")
 
     # 人工补填番号后，应当同步标记为「已识别」
     if "code" in payload:
@@ -1567,6 +1607,12 @@ def facets(conn: sqlite3.Connection, limit: int = 300) -> Dict[str, Any]:
             "SELECT substr(code, 1, instr(code, '-') - 1) AS name, COUNT(*) AS count "
             "FROM movies WHERE has_code = 1 AND instr(code, '-') > 1 "
             "GROUP BY name ORDER BY count DESC, name LIMIT ?", (limit,)),
+        # 内嵌中文字幕：text（文本轨，可直接读）/ image（图形轨，需 OCR）
+        "embed_zh": query_all(
+            conn,
+            "SELECT CASE WHEN embed_sub_zh = 0 THEN 'none' "
+            "WHEN embed_sub_zh_kind = 'text' THEN 'text' ELSE 'image' END AS kind, "
+            "COUNT(*) AS count FROM movies GROUP BY kind"),
     }
 
 

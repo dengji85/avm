@@ -28,7 +28,8 @@ from fastapi.responses import (FileResponse, PlainTextResponse, RedirectResponse
                                StreamingResponse)
 
 from . import ai as ai_mod
-from . import dedupe, images, nfo as nfo_mod, plugins, providers, scanner, scraper, scrape_diag, store, subtitles
+from . import (ai_jobs, dedupe, images, nfo as nfo_mod, plugins, providers, scanner,
+               scraper, scrape_diag, store, subtext, subtitles, translate)
 from .config import (COVER_DIR, DATA_DIR, IN_CONTAINER, avatar_dir, _deep_merge,
                      current_access_token, load_config, public_base_url, update_config)
 from .db import connect, db, query_all, query_one
@@ -1496,25 +1497,186 @@ def reparse_codes(payload: Dict[str, Any] = Body(default={})) -> Dict[str, Any]:
 # ------------------------------------------------------------------ AI 增强
 @router.get("/ai/status")
 def ai_status() -> Dict[str, Any]:
-    """返回 AI 是否可用（基于当前配置）。"""
+    """返回 AI 是否可用（基于当前配置），并附调用统计与提示词版本。"""
     cfg = load_config(refresh=True)
-    return {"enabled": ai_mod.is_available(cfg), "model": (cfg.get("ai") or {}).get("model", "")}
+    from . import ai_core
+    return {
+        "enabled": ai_mod.is_available(cfg),
+        "model": (cfg.get("ai") or {}).get("model", ""),
+        "stats": ai_core.stats(),
+        "prompts": ai_core.prompt_versions(),
+    }
+
+
+def _ai_plot_for_movie(movie_id: int) -> Dict[str, Any]:
+    """AI 剧情分析：字幕优先 → 元数据回退。单部同步接口与批量任务共用。"""
+    cfg = load_config(refresh=True)
+    if not ai_mod.is_available(cfg):
+        raise ValueError("AI 未启用：请先在 设置 → AI 中配置接口与模型")
+    with db() as conn:
+        m = store.movie_detail(conn, movie_id)
+        if not m:
+            raise ValueError("影片不存在")
+        sub = subtext.collect(m.get("files") or [], m.get("subtitles") or [], cfg)
+        used = "meta"
+        if sub["text"]:
+            text = ai_mod.summarize_subtitles(sub["text"], m, cfg)
+            used = "subtitle"
+        else:
+            text = ai_mod.generate_synopsis(m, cfg)
+        text = (text or "").strip()
+        if not text:
+            raise ValueError("AI 返回为空，请检查模型配置或稍后重试")
+        store.update_movie(conn, movie_id, {"plot": text})
+        conn.execute(
+            "UPDATE movies SET plot_source = ?, ai_plot_at = datetime('now','localtime') "
+            "WHERE id = ?",
+            ("ai-subtitle" if used == "subtitle" else "ai-meta", movie_id),
+        )
+        conn.commit()
+    return {"ok": True, "plot": text, "source": used, "chars": sub["chars"],
+            "track": sub["track"]}
 
 
 @router.post("/ai/generate-synopsis/{movie_id}")
 def ai_generate_synopsis(movie_id: int) -> Dict[str, Any]:
+    """生成剧情简介并写回 movies.plot（优先字幕，失败回退元数据）。"""
+    try:
+        return _ai_plot_for_movie(movie_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400 if "未启用" in str(e) or "不存在" in str(e) else 502,
+                            detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+
+# ------------------------------------------------------------------ AI 批量任务
+def _ai_translate_handler(movie_id: int, payload: Dict[str, Any]) -> Dict[str, Any]:
     cfg = load_config(refresh=True)
+    if not ai_mod.is_available(cfg):
+        raise ValueError("AI 未启用：请先在 设置 → AI 中配置接口与模型")
+    target = str(payload.get("target") or "zh-Hans")
+    bilingual = bool(payload.get("bilingual"))
+    r = translate.translate_movie(movie_id, cfg, target, bilingual)
+    return {"path": r["path"], "chars": r["chars"],
+            "cues": r["cues"], "model": (load_config().get("ai") or {}).get("model", "")}
+
+
+def _ai_plot_handler(movie_id: int, payload: Dict[str, Any]) -> Dict[str, Any]:
+    r = _ai_plot_for_movie(movie_id)
+    return {"chars": r["chars"], "model": (load_config().get("ai") or {}).get("model", "")}
+
+
+ai_jobs.register_handler("translate", _ai_translate_handler)
+ai_jobs.register_handler("plot", _ai_plot_handler)
+
+
+def _ai_job_targets(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """把请求体翻译成任务列表：显式 ids 优先，其次「最近 N 部」。"""
+    ids = payload.get("ids") or []
+    if isinstance(ids, str):
+        ids = [s for s in ids.replace("，", ",").split(",") if s.strip()]
+    if ids:
+        return [{"movie_id": int(i)} for i in ids if str(i).strip().isdigit()]
+    latest = int(payload.get("latest") or 0)
+    if latest <= 0:
+        raise ValueError("请提供影片 id 列表或 latest 数量")
     with db() as conn:
-        m = store.movie_detail(conn, movie_id)
-        if not m:
-            raise HTTPException(status_code=404, detail="影片不存在")
+        rows = conn.execute(
+            "SELECT id FROM movies ORDER BY id DESC LIMIT ?", (min(200, latest),)).fetchall()
+    return [{"movie_id": int(r["id"])} for r in rows]
+
+
+@router.get("/ai/jobs")
+def ai_jobs_status() -> Dict[str, Any]:
+    return ai_jobs.status()
+
+
+@router.post("/ai/jobs")
+def ai_jobs_create(payload: Dict[str, Any] = Body(default={})) -> Dict[str, Any]:
+    kind = str(payload.get("kind") or "").strip()
+    if kind not in ai_jobs.handlers():
+        raise HTTPException(status_code=400,
+                            detail="未知任务类型：%s（可用：%s）"
+                                   % (kind, "/".join(ai_jobs.handlers())))
+    try:
+        items = _ai_job_targets(payload)
+        return ai_jobs.submit(kind, items,
+                              payload={"target": str(payload.get("target") or "zh-Hans"),
+                                       "bilingual": bool(payload.get("bilingual"))})
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/ai/jobs/cancel")
+def ai_jobs_cancel() -> Dict[str, Any]:
+    return ai_jobs.cancel_all()
+
+
+# ------------------------------------------------------------------ AI 字幕翻译
+@router.post("/ai/translate/{movie_id}")
+def ai_translate_subtitle(movie_id: int, target: str = "zh-Hans",
+                          bilingual: bool = False) -> Dict[str, Any]:
+    """单部片字幕翻译（同步执行）：产物落 data/subs/{id}/ 并登记到字幕列表。"""
+    cfg = load_config(refresh=True)
+    if not ai_mod.is_available(cfg):
+        raise HTTPException(status_code=400, detail="AI 未启用：请先在 设置 → AI 中配置接口与模型")
+    try:
+        r = translate.translate_movie(movie_id, cfg, target, bilingual)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    return r
+
+
+@router.get("/ai/glossary")
+def ai_glossary_list() -> Dict[str, Any]:
+    return {"items": translate.list_glossary(), "targets": list(translate.TARGETS)}
+
+
+@router.put("/ai/glossary")
+def ai_glossary_save(payload: Dict[str, Any] = Body(default={})) -> Dict[str, Any]:
+    items = payload.get("items") or []
+    if not isinstance(items, list):
+        raise HTTPException(status_code=400, detail="items 应为数组")
+    return {"ok": True, **translate.replace_glossary(items)}
+
+
+@router.get("/movies/{movie_id}/subtitles/{sub_id}/file")
+def download_subtitle_file(movie_id: int, sub_id: int) -> FileResponse:
+    """下载字幕文件：外挂字幕与本机路径可直下；AI 译文只允许取服务端 data/subs 下的产物。"""
+    with db() as conn:
+        row = conn.execute(
+            "SELECT id, file_path, source FROM movie_subtitles WHERE id=? AND movie_id=?",
+            (int(sub_id), int(movie_id))).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="字幕不存在")
+    path = row["file_path"]
+    norm = path.replace("\\", "/")
+    if not os.path.isfile(path):
+        raise HTTPException(status_code=404, detail="字幕文件已不存在")
+    # 防止用「字幕路径」当任意文件读取：AI 产物必须落在 data/subs 下
+    if row["source"] == "ai-translate" and "/data/subs/" not in norm and "/subs/" not in norm:
+        raise HTTPException(status_code=403, detail="非法的字幕路径")
+    return FileResponse(path, media_type="text/plain; charset=utf-8",
+                        filename=os.path.basename(path))
+
+
+@router.delete("/movies/{movie_id}/subtitles/{sub_id}")
+def delete_movie_subtitle(movie_id: int, sub_id: int) -> Dict[str, Any]:
+    """删除字幕登记；AI 翻译产物同时删除磁盘文件（外挂文件不删）。"""
+    with db() as conn:
+        path = translate.unregister(conn, movie_id, sub_id)
+        if path is None:
+            raise HTTPException(status_code=404, detail="字幕不存在")
+        conn.commit()
+    if path and "/subs/" in path.replace("\\", "/"):
         try:
-            text = ai_mod.generate_synopsis(m, cfg)
-        except Exception as e:
-            raise HTTPException(status_code=502, detail=str(e))
-        # 写回 plot（不覆盖人工编辑的非空值逻辑：用户主动点击即覆盖）
-        store.update_movie(conn, movie_id, {"plot": text})
-    return {"ok": True, "plot": text}
+            os.remove(path)
+        except OSError:
+            pass
+    return {"ok": True}
 
 
 @router.post("/ai/suggest-tags/{movie_id}")
@@ -2511,11 +2673,13 @@ def reset_token(request: Request, payload: Dict[str, Any] = Body(default={})) ->
     update_config({"server": {"access_token": ""}})
     tok = ensure_access_token()
     n = auth.drop_all()
+    # 令牌换了，旧令牌换来的「记住此设备」也必须一起失效
+    devices = auth.drop_all_trust()
     server = load_config().get("server") or {}
     ip = auth.client_ip(request.scope, server.get("trusted_proxies") or ["127.0.0.1", "::1"])
     auth.audit("reset-token", ip, request.headers.get("user-agent", ""),
-               "已更换访问令牌并吊销 %d 个会话" % n, ok=True)
-    return {"access_token": tok, "revoked_sessions": n}
+               "已更换访问令牌并吊销 %d 个会话 / %d 台受信设备" % (n, devices), ok=True)
+    return {"access_token": tok, "revoked_sessions": n, "revoked_devices": devices}
 
 
 @router.get("/fs/mounts")

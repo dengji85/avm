@@ -124,12 +124,21 @@ def login(payload: Dict[str, Any], request: Request, response: Response) -> Dict
     sid, info = auth.new_session(ip, ua, idle, absd)
     auth.audit("login", ip, ua, "登录成功", ok=True)
     _set_session_cookie(response, sid, auth.is_https(request.scope), idle)
+    # 「记住此设备 30 天」：会话过期后自动续期，适合家用固定设备。
+    # 设备记录同样只存指纹；换令牌 / 关闭两步验证 / 登出全部设备时统一吊销。
+    remembered = False
+    if bool((payload or {}).get("remember")):
+        did = auth.add_trust(ip, ua)
+        response.headers.append(
+            "Set-Cookie", auth.trust_cookie(did, auth.is_https(request.scope)))
+        remembered = True
     return {
         "ok": True,
         "expires_in_days": idle,
         "abs_days": absd,
         "persist": auth.persist_enabled(),
         "created": info.get("created", 0),
+        "remembered": remembered,
     }
 
 
@@ -140,10 +149,14 @@ def logout(request: Request, response: Response) -> Dict[str, Any]:
     ip = _client(request, server)
     sid = auth.cookie_value(request.scope, auth.SESSION_COOKIE)
     hit = auth.drop_session(sid) if sid else False
+    # 主动退出要同时忘掉本机的「记住此设备」，否则刷新会被它自动登回来
+    did = auth.cookie_value(request.scope, auth.TRUST_COOKIE)
+    auth.drop_trust(did)
     if hit:
         auth.audit("logout", ip, _ua(request), "已退出登录")
     response.delete_cookie(auth.SESSION_COOKIE, path="/")
     response.delete_cookie(auth.COOKIE_TOKEN, path="/")
+    response.delete_cookie(auth.TRUST_COOKIE, path="/")
     return {"ok": True, "revoked": 1 if hit else 0}
 
 
@@ -153,10 +166,13 @@ def logout_all(request: Request, response: Response) -> Dict[str, Any]:
     server = _server_cfg()
     ip = _client(request, server)
     n = auth.drop_all()
-    auth.audit("logout-all", ip, _ua(request), "已登出全部设备（%d 个会话）" % n)
+    devices = auth.drop_all_trust()
+    auth.audit("logout-all", ip, _ua(request),
+               "已登出全部设备（%d 个会话 / %d 台受信设备）" % (n, devices))
     response.delete_cookie(auth.SESSION_COOKIE, path="/")
     response.delete_cookie(auth.COOKIE_TOKEN, path="/")
-    return {"ok": True, "revoked": n}
+    response.delete_cookie(auth.TRUST_COOKIE, path="/")
+    return {"ok": True, "revoked": n, "devices": devices}
 
 
 # ------------------------------------------------------------------ 会话状态
@@ -197,6 +213,24 @@ def session_info(request: Request) -> Dict[str, Any]:
         "expires_at": (float(info.get("last") or 0) + idle * 86400) if (info and idle) else 0,
         "abs_expires_at": (float(info.get("created") or 0) + absd * 86400) if (info and absd) else 0,
     }
+
+
+@router.get("/trusted")
+def trusted_devices() -> Dict[str, Any]:
+    """受信设备（「记住此设备 30 天」）列表：只给 IP / UA / 时间。"""
+    items = auth.list_trust()
+    return {"count": len(items), "items": items}
+
+
+@router.post("/trusted/revoke-all")
+def revoke_trusted_devices(request: Request, response: Response) -> Dict[str, Any]:
+    """忘记全部受信设备：所有设备下次都需重新登录。"""
+    server = _server_cfg()
+    n = auth.drop_all_trust()
+    auth.audit("trusted-revoke", _client(request, server), _ua(request),
+               "已忘记全部受信设备（%d 台）" % n)
+    response.delete_cookie(auth.TRUST_COOKIE, path="/")
+    return {"ok": True, "revoked": n}
 
 
 @router.get("/sessions")
@@ -242,8 +276,10 @@ def set_pin(payload: Dict[str, Any]) -> Dict[str, Any]:
     if len(pin) > 64:
         raise HTTPException(400, "解锁码过长")
     # 设置解锁码即切到「快速解锁码」；清除后回落到「访问令牌」，不会出现空档
-    update_config({"privacy": {"pin_hash": auth.hash_pin(pin),
-                               "lock_unlock": "pin" if pin else "token"}})
+    patch = {"pin_hash": auth.hash_pin(pin), "lock_unlock": "pin" if pin else "token"}
+    if pin:
+        patch["token_unlocks"] = 0     # 已经设了解锁码，不再需要「用令牌解锁」提示
+    update_config({"privacy": patch})
     auth.audit("set-pin", detail="已更新快速解锁码" if pin else "已清除快速解锁码")
     return {"ok": True, "has_pin": bool(pin)}
 
@@ -291,6 +327,8 @@ def privacy_state() -> Dict[str, Any]:
         "reason": st.get("reason", ""),
         "unlock_mode": mode,
         "has_pin": has_pin,
+        # 未设解锁码时，用访问令牌解锁的次数：前端据此提示「设个解锁码吧」
+        "token_unlocks": int(privacy.get("token_unlocks") or 0),
     }
 
 
@@ -342,6 +380,11 @@ def privacy_unlock(payload: Dict[str, Any], request: Request, response: Response
 
     auth.clear_fails(ip)
     auth.privacy_unlock()
+
+    # 未设解锁码、又只能用访问令牌解锁：计数一次，前端据此给出设置引导
+    if by_token and not stored:
+        update_config({"privacy": {
+            "token_unlocks": int(privacy.get("token_unlocks") or 0) + 1}})
 
     # 用「访问令牌」解锁本身就证明持有凭据：顺手签发会话。
     # 否则未登录状态下（例如登出后又触发锁定）解锁完刷新会被登录页再要一次令牌。
@@ -454,7 +497,9 @@ def totp_enable(payload: Dict[str, Any], request: Request) -> Dict[str, Any]:
         "totp_last_step": int(time.time() // totp_mod.STEP),
         "totp_recovery": [totp_mod.hash_code(c) for c in codes],
     }})
-    auth.audit("totp", ip, ua, "已启用两步验证", ok=True)
+    # 安全等级变了：所有「记住此设备」作废，其他设备必须重新走完整登录
+    dropped = auth.drop_all_trust()
+    auth.audit("totp", ip, ua, "已启用两步验证（吊销 %d 台受信设备）" % dropped, ok=True)
     return {"ok": True, "recovery_codes": codes}
 
 
@@ -487,7 +532,8 @@ def totp_disable(payload: Dict[str, Any], request: Request) -> Dict[str, Any]:
     update_config({"server": {
         "totp_enabled": False, "totp_secret": "", "totp_last_step": 0, "totp_recovery": [],
     }})
-    auth.audit("totp", ip, ua, "已关闭两步验证", ok=True)
+    dropped = auth.drop_all_trust()
+    auth.audit("totp", ip, ua, "已关闭两步验证（吊销 %d 台受信设备）" % dropped, ok=True)
     return {"ok": True, "enabled": False}
 
 

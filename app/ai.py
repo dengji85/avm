@@ -1,136 +1,139 @@
-"""可选的 AI 增强模块：兼容 OpenAI 协议的聊天补全。
+# -*- coding: utf-8 -*-
+"""AI 应用层：在这里写「说什么」，不写「怎么和模型说话」。
 
-支持任意 OpenAI 兼容端点（云端或本地 Ollama）：
-  - 云端：https://api.openai.com/v1  + 你的 key
-  - 中转/国产：硅基流动、DeepSeek、通义等（均兼容 /v1/chat/completions）
-  - 本地 Ollama：http://127.0.0.1:11434/v1  （ollama pull qwen2.5 后免 key）
+与 app/ai_core.py 的分工：
+  * 本模块 = 业务提示词 + 结果处理（简介 / 剧情 / 标签 / 搜索意图）
+  * ai_core  = 统一客户端（配置、重试、超时、缓存、统计、错误归一）
 
-所有调用读取 config["ai"] 段，不依赖特定厂商。
+新增 AI 功能时只改这里；需要换模型 / 加重试 / 限流只改 ai_core。
+提示词均带版本号，便于排查“同一部片两次结果不同”。
 """
 from __future__ import annotations
 
-import json
-import logging
-from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
-import requests
+from . import ai_core
+from .ai_core import AIConfig, AiError, chat, chat_json, is_available, register_prompt
 
-from .config import load_config
-
-log = logging.getLogger("avm.ai")
-
-TIMEOUT = 60
-
-
-@dataclass
-class AIConfig:
-    enabled: bool = False
-    base_url: str = "https://api.openai.com/v1"
-    api_key: str = ""
-    model: str = "gpt-4o-mini"
-    temperature: float = 0.4
-    extra_headers: Dict[str, str] = field(default_factory=dict)
-
-    @classmethod
-    def from_config(cls, cfg: Optional[Dict[str, Any]]) -> "AIConfig":
-        a = (cfg or {}).get("ai", {}) if cfg else {}
-        return cls(
-            enabled=bool(a.get("enabled", False)),
-            base_url=str(a.get("base_url", "https://api.openai.com/v1")).rstrip("/"),
-            api_key=str(a.get("api_key", "") or ""),
-            model=str(a.get("model", "gpt-4o-mini")),
-            temperature=float(a.get("temperature", 0.4)),
-            extra_headers=dict(a.get("extra_headers", {}) or {}),
-        )
+# 提示词版本：改动提示词时递增，方便线上问题回溯（见 GET /api/ai/status）
+register_prompt("synopsis", "v1")
+register_prompt("plot.subtitle", "v2")
+register_prompt("tags", "v1")
+register_prompt("search.intent", "v1")
 
 
-def is_available(cfg: Optional[Dict[str, Any]] = None) -> bool:
-    if cfg is None:
-        try:
-            cfg = load_config()
-        except Exception:
-            return False
-    return AIConfig.from_config(cfg).enabled
+def _split_chunks(text: str, size: int = 6000, limit: int = 8) -> List[str]:
+    """按行切块；超过 limit 块时均匀抽样，避免 token 无上限。"""
+    lines = [s for s in (text or "").splitlines() if s.strip()]
+    chunks: List[str] = []
+    buf: List[str] = []
+    n = 0
+    for line in lines:
+        buf.append(line)
+        n += len(line)
+        if n >= size:
+            chunks.append("\n".join(buf))
+            buf, n = [], 0
+    if buf:
+        chunks.append("\n".join(buf))
+    if len(chunks) > limit:
+        step = len(chunks) / float(limit)
+        chunks = [chunks[int(i * step)] for i in range(limit)]
+    return chunks
 
 
-def _chat(cfg: AIConfig, messages: List[Dict[str, str]], max_tokens: int = 800) -> str:
-    if not cfg.enabled:
-        raise RuntimeError("AI 未启用：请在设置中开启并填写 Base URL / API Key / 模型")
-    if not cfg.base_url:
-        raise RuntimeError("AI Base URL 为空")
-    url = f"{cfg.base_url}/chat/completions"
-    payload: Dict[str, Any] = {
-        "model": cfg.model,
-        "messages": messages,
-        "temperature": cfg.temperature,
-        "max_tokens": max_tokens,
-    }
-    headers = {"Content-Type": "application/json"}
-    if cfg.api_key:
-        headers["Authorization"] = f"Bearer {cfg.api_key}"
-    headers.update(cfg.extra_headers)
-    try:
-        r = requests.post(url, json=payload, headers=headers, timeout=TIMEOUT)
-    except requests.RequestException as e:
-        raise RuntimeError(f"AI 请求失败：{e}")
-    if r.status_code != 200:
-        raise RuntimeError(f"AI 接口返回 {r.status_code}：{r.text[:300]}")
-    try:
-        data = r.json()
-        return data["choices"][0]["message"]["content"].strip()
-    except (KeyError, IndexError, ValueError) as e:
-        raise RuntimeError(f"AI 响应解析失败：{e} | {r.text[:200]}")
+def _meta_block(movie: Dict[str, Any]) -> str:
+    actresses = movie.get("actresses") or []
+    if isinstance(actresses, list):
+        actresses = "、".join(str(a) for a in actresses[:6])
+    genres = movie.get("genres") or []
+    if isinstance(genres, list):
+        genres = "、".join(str(g) for g in genres[:8])
+    return ("番号：%s\n标题：%s\n制作商：%s\n系列：%s\n女优：%s\n类型：%s\n"
+            % (movie.get("code") or "", movie.get("title") or "",
+               movie.get("studio") or "", movie.get("series") or "",
+               actresses, genres))
 
 
 def generate_synopsis(movie: Dict[str, Any], cfg: Optional[Dict[str, Any]] = None) -> str:
-    """根据影片元数据生成/润色中文简介。"""
+    """根据影片元数据生成/润色中文简介（无字幕时的回退方案）。"""
     c = AIConfig.from_config(cfg)
-    title = movie.get("title") or movie.get("code") or ""
-    code = movie.get("code") or ""
-    studio = movie.get("studio") or ""
-    series = movie.get("series") or ""
-    actresses = movie.get("actresses") or []
-    genres = movie.get("genres") or []
     existing = (movie.get("plot") or "").strip()
     sys = (
         "你是一个影视资料库助手，擅长把番号影片的元数据整理成简洁、客观、"
         "不低俗的中文简介。只输出简介正文，不要解释、不要标题、不要 Markdown。"
     )
-    user = f"番号：{code}\n标题：{title}\n制作商：{studio}\n系列：{series}\n"
-    user += f"女优：{', '.join(actresses) if isinstance(actresses, list) else actresses}\n"
-    user += f"类型：{', '.join(genres) if isinstance(genres, list) else genres}\n"
+    user = _meta_block(movie)
     if existing:
-        user += f"\n已有简介（请在其基础上润色补全，保持事实一致）：\n{existing}\n"
+        user += "\n已有简介（请在其基础上润色补全，保持事实一致）：\n%s\n" % existing
     else:
         user += "\n请生成一段 2-4 句话的中文简介。"
-    return _chat(c, [
-        {"role": "system", "content": sys},
-        {"role": "user", "content": user},
-    ], max_tokens=500)
+    return chat(c, [{"role": "system", "content": sys},
+                    {"role": "user", "content": user}],
+                max_tokens=500, purpose="synopsis").strip()
+
+
+def summarize_subtitles(text: str, movie: Dict[str, Any],
+                        cfg: Optional[Dict[str, Any]] = None) -> str:
+    """根据字幕内容生成剧情简介（不编造、不写露骨细节）。
+
+    字幕超过一块时先分块提炼，再合成最终简介，避免超出上下文。
+    """
+    c = AIConfig.from_config(cfg)
+    sys_final = (
+        "你是影视剧情分析助手。只根据用户提供的字幕总结剧情，"
+        "不添加字幕里没有的人物、情节或背景；语言客观、简洁、不低俗，"
+        "不写露骨细节。输出 3–5 句中文：第一句一句话梗概，"
+        "后面补充主要人物关系与情节走向。只输出正文，不要标题、不要 Markdown。"
+    )
+    chunks = _split_chunks(text)
+    if not chunks:
+        return ""
+    if len(chunks) == 1:
+        user = _meta_block(movie) + "\n字幕内容：\n" + chunks[0] + "\n\n请总结这部影片的剧情。"
+        return chat(c, [{"role": "system", "content": sys_final},
+                        {"role": "user", "content": user}],
+                    max_tokens=700, purpose="plot.subtitle").strip()
+
+    sys_part = (
+        "只根据这段字幕片段提炼剧情要点，2–3 句中文，客观、不低俗、不写露骨细节；"
+        "不要编造片段里没有的信息，不要标题。"
+    )
+    parts: List[str] = []
+    for i, ch in enumerate(chunks, 1):
+        try:
+            part = chat(c, [
+                {"role": "system", "content": sys_part},
+                {"role": "user", "content": "第 %d/%d 段字幕：\n%s" % (i, len(chunks), ch)},
+            ], max_tokens=300, purpose="plot.subtitle.chunk").strip()
+            if part:
+                parts.append(part)
+        except AiError as e:
+            # 单段失败不阻断整体：丢一段比整体失败更可接受
+            ai_core.log.warning("字幕分段摘要失败（第 %d/%d 段）：%s",
+                                i, len(chunks), e)
+    if not parts:
+        raise AiError("全部分段摘要都失败了")
+    user = (_meta_block(movie) + "\n以下是按时间顺序的分段剧情摘要：\n"
+            + "\n".join(parts) + "\n\n请合并成 3–5 句完整剧情简介，不要重复，不要分点。")
+    return chat(c, [{"role": "system", "content": sys_final},
+                    {"role": "user", "content": user}],
+                max_tokens=700, purpose="plot.subtitle").strip()
 
 
 def suggest_tags(movie: Dict[str, Any], cfg: Optional[Dict[str, Any]] = None) -> List[str]:
     """根据元数据建议补充标签。"""
     c = AIConfig.from_config(cfg)
-    title = movie.get("title") or movie.get("code") or ""
-    code = movie.get("code") or ""
-    studio = movie.get("studio") or ""
-    series = movie.get("series") or ""
-    actresses = movie.get("actresses") or []
-    genres = movie.get("genres") or []
     tags = movie.get("tags") or []
     if isinstance(tags, str):
         tags = [t for t in tags.split(",") if t]
-    sys = "你是标签助手。根据影片元数据补充 3-8 个中文标签，只输出逗号分隔的标签列表，不要其它文字。"
-    user = (f"番号：{code}\n标题：{title}\n制作商：{studio}\n系列：{series}\n"
-            f"女优：{', '.join(actresses) if isinstance(actresses, list) else actresses}\n"
-            f"类型：{', '.join(genres) if isinstance(genres, list) else genres}\n"
-            f"已有标签：{', '.join(tags)}")
-    out = _chat(c, [
-        {"role": "system", "content": sys},
-        {"role": "user", "content": user},
-    ], max_tokens=120)
+    sys = ("你是标签助手。根据影片元数据补充 3-8 个中文标签，"
+           "只输出逗号分隔的标签列表，不要其它文字。")
+    user = (_meta_block(movie) + "\n已有标签：%s"
+            % ("、".join(tags) if isinstance(tags, list) else tags))
+    out = chat(c, [{"role": "system", "content": sys},
+                   {"role": "user", "content": user}],
+               max_tokens=120, purpose="tags")
     return [t.strip() for t in out.replace("，", ",").split(",") if t.strip()]
 
 
@@ -146,15 +149,10 @@ def parse_search_intent(query: str, cfg: Optional[Dict[str, Any]] = None) -> Dic
         "series(字符串), year(数字)。只输出 JSON，不要解释。"
     )
     try:
-        out = _chat(c, [
-            {"role": "system", "content": sys},
-            {"role": "user", "content": query},
-        ], max_tokens=200)
-        start = out.find("{")
-        end = out.rfind("}") + 1
-        if start >= 0 and end > start:
-            return json.loads(out[start:end])
-        return {"keywords": [query]}
-    except Exception as e:
-        log.warning("parse_search_intent 失败：%s", e)
+        out = chat_json(c, [{"role": "system", "content": sys},
+                            {"role": "user", "content": query}],
+                        max_tokens=200, purpose="search.intent")
+        return out if isinstance(out, dict) else {"keywords": [query]}
+    except AiError as e:
+        ai_core.log.warning("parse_search_intent 失败：%s", e)
         return {"keywords": [query]}

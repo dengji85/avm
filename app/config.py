@@ -96,6 +96,9 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         ],
         # 小于该体积的文件视为预览片/样片，直接跳过
         "min_size_mb": 100,
+        # 扫描时探测内嵌字幕（判断是否真的自带中文字幕，与元数据标注区分）。
+        # 每部片多花 0.2–2 秒；已有库升级后第一次扫描会补测，之后按 size/mtime 增量跳过。
+        "probe_subtitles": True,
         # 扫描完成后自动清理失效记录（磁盘已删的文件 / 空影片 / 孤儿元数据）
         "auto_cleanup": True,
         # 「文件在磁盘上消失」后的宽限天数：先标记缺失并保留记录，超过这个天数才在
@@ -251,9 +254,9 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         # 会话（登录后签发）：空闲超时 / 绝对超时（天，0 = 不过期）
         "session_idle_days": 7,
         "session_abs_days": 30,
-        # 会话是否落盘：默认 false = 仅内存，进程 / 容器重启即全部失效（更安全）；
-        # 开启后以 SHA-256 指纹落盘 data/sessions.json，重启仍保持登录。
-        "session_persist": False,
+        # 会话是否落盘：默认开启 = 以 SHA-256 指纹写入 data/sessions.json（0600），
+        # 容器重启 / 升级不掉登录；关闭则仅内存，重启即全部失效。
+        "session_persist": True,
         # 登录失败限速：同一 IP 连续失败达到该次数后封禁指定分钟数（0 = 不限制）
         "login_max_fails": 5,
         "login_block_minutes": 15,
@@ -315,12 +318,15 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "api_key": "",
         "model": "gpt-4o-mini",
         "temperature": 0.4,
-    },
+        # 单次请求读超时（秒）与失败重试次数；超时/重试只影响体验，不影响正确性
+        "timeout": 60,
+        "max_retries": 2,
+        },
     # 隐私保护（桌面 / 大屏场景）：离开电脑时自动遮挡，避免"忘记关"的尴尬
     "privacy": {
         # 空闲自动锁定（分钟）：无操作达到该时长后遮挡全部内容并暂停播放；0 = 关闭。
         # 正在播放视频时不算空闲（看片中途不会被锁）。
-        "idle_lock_minutes": 10,
+        "idle_lock_minutes": 30,
         # 遮挡后用什么解锁（只有两种，都要主动输入，点击即解锁已移除）：
         #   pin   = 快速解锁码（4~6 位，PBKDF2 存哈希；高频场景用）
         #   token = 访问令牌（兜底方式始终可用，不受本设置影响）
@@ -328,6 +334,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "lock_unlock": "token",
         # 快速解锁码的 PBKDF2-HMAC-SHA256 哈希（设置页写入，不存明文；空 = 未设置）
         "pin_hash": "",
+        # 未设解锁码时，用访问令牌解锁的累计次数（用于前端提示「设个解锁码」）
+        "token_unlocks": 0,
         # 紧急遮挡（"老板键"）快捷键：任意界面按下立即遮挡 + 静音，再按一次恢复
         "panic_key": "Ctrl+Shift+H",
         # 页面标题中性化：标题固定为品牌名，不显示影片信息

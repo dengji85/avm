@@ -1,7 +1,7 @@
 <script setup>
 import { onMounted, onBeforeUnmount, watch, ref, computed } from 'vue'
 import { state, applyTheme } from './state.js'
-import { getFacets, getConfig, getServerInfo, getSession, onNoToken, serverOffline } from './api.js'
+import { getFacets, getConfig, getServerInfo, getSession, onNoToken, serverOffline, privacyState } from './api.js'
 import { toast, setSiteTitle } from './utils.js'
 import { useTasks } from './composables/useTasks.js'
 
@@ -16,6 +16,38 @@ import MiniPlayBar from './components/MiniPlayBar.vue'
 import PrivacyLock from './components/PrivacyLock.vue'
 
 const tokenGate = ref(null)
+
+/* 未设置快速解锁码时的提示：首次出现一次；若用户已经两次用访问令牌解锁，
+   再提醒一次（更具体的理由），避免每次都被长令牌卡住却不知道能改。 */
+const pinTip = ref(false)
+const pinTipNag = ref(false)
+const PIN_TIP_KEY = 'avm.pinTipDismissed'
+const PIN_NAG_KEY = 'avm.pinTipNagged'
+
+async function checkPinTip() {
+  try {
+    const st = await privacyState()
+    if (!st || st.has_pin) { pinTip.value = false; return }
+    const dismissed = localStorage.getItem(PIN_TIP_KEY) === '1'
+    const nagged = localStorage.getItem(PIN_NAG_KEY) === '1'
+    if (!dismissed) {
+      pinTip.value = true
+      pinTipNag.value = false
+    } else if (Number(st.token_unlocks || 0) >= 2 && !nagged) {
+      pinTip.value = true
+      pinTipNag.value = true
+    }
+  } catch (e) { /* 未登录 / 离线：忽略 */ }
+}
+function dismissPinTip() {
+  localStorage.setItem(pinTipNag.value ? PIN_NAG_KEY : PIN_TIP_KEY, '1')
+  pinTip.value = false
+}
+function goPrivacySettings() {
+  dismissPinTip()
+  state.settingsTab = 'privacy'
+  state.view = 'settings'
+}
 
 import HomeView from './views/HomeView.vue'
 import GalleryView from './views/GalleryView.vue'
@@ -116,6 +148,7 @@ onMounted(async () => {
   onNoToken(() => tokenGate.value && tokenGate.value.open())
   await Promise.all([loadFacets(), loadConfig(), loadServerCaps()])
   checkSession()
+  checkPinTip()
   tasks.start()
   window.addEventListener('avm-refresh', onGlobalRefresh)
   window.addEventListener('avm-privacy-changed', onPrivacyChanged)
@@ -139,6 +172,17 @@ function onFilterChange() { /* 由各视图自行响应 state 变化 */ }
     </div>
     <TopNav />
     <MobileNav />
+
+    <!-- 未设置快速解锁码：提醒一次（被长令牌卡过两次再提醒一次） -->
+    <div v-if="pinTip" class="pin-tip">
+      <span class="pin-tip-ic">🔒</span>
+      <div class="pin-tip-body">
+        <b>{{ $t('privacy.tipTitle') }}</b>
+        <span>{{ pinTipNag ? $t('privacy.tipNag') : $t('privacy.tipDesc') }}</span>
+      </div>
+      <button class="btn tiny primary" @click="goPrivacySettings">{{ $t('privacy.tipGo') }}</button>
+      <button class="btn tiny ghost" @click="dismissPinTip">{{ $t('common.close') }}</button>
+    </div>
 
     <div class="app-main">
       <component :is="VIEWS[state.view] || VIEWS.home" />
@@ -172,4 +216,19 @@ function onFilterChange() { /* 由各视图自行响应 state 变化 */ }
   animation: offbar-in .2s ease;
 }
 @keyframes offbar-in { from { transform: translateY(-100%); } to { transform: translateY(0); } }
+
+/* 解锁码提示条：横向卡片，窄屏自动换行 */
+.pin-tip {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  margin: 10px auto 0; padding: 10px 14px;
+  width: min(1100px, calc(100% - 24px));
+  background: var(--c-primary-soft);
+  border: 1px solid var(--c-primary);
+  border-radius: var(--r-md);
+  font-size: var(--fs-sm);
+}
+.pin-tip-ic { font-size: 18px; }
+.pin-tip-body { flex: 1; min-width: 200px; display: flex; flex-direction: column; gap: 2px; }
+.pin-tip-body b { color: var(--c-text); }
+.pin-tip-body span { color: var(--c-text-2); }
 </style>

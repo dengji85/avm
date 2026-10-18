@@ -49,6 +49,8 @@
 
   var step = 'token'   // token | totp
   var token = ''       // 第一步验证通过后暂存，第二步一起提交
+  var rememberEl = document.getElementById('remember')
+  var remember = false // 「记住此设备 30 天」勾选状态（跨两步保持）
 
   function setErr(t) { err.textContent = t || '' }
 
@@ -85,7 +87,10 @@
     btn.disabled = true
     setErr('')
     try {
-      var body = step === 'token' ? { token: value } : { token: token, totp: value }
+      if (step === 'token') remember = !!(rememberEl && rememberEl.checked)
+      var body = step === 'token'
+        ? { token: value, remember: remember }
+        : { token: token, totp: value, remember: remember }
       var res = await fetch('/api/auth/login', {
         method: 'POST',
         credentials: 'same-origin',

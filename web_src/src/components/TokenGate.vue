@@ -13,6 +13,7 @@ const err = ref('')
 // 两步验证：服务端启用后，令牌正确还会要求再输入一次验证器验证码。
 // 令牌本身留在内存里（不重新写盘），用户不必重输。
 const step = ref('token') // token | totp
+const remember = ref(false)   // 记住此设备 30 天
 const totpCode = ref('')
 // 第二步输入框由 v-if 动态挂载，原生 autofocus 对动态节点无效，需手动聚焦
 const totpInput = ref(null)
@@ -38,7 +39,7 @@ async function submit() {
   err.value = ''
   try {
     // 令牌只交给后端换取会话（HttpOnly Cookie），浏览器不再保存令牌本身
-    const r = await login(token.value.trim(), isTotp ? v : '')
+    const r = await login(token.value.trim(), isTotp ? v : '', remember.value)
     if (r && r.need_totp) {
       // 令牌正确，但服务器启用了两步验证：切到验证码这一步（此时**尚未签发会话**）
       step.value = 'totp'
@@ -106,6 +107,10 @@ defineExpose({ open })
           @keyup.enter="submit"
         />
       </div>
+      <label class="tg-remember">
+        <input type="checkbox" v-model="remember" />
+        <span>{{ t('common.token.remember') }}</span>
+      </label>
       <p v-if="err" class="tg-err">{{ err }}</p>
       <div class="tg-actions">
         <button v-if="step === 'totp'" class="btn ghost" @click="step = 'token'">{{ t('common.back') }}</button>
@@ -126,6 +131,11 @@ defineExpose({ open })
 .tg-desc { color: var(--c-text-2); font-size: var(--fs-sm); margin: var(--sp-2) 0 var(--sp-3); line-height: 1.5; }
 .tg-input { display: flex; gap: var(--sp-2); }
 .tg-input input { flex: 1; }
+.tg-remember {
+  display: flex; align-items: center; gap: 8px; margin-top: 10px;
+  color: var(--c-text-2); font-size: var(--fs-sm); cursor: pointer;
+}
+.tg-remember input { accent-color: var(--c-primary); }
 .tg-err { color: var(--c-danger, #e5484d); font-size: var(--fs-sm); margin: var(--sp-2) 0 0; }
 .tg-actions { display: flex; justify-content: flex-end; gap: var(--sp-2); margin-top: var(--sp-4); }
 @media (max-width: 480px) {

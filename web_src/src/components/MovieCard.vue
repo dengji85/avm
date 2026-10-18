@@ -147,7 +147,8 @@ async function play(e) {
 
       <!-- 底部标记 -->
       <div class="bl-tags">
-        <span v-if="m.has_subtitle" class="tag sub">字幕</span>
+        <span v-if="m.has_subtitle" class="tag sub">{{ $t('flag.subtitleShort') }}</span>
+        <span v-if="m.embed_sub_zh" class="tag sub embed" :title="$t('flag.embedZh')">内字</span>
         <span v-if="m.uncensored" class="tag unc">无码</span>
         <span v-if="quality" class="tag hd">{{ quality }}</span>
         <span v-if="m.duration_minutes" class="tag">{{ fmtMin(m.duration_minutes) }}</span>

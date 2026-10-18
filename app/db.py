@@ -245,6 +245,21 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE movies ADD COLUMN watchlist INTEGER DEFAULT 0")
     if "fanart_source" not in movie_cols:
         conn.execute("ALTER TABLE movies ADD COLUMN fanart_source TEXT DEFAULT ''")
+    # 内嵌字幕（真实存在于文件里的字幕轨，区别于元数据标注的 subtitle）
+    if "embed_sub" not in movie_cols:
+        conn.execute("ALTER TABLE movies ADD COLUMN embed_sub INTEGER DEFAULT 0")
+    if "embed_sub_zh" not in movie_cols:
+        conn.execute("ALTER TABLE movies ADD COLUMN embed_sub_zh INTEGER DEFAULT 0")
+    if "embed_sub_zh_kind" not in movie_cols:
+        conn.execute("ALTER TABLE movies ADD COLUMN embed_sub_zh_kind TEXT DEFAULT ''")
+    if "embed_sub_langs" not in movie_cols:
+        conn.execute("ALTER TABLE movies ADD COLUMN embed_sub_langs TEXT DEFAULT ''")
+    # 简介来源：'' = 抓取/人工，ai-subtitle = 基于字幕生成，ai-meta = 基于元数据生成
+    if "plot_source" not in movie_cols:
+        conn.execute("ALTER TABLE movies ADD COLUMN plot_source TEXT DEFAULT ''")
+    if "ai_plot_at" not in movie_cols:
+        conn.execute("ALTER TABLE movies ADD COLUMN ai_plot_at TEXT DEFAULT ''")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_movies_embedzh ON movies(embed_sub_zh)")
     file_cols = {r[1] for r in conn.execute("PRAGMA table_info(movie_files)").fetchall()}
     if "quick_hash" not in file_cols:
         conn.execute("ALTER TABLE movie_files ADD COLUMN quick_hash INTEGER DEFAULT 0")
@@ -253,6 +268,12 @@ def _migrate(conn: sqlite3.Connection) -> None:
     if "strm_url" not in file_cols:
         # .strm（网络串流）文件里那一行目标地址；普通文件为空
         conn.execute("ALTER TABLE movie_files ADD COLUMN strm_url TEXT DEFAULT ''")
+    if "sub_tracks" not in file_cols:
+        # 内嵌字幕轨探测结果（JSON：轨列表 + 语言 + 是否中文）
+        conn.execute("ALTER TABLE movie_files ADD COLUMN sub_tracks TEXT DEFAULT ''")
+    if "sub_probe_at" not in file_cols:
+        # 上次探测时间；为空表示尚未探测（扫描时会补测）
+        conn.execute("ALTER TABLE movie_files ADD COLUMN sub_probe_at TEXT DEFAULT ''")
     # 依赖新列的索引统一在迁移阶段补齐（此时列已存在），避免旧库 executescript 时报错
     conn.execute("CREATE INDEX IF NOT EXISTS idx_files_hash ON movie_files(quick_hash)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_movies_res ON movies(resolution)")
@@ -273,6 +294,21 @@ def _migrate(conn: sqlite3.Connection) -> None:
         "position INTEGER DEFAULT 0, PRIMARY KEY (collection_id, movie_id))")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_wp_updated ON watch_progress(updated_at)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_ci_coll    ON collection_items(collection_id)")
+    # AI 任务队列（批量剧情分析 / 字幕翻译）：可取消、带预算，见 app/ai_jobs.py
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS ai_jobs ("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "movie_id INTEGER NOT NULL, kind TEXT DEFAULT '', payload TEXT DEFAULT '', "
+        "status TEXT DEFAULT 'queued', error TEXT DEFAULT '', "
+        "result_path TEXT DEFAULT '', chars INTEGER DEFAULT 0, model TEXT DEFAULT '', "
+        "created_at TEXT DEFAULT (datetime('now','localtime')), "
+        "updated_at TEXT DEFAULT (datetime('now','localtime')))")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_aijobs_status ON ai_jobs(status, id)")
+    # 翻译术语表：女优名 / 系列名 / 番号固定译法，避免每部片译法漂移
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS ai_glossary ("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "term TEXT NOT NULL, translation TEXT NOT NULL, kind TEXT DEFAULT 'term')")
     # 观看历史 / 分段记录（A+B 档）
     conn.execute(
         "CREATE TABLE IF NOT EXISTS watch_sessions ("

@@ -1,8 +1,11 @@
 import hashlib
+import json
 import os
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
+from . import subprobe
 from .config import load_config, roots_to_scan, video_exts
 from .db import connect
 from .jobs import SCAN
@@ -121,6 +124,8 @@ def run_scan(progress_cb=None, incremental=True, workers=None, hash_files=False,
     sample = int(cfg.get("hash_sample_bytes", 262144))
     min_size_mb = float(cfg["library"].get("min_size_mb", 0) or 0)
     min_bytes = min_size_mb * 1024 * 1024
+    # 内嵌字幕探测：默认开启；只对本地视频跑，.strm 没有文件可探
+    probe_subs = bool(cfg.get("library", {}).get("probe_subtitles", True))
 
     SCAN.start()
 
@@ -130,8 +135,8 @@ def run_scan(progress_cb=None, incremental=True, workers=None, hash_files=False,
         existing = {
             row["path"]: row
             for row in conn.execute(
-                "SELECT id, movie_id, path, size, mtime, missing, quick_hash, strm_url "
-                "FROM movie_files"
+                "SELECT id, movie_id, path, size, mtime, missing, quick_hash, strm_url, "
+                "sub_tracks, sub_probe_at FROM movie_files"
             )
         }
     finally:
@@ -157,7 +162,9 @@ def run_scan(progress_cb=None, incremental=True, workers=None, hash_files=False,
         rec = existing.get(path)
         # 旧的 .strm 记录还没解析出地址时，即使 size/mtime 没变也要走一遍
         stale_strm = bool(is_strm and rec and not (rec["strm_url"] or ""))
-        if incremental and rec and not rec["missing"] and not stale_strm \
+        # 老库升级后还没有字幕探测结果的文件：即使 size/mtime 没变也要补测一次
+        stale_sub = bool(probe_subs and not is_strm and rec and not (rec["sub_probe_at"] or ""))
+        if incremental and rec and not rec["missing"] and not stale_strm and not stale_sub \
                 and abs(float(rec["size"] or 0) - size) < 0.5 \
                 and abs(float(rec["mtime"] or 0) - mtime) < 1:
             alive.add(path)
@@ -165,7 +172,7 @@ def run_scan(progress_cb=None, incremental=True, workers=None, hash_files=False,
             SCAN.update(skipped=skipped, total=enumerated,
                         current=f"正在遍历目录（已发现 {enumerated} 个视频）")
             continue
-        to_process.append((path, size, mtime))
+        to_process.append((path, size, mtime, rec))
         alive.add(path)
         SCAN.update(total=enumerated,
                     current=f"正在遍历目录（已发现 {enumerated} 个视频）")
@@ -197,14 +204,37 @@ def run_scan(progress_cb=None, incremental=True, workers=None, hash_files=False,
 
     SCAN.update(phase="scanning", total=len(to_process), done=0, pending=len(to_process))
 
-    # 3) 阶段一：并发解析 + 计算指纹（无 DB 写）
+    # 3) 阶段一：并发解析 + 计算指纹 + 探测内嵌字幕（无 DB 写）
+    #    字幕探测会起 ffprobe/ffmpeg，单独限并发，避免和解析线程一起把 NAS 打满
+    sub_sem = threading.Semaphore(3)
+
     def worker(item):
-        path, size, mtime = item
+        path, size, mtime, rec = item
         parsed = parse_file(path)
         qh = _compute_quick_hash(path, size, sample) if hash_files else 0
         strm = read_strm_target(path) if path.lower().endswith(".strm") else ""
+
+        sub_tracks, sub_at = "", ""
+        # ISO 是光盘镜像，ffprobe 读不到内部字幕轨（且容易超时），直接跳过
+        if probe_subs and not strm and not path.lower().endswith(".iso"):
+            unchanged = bool(
+                rec and not rec["missing"]
+                and abs(float(rec["size"] or 0) - size) < 0.5
+                and abs(float(rec["mtime"] or 0) - mtime) < 1
+            )
+            if unchanged and (rec["sub_probe_at"] or ""):
+                # 文件没变：直接复用上次探测结果，零开销
+                sub_tracks = rec["sub_tracks"] or ""
+                sub_at = rec["sub_probe_at"] or ""
+            else:
+                with sub_sem:
+                    info = subprobe.probe(path, cfg)
+                if info.get("probed_at"):
+                    sub_at = info["probed_at"]
+                    sub_tracks = json.dumps(info, ensure_ascii=False)
+
         return {"parsed": parsed, "path": path, "size": size, "mtime": mtime,
-                "qh": qh, "strm": strm}
+                "qh": qh, "strm": strm, "sub_tracks": sub_tracks, "sub_at": sub_at}
 
     parsed_items = []
     with ThreadPoolExecutor(max_workers=workers) as ex:
@@ -222,7 +252,9 @@ def run_scan(progress_cb=None, incremental=True, workers=None, hash_files=False,
         for r in parsed_items:
             try:
                 act = store_upsert(conn, r["parsed"], r["path"], r["size"], r["mtime"], r["qh"],
-                                   strm_url=r.get("strm") or "")
+                                   strm_url=r.get("strm") or "",
+                                   sub_tracks=r.get("sub_tracks") or "",
+                                   sub_probe_at=r.get("sub_at") or "")
                 conn.commit()
                 if act == "added":
                     added += 1
@@ -293,11 +325,13 @@ def auto_cleanup_after_scan(alive_paths: set, roots: list, progress_cb=None):
     return cleaned
 
 
-def store_upsert(conn, parsed, path, size, mtime, qh, strm_url=""):
+def store_upsert(conn, parsed, path, size, mtime, qh, strm_url="",
+                 sub_tracks="", sub_probe_at=""):
     # 延迟导入，避免循环依赖
     from . import store
     return store.upsert_scanned_file(conn, parsed, path, size, mtime,
-                                     quick_hash=qh, strm_url=strm_url)
+                                     quick_hash=qh, strm_url=strm_url,
+                                     sub_tracks=sub_tracks, sub_probe_at=sub_probe_at)
 
 
 def batch_local_covers(progress_cb=None):

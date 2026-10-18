@@ -7,10 +7,12 @@
 * 登出后 SPA 仍会先渲染一遍界面（只是数据 401），看起来和锁屏页完全两样。
 
 这两个页面都不含任何应用数据，且与 SPA 内的遮挡层（PrivacyLock.vue）共用
-同一套 `.pv-*` 规格。文案按 Accept-Language 选中 / 繁 / 英 / 日。
+同一套 `.pv-*` 规格。文案按 Accept-Language 选中 / 繁 / 英 / 日，并附
+「令牌在哪」的可展开指引（桌面 / 容器两种写法）。
 """
 from __future__ import annotations
 
+from html import escape
 from typing import Dict
 
 _I18N: Dict[str, Dict[str, str]] = {
@@ -31,6 +33,10 @@ _I18N: Dict[str, Dict[str, str]] = {
         "expired": "登录已过期：请改用访问令牌解锁（见 data/access_token.txt）",
         "network": "网络错误，请检查服务是否在运行",
         "foot": "锁定在服务端生效，刷新页面不会绕过。",
+        "noPin": "尚未设置快速解锁码：解锁后到「设置 → 隐私」设置，之后就不必再输入长令牌。",
+        "helpTitle": "令牌在哪？",
+        "helpContainer": "在服务器上执行（把 &lt;服务名&gt; 换成 compose 里的服务名）：",
+        "helpDesktop": "令牌文件位置：",
     },
     "tw": {
         "lang": "zh-TW",
@@ -49,6 +55,10 @@ _I18N: Dict[str, Dict[str, str]] = {
         "expired": "登入已過期：請改用存取令牌解鎖（見 data/access_token.txt）",
         "network": "網路錯誤，請檢查服務是否在執行",
         "foot": "鎖定在伺服器端生效，重新整理頁面不會繞過。",
+        "noPin": "尚未設定快速解鎖碼：解鎖後到「設定 → 隱私」設定，之後就不必再輸入長令牌。",
+        "helpTitle": "令牌在哪？",
+        "helpContainer": "在伺服器上執行（把 &lt;服務名&gt; 換成 compose 裡的服務名）：",
+        "helpDesktop": "令牌檔案位置：",
     },
     "en": {
         "lang": "en",
@@ -67,6 +77,10 @@ _I18N: Dict[str, Dict[str, str]] = {
         "expired": "Session expired: unlock with the access token (see data/access_token.txt)",
         "network": "Network error — is the service running?",
         "foot": "Locking happens on the server; refreshing does not bypass it.",
+        "noPin": "No quick unlock code yet: set one under Settings → Privacy after unlocking, so you never need the long token again.",
+        "helpTitle": "Where is the token?",
+        "helpContainer": "Run this on the server (replace &lt;service&gt; with your compose service name):",
+        "helpDesktop": "Token file:",
     },
     "ja": {
         "lang": "ja",
@@ -85,6 +99,10 @@ _I18N: Dict[str, Dict[str, str]] = {
         "expired": "ログインの有効期限が切れました。アクセストークンで解除してください（data/access_token.txt）",
         "network": "ネットワークエラー。サービスが起動しているか確認してください",
         "foot": "ロックはサーバー側で有効です。再読み込みでは回避できません。",
+        "noPin": "解除コード未設定です。解除後「設定 → プライバシー」で設定すると、長いトークンを毎回入力せずに済みます。",
+        "helpTitle": "トークンの場所",
+        "helpContainer": "サーバー上で実行（&lt;サービス名&gt; は compose のサービス名）：",
+        "helpDesktop": "トークンファイル：",
     },
 }
 
@@ -108,6 +126,9 @@ _LOGIN_I18N: Dict[str, Dict[str, str]] = {
         "network": "网络错误，请检查服务是否在运行",
         "show": "显示输入内容",
         "hide": "隐藏输入内容",
+        "helpTitle": "令牌在哪？",
+        "helpContainer": "在服务器上执行（把 &lt;服务名&gt; 换成 compose 里的服务名）：",
+        "helpDesktop": "令牌文件位置：",
     },
     "tw": {
         "lang": "zh-TW",
@@ -127,6 +148,9 @@ _LOGIN_I18N: Dict[str, Dict[str, str]] = {
         "network": "網路錯誤，請檢查服務是否在執行",
         "show": "顯示輸入內容",
         "hide": "隱藏輸入內容",
+        "helpTitle": "令牌在哪？",
+        "helpContainer": "在伺服器上執行（把 &lt;服務名&gt; 換成 compose 裡的服務名）：",
+        "helpDesktop": "令牌檔案位置：",
     },
     "en": {
         "lang": "en",
@@ -146,6 +170,9 @@ _LOGIN_I18N: Dict[str, Dict[str, str]] = {
         "network": "Network error — is the service running?",
         "show": "Show input",
         "hide": "Hide input",
+        "helpTitle": "Where is the token?",
+        "helpContainer": "Run this on the server (replace &lt;service&gt; with your compose service name):",
+        "helpDesktop": "Token file:",
     },
     "ja": {
         "lang": "ja",
@@ -165,7 +192,18 @@ _LOGIN_I18N: Dict[str, Dict[str, str]] = {
         "network": "ネットワークエラー。サービスが起動しているか確認してください",
         "show": "入力内容を表示",
         "hide": "入力内容を隠す",
+        "helpTitle": "トークンの場所",
+        "helpContainer": "サーバー上で実行（&lt;サービス名&gt; は compose のサービス名）：",
+        "helpDesktop": "トークンファイル：",
     },
+}
+
+
+_REMEMBER = {
+    "zh": "记住此设备 30 天（共用电脑请勿勾选）",
+    "tw": "記住此裝置 30 天（共用電腦請勿勾選）",
+    "en": "Remember this device for 30 days (skip on shared computers)",
+    "ja": "この端末を 30 日間記憶（共用 PC ではチェックしない）",
 }
 
 
@@ -205,6 +243,7 @@ _CSS = """
     width: min(420px, 88vw); text-align: center; padding: 30px 26px 24px;
     background: var(--c-surface); border: 1px solid var(--c-line);
     border-radius: 16px; box-shadow: 0 20px 60px rgba(0, 0, 0, .5);
+    max-height: 92vh; overflow-y: auto;
   }
   .pv-icon { font-size: 32px; line-height: 1; }
   .pv-title { font-size: 17px; font-weight: 700; margin: 10px 0 6px; }
@@ -233,9 +272,23 @@ _CSS = """
     color: var(--c-text-2); font-size: 13px; cursor: pointer;
   }
   .pv-back:hover { color: var(--c-text); }
+  .pv-remember {
+    display: flex; align-items: center; gap: 8px; justify-content: center;
+    color: var(--c-text-2); font-size: 12px; cursor: pointer;
+  }
+  .pv-remember input { accent-color: var(--c-primary); }
   .pv-err { min-height: 18px; margin: 10px 0 0; color: var(--c-danger); font-size: 13px; }
   .pv-hint { color: var(--c-text-3); font-size: 12px; line-height: 1.7; margin: 12px 0 0; }
-  /* 主题由 /lock.js、/login.js 读取 localStorage 后切换（静态页拿不到应用内设置） */
+  .pv-nopin { color: #c08a2e; font-size: 12px; line-height: 1.7; margin: 10px 0 0; }
+  /* 「令牌在哪」：默认折叠，避免首屏太吵 */
+  .pv-help { margin-top: 14px; padding-top: 10px; border-top: 1px dashed var(--c-line); text-align: left; }
+  .pv-help summary { cursor: pointer; color: var(--c-text-2); font-size: 12px; }
+  .pv-help-where { margin: 8px 0 6px; color: var(--c-text-3); font-size: 12px; line-height: 1.7; }
+  .pv-cmd {
+    display: block; padding: 8px 10px; border-radius: 6px;
+    background: var(--c-surface-2); color: var(--c-text-2);
+    font-size: 12px; word-break: break-all; user-select: all;
+  }
 """
 
 _LOCK_TEMPLATE = """<!doctype html>
@@ -261,15 +314,20 @@ _LOCK_TEMPLATE = """<!doctype html>
     <button class="btn-primary" id="go">@@BTN@@</button>
   </div>
   <p class="pv-err" id="err"></p>
+  @@NOPIN@@
   <p class="pv-hint">@@HINT@@</p>
   <p class="pv-hint">@@FOOT@@</p>
+  <details class="pv-help">
+    <summary>@@HELP_TITLE@@</summary>
+    @@HELP@@
+  </details>
 </div>
 <script src="/lock.js" defer
         data-msg-needed="@@NEED@@"
         data-msg-expired="@@EXPIRED@@"
         data-msg-network="@@NETWORK@@"
         data-msg-show="@@SHOW@@"
-        data-msg-hide="@@HIDE@@"></script>
+        data-msg-hide="@@HIDE@@" data-nopin="@@NOPIN_FLAG@@"></script>
 </body>
 </html>
 """
@@ -296,10 +354,18 @@ _LOGIN_TEMPLATE = """<!doctype html>
     </div>
     <button class="btn-primary" id="go">@@BTN@@</button>
     <button type="button" class="pv-back" id="back" hidden>@@BACK@@</button>
+    <label class="pv-remember">
+      <input type="checkbox" id="remember" />
+      <span>@@REMEMBER@@</span>
+    </label>
   </div>
   <p class="pv-err" id="err"></p>
   <p class="pv-hint">@@HINT@@</p>
   <p class="pv-hint">@@FOOT@@</p>
+  <details class="pv-help">
+    <summary>@@HELP_TITLE@@</summary>
+    @@HELP@@
+  </details>
 </div>
 <script src="/login.js" defer
         data-msg-need-token="@@NEED_TOKEN@@"
@@ -321,6 +387,19 @@ _LOGIN_TEMPLATE = """<!doctype html>
 """
 
 
+def _help_html(t, in_container: bool, token_path: str) -> str:
+    """「令牌在哪」展开内容：容器给命令，桌面给文件路径。"""
+    path = token_path or "data/access_token.txt"
+    if in_container:
+        where = t["helpContainer"]
+        cmd = "docker compose exec &lt;服务名&gt; cat %s" % escape(path)
+    else:
+        where = t["helpDesktop"]
+        cmd = escape(path)
+    return ('<p class="pv-help-where">%s</p><code class="pv-cmd">%s</code>'
+            % (where, cmd))
+
+
 def _fill(template: str, pairs) -> str:
     html = template.replace("@@CSS@@", _CSS)
     for key, val in pairs:
@@ -328,28 +407,34 @@ def _fill(template: str, pairs) -> str:
     return html
 
 
-def render_lock_page(accept_language: str, reason: str, has_pin: bool) -> str:
+def render_lock_page(accept_language: str, reason: str, has_pin: bool,
+                     in_container: bool = False, token_path: str = "") -> str:
     t = _I18N.get(pick_lang(accept_language), _I18N["zh"])
     panic = (reason or "") == "panic"
     title = t["panicTitle"] if panic else t["locked"]
     desc = t["panicHint"] if panic else t["lockedHint"]
     ph = t["pinPh"] if has_pin else t["unlockPh"]
     hint = t["pinHint"] if has_pin else t["unlockHint"]
+    nopin = "" if has_pin else '<p class="pv-nopin">%s</p>' % escape(t["noPin"])
     return _fill(_LOCK_TEMPLATE, (
         ("LANG", t["lang"]), ("TITLE", title), ("DESC", desc), ("PH", ph),
         ("SHOW", t["show"]), ("BTN", t["unlockBtn"]), ("HINT", hint),
         ("FOOT", t["foot"]), ("NEED", t["needCred"]), ("EXPIRED", t["expired"]),
-        ("NETWORK", t["network"]), ("HIDE", t["hide"]),
+        ("NETWORK", t["network"]), ("HIDE", t["hide"]), ("NOPIN", nopin),
+        ("NOPIN_FLAG", "" if has_pin else "1"),
+        ("HELP_TITLE", t["helpTitle"]), ("HELP", _help_html(t, in_container, token_path)),
     ))
 
 
-def render_login_page(accept_language: str, totp_enabled: bool) -> str:
+def render_login_page(accept_language: str, totp_enabled: bool,
+                      in_container: bool = False, token_path: str = "") -> str:
     """未登录 / 已登出时首页返回的登录页。
 
     与锁屏页同一套 `.pv-*` 卡片；两步验证开启时先输令牌，再在同一张卡里
     切到验证码（由 /login.js 切换，不刷新页面）。
     """
-    t = _LOGIN_I18N.get(pick_lang(accept_language), _LOGIN_I18N["zh"])
+    lang = pick_lang(accept_language)
+    t = _LOGIN_I18N.get(lang, _LOGIN_I18N["zh"])
     return _fill(_LOGIN_TEMPLATE, (
         ("LANG", t["lang"]), ("TITLE", t["title"]), ("DESC", t["desc"]),
         ("PH", t["ph"]), ("BTN", t["btn"]), ("BACK", t["back"]),
@@ -358,4 +443,6 @@ def render_login_page(accept_language: str, totp_enabled: bool) -> str:
         ("NETWORK", t["network"]), ("TOTP_TITLE", t["totpTitle"]),
         ("TOTP_DESC", t["totpDesc"]), ("TOTP_PH", t["totpPh"]),
         ("TOTP_BTN", t["totpBtn"]), ("TOTP_ON", "1" if totp_enabled else ""),
+        ("REMEMBER", _REMEMBER.get(lang, _REMEMBER["zh"])),
+        ("HELP_TITLE", t["helpTitle"]), ("HELP", _help_html(t, in_container, token_path)),
     ))

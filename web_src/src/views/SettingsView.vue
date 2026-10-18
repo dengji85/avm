@@ -1,5 +1,5 @@
 <script setup>
-import { ref, reactive, computed, onBeforeUnmount, onMounted } from 'vue'
+import { ref, reactive, computed, onBeforeUnmount, onMounted, watch } from 'vue'
 import { state } from '../state.js'
 import {
   API, getConfig, putConfig, listProviders, testScraper as apiTest,
@@ -8,7 +8,8 @@ import {
   fsMounts,
   listPlugins, togglePlugin, regenAllPreviews, streamCacheStats, clearStreamCache,
   listSessions, revokeSession, getAudit, logout as apiLogout, logoutAll as apiLogoutAll,
-  setPin, privacyState,
+  setPin, privacyState, privacyLock, trustedDevices, revokeTrusted,
+  aiJobs, aiJobsCreate, aiJobsCancel, aiGlossary, aiGlossarySave,
   totpStatus, totpSetup, totpEnable, totpDisable,
   listApiKeys, createApiKey, revokeApiKey,
 } from '../api.js'
@@ -31,6 +32,12 @@ const TABS = [
   ['about', 'settings.tab.about'],
 ]
 const tab = ref('library')
+/* 其他页面（如解锁码提示条）可以请求直接打开某个标签 */
+watch(() => state.settingsTab, (v) => {
+  if (!v) return
+  tab.value = v
+  state.settingsTab = ''
+}, { immediate: true })
 
 /* 预置结构，避免异步加载前模板访问 undefined */
 const cfg = reactive({
@@ -243,6 +250,7 @@ const totpQrUrl = computed(() => `${API}/auth/totp/qr?_=${totpQrSeq.value}`)
 onBeforeUnmount(() => {
   if (clockTimer) clearInterval(clockTimer)
   if (revealTimer) clearInterval(revealTimer)   // 令牌明文 30 秒倒计时，离开页面也要停
+  if (aiJobTimer) clearInterval(aiJobTimer)
 })
 
 // 服务器时间：验证码对不上十有八九是手机时钟偏了，绑定面板里直接显示对比
@@ -462,6 +470,82 @@ async function clearPin() {
     pinInput.value = ''
     toast(t('privacy.pinCleared'), 'ok')
   } catch (e) { toast(e.message, 'err') } finally { savingPin.value = false }
+}
+
+/* 立即锁定一次，验证解锁流程（刷新后由服务端返回锁屏页） */
+async function testLock() {
+  try {
+    await privacyLock('manual')
+    window.location.reload()
+  } catch (e) { toast(e.message, 'err') }
+}
+
+/* 受信设备（「记住此设备 30 天」） */
+const trusted = ref([])
+async function loadTrusted() {
+  try {
+    const r = await trustedDevices()
+    trusted.value = (r && r.items) || []
+  } catch (e) { /* 未登录 / 旧版本后端：忽略 */ }
+}
+async function forgetTrusted() {
+  const ok = await confirmDialog(t('privacy.trustedForget'), t('privacy.trustedForgetHint'),
+    { danger: true, okText: t('privacy.trustedForget') })
+  if (!ok) return
+  try {
+    const r = await revokeTrusted()
+    trusted.value = []
+    toast(t('privacy.trustedDone', { n: (r && r.revoked) || 0 }), 'ok')
+  } catch (e) { toast(e.message, 'err') }
+}
+
+/* ---------- AI 批量任务 / 术语表 ---------- */
+const aiJobKind = ref('translate')
+const aiJobCount = ref(20)
+const aiJobBusy = ref(false)
+const aiJobState = ref({ running: false, total: 0, done: 0, fail: 0, items: [],
+                         budget_chars_per_run: 0, job_concurrency: 2 })
+const aiGlossaryText = ref('')
+const aiGlossaryBusy = ref(false)
+const aiGlossaryOk = ref(false)
+let aiJobTimer = null
+
+async function refreshAiJobs() {
+  try { aiJobState.value = Object.assign({ items: [] }, await aiJobs()) }
+  catch (e) { /* 忽略瞬时失败 */ }
+}
+async function startAiJob() {
+  aiJobBusy.value = true
+  try {
+    const r = await aiJobsCreate({ kind: aiJobKind.value, latest: Math.max(1, Math.min(200, aiJobCount.value)) })
+    toast(t('settings.aiJobsStarted', { n: r.count }), 'ok')
+    await refreshAiJobs()
+  } catch (e) { toast(e.message, 'err') } finally { aiJobBusy.value = false }
+}
+async function cancelAiJob() {
+  try { await aiJobsCancel(); await refreshAiJobs() } catch (e) { toast(e.message, 'err') }
+}
+async function loadGlossary() {
+  try {
+    const g = await aiGlossary()
+    aiGlossaryText.value = (g.items || []).map((i) => `${i.term} = ${i.translation}`).join('\n')
+  } catch (e) { /* 忽略 */ }
+}
+async function saveAiGlossary() {
+  aiGlossaryBusy.value = true
+  aiGlossaryOk.value = false
+  try {
+    const items = aiGlossaryText.value.split('\n').map((l) => l.trim()).filter(Boolean)
+      .map((l) => {
+        const i = Math.max(l.indexOf('='), l.indexOf('＝'))
+        return { term: (i > 0 ? l.slice(0, i) : '').trim(),
+                 translation: (i > 0 ? l.slice(i + 1) : '').trim() }
+      })
+      .filter((i) => i.term && i.translation)
+    await aiGlossarySave(items)
+    aiGlossaryOk.value = true
+    toast(t('settings.aiGlossarySaved'), 'ok')
+  } catch (e) { toast(e.message, 'err') } finally { aiGlossaryBusy.value = false }
 }
 
 async function doLogout() {
@@ -1013,7 +1097,15 @@ function renderUrl(site, code) {
 }
 const sitesPreviewCode = ref('ABC-123')
 
-onMounted(async () => { await load(); await loadServerInfo(); loadPlugins() })
+onMounted(async () => {
+  await load()
+  await loadServerInfo()
+  loadPlugins()
+  loadTrusted()
+  refreshAiJobs()
+  loadGlossary()
+  aiJobTimer = setInterval(() => { if (aiJobState.value.running) refreshAiJobs() }, 2500)
+})
 </script>
 
 <template>
@@ -1412,6 +1504,53 @@ onMounted(async () => { await load(); await loadServerInfo(); loadPlugins() })
             <span v-else-if="aiOk===false" class="err">{{ $t('settings.aiSaveFail') }}</span>
           </div>
         </div>
+
+        <!-- AI 批量任务：剧情分析 / 字幕翻译，限并发、可取消、带预算 -->
+        <div class="panel">
+          <div class="panel-head">
+            {{ $t('settings.aiJobsTitle') }}
+            <span class="sub">{{ $t('settings.aiJobsSub') }}</span>
+          </div>
+          <div class="panel-body">
+            <div class="field-row">
+              <label>{{ $t('settings.aiJobsKind') }}</label>
+              <select v-model="aiJobKind" style="width:170px">
+                <option value="translate">{{ $t('settings.aiJobsTranslate') }}</option>
+                <option value="plot">{{ $t('settings.aiJobsPlot') }}</option>
+              </select>
+              <label>{{ $t('settings.aiJobsCount') }}</label>
+              <input type="number" min="1" max="200" v-model.number="aiJobCount" style="width:90px" />
+              <button class="btn primary" :disabled="aiJobBusy" @click="startAiJob">{{ $t('settings.aiJobsStart') }}</button>
+              <button class="btn ghost" :disabled="!aiJobState.running" @click="cancelAiJob">{{ $t('settings.aiJobsCancel') }}</button>
+            </div>
+            <p class="hint">{{ $t('settings.aiJobsHint', { n: aiJobCount, budget: aiJobState.budget_chars_per_run || '∞' }) }}</p>
+            <div v-if="aiJobState.items && aiJobState.items.length" class="field col" style="margin-top:8px">
+              <div v-for="j in aiJobState.items" :key="j.id" class="sec-row">
+                <span class="mono">#{{ j.id }}</span>
+                <span>{{ j.kind === 'translate' ? $t('settings.aiJobsTranslate') : $t('settings.aiJobsPlot') }}</span>
+                <span class="muted sm sec-grow ellipsis">{{ j.status }}</span>
+                <span v-if="j.error" class="err sm ellipsis" :title="j.error">{{ j.error }}</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 翻译术语表：固定译法，避免每部片译名漂移 -->
+        <div class="panel">
+          <div class="panel-head">
+            {{ $t('settings.aiGlossaryTitle') }}
+            <span class="sub">{{ $t('settings.aiGlossarySub') }}</span>
+          </div>
+          <div class="panel-body">
+            <p class="hint">{{ $t('settings.aiGlossaryHint') }}</p>
+            <textarea v-model="aiGlossaryText" rows="6" spellcheck="false"
+                      :placeholder="$t('settings.aiGlossaryPh')"></textarea>
+            <div class="hstack">
+              <button class="btn primary" :disabled="aiGlossaryBusy" @click="saveAiGlossary">{{ $t('settings.aiGlossarySave') }}</button>
+              <span v-if="aiGlossaryOk" class="ok">{{ $t('settings.aiGlossarySaved') }}</span>
+            </div>
+          </div>
+        </div>
       </template>
 
       <!-- ============ 解析预览 ============ -->
@@ -1585,7 +1724,35 @@ onMounted(async () => { await load(); await loadServerInfo(); loadPlugins() })
               <input class="inp mono" v-model="cfg.privacy.panic_key" placeholder="Ctrl+Shift+H" style="max-width:260px" @input="scheduleSavePrivacy()" />
               <span class="hint">{{ $t('privacy.panicKeyHint') }}</span>
             </div>
+            <div class="field col">
+              <label>{{ $t('privacy.testTitle') }}</label>
+              <div class="hstack" style="align-items:center;gap:10px;flex-wrap:wrap">
+                <button class="btn tiny" @click="testLock">{{ $t('privacy.testBtn') }}</button>
+                <span class="hint">{{ $t('privacy.testHint') }}</span>
+              </div>
+            </div>
             <span class="hint">{{ savingPrivacy ? $t('settings.saving') : $t('privacy.autoSaved') }}</span>
+          </div>
+        </div>
+
+        <!-- 受信设备：勾选「记住此设备 30 天」的机器，可一键全部忘记 -->
+        <div class="panel">
+          <div class="panel-head">{{ $t('privacy.trustedTitle') }}</div>
+          <div class="panel-body">
+            <p class="hint">{{ $t('privacy.trustedHint') }}</p>
+            <div class="hstack" style="align-items:center;gap:10px;flex-wrap:wrap">
+              <span>{{ $t('privacy.trustedCount', { n: trusted.length }) }}</span>
+              <button class="btn tiny" :disabled="!trusted.length" @click="forgetTrusted">
+                {{ $t('privacy.trustedForget') }}
+              </button>
+            </div>
+            <div v-if="trusted.length" class="field col" style="margin-top:10px">
+              <div v-for="(d, i) in trusted" :key="i" class="sec-row">
+                <span class="mono">{{ d.ip || '-' }}</span>
+                <span class="muted sm sec-grow ellipsis">{{ d.ua }}</span>
+                <span class="muted sm tabular" :title="fmtDateTime(d.last)">{{ fmtAgo(d.last) }}</span>
+              </div>
+            </div>
           </div>
         </div>
       </template>

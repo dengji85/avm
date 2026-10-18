@@ -15,11 +15,15 @@ from .api import router
 from .api_auth import privacy_router, router as auth_router
 from .config import (WEB_DIR, ensure_dirs, DATA_DIR, CONFIG_PATH, TOKEN_FILE,
                      load_config, ensure_access_token, current_access_token, mask_token,
-                     session_cookie_name)
+                     session_cookie_name, IN_CONTAINER)
 from .db import init_db
 
 # 会话 Cookie 名按实例区分：同机多实例（开发 8770 + 容器 8771）互不覆盖
 auth.SESSION_COOKIE = session_cookie_name()
+# 受信设备 Cookie 同样按实例区分，否则同机多实例会互相覆盖「记住此设备」
+_cookie_name = auth.SESSION_COOKIE
+auth.TRUST_COOKIE = (_cookie_name.replace("session", "trust")
+                     if "session" in _cookie_name else _cookie_name + "_trust")
 
 # API 文档自托管：不引用任何 CDN（国内 / 离线 / 纯 http 都能打开）。
 # docs_url/redoc_url 关掉 FastAPI 自带的 Swagger 页面（它从 cdn.jsdelivr.net 拉脚本，
@@ -207,6 +211,7 @@ class AccessTokenMiddleware(BaseHTTPMiddleware):
                     request.headers.get("accept-language", ""),
                     str(st.get("reason") or ""),
                     bool((privacy.get("pin_hash") or "").strip()),
+                    IN_CONTAINER, str(TOKEN_FILE),
                 ),
                 headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
             )
@@ -219,11 +224,23 @@ class AccessTokenMiddleware(BaseHTTPMiddleware):
             idle0, absd0 = _session_limits(server)
             signed = bool(sid0) and auth.touch_session(sid0, idle0, absd0)
             if not signed and not _token_valid(request.scope, current_access_token()):
+                # 「记住此设备 30 天」：会话过期后自动续一个，不用再找令牌
+                did = auth.cookie_value(request.scope, auth.TRUST_COOKIE)
+                if did and auth.touch_trust(did):
+                    idle0, absd0 = _session_limits(server)
+                    nsid, _info = auth.new_session(ip, ua, idle0, absd0)
+                    auth.audit("login", ip, ua, "受信设备自动登录", ok=True)
+                    resp = RedirectResponse("/", status_code=302)
+                    resp.headers.append(
+                        "Set-Cookie",
+                        auth.session_cookie(nsid, auth.is_https(request.scope), idle0))
+                    return resp
                 totp_on = (bool(server.get("totp_enabled"))
                            and bool((server.get("totp_secret") or "").strip()))
                 return HTMLResponse(
                     lockpage.render_login_page(
-                        request.headers.get("accept-language", ""), totp_on),
+                        request.headers.get("accept-language", ""), totp_on,
+                        IN_CONTAINER, str(TOKEN_FILE)),
                     headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
                 )
 
@@ -270,6 +287,21 @@ class AccessTokenMiddleware(BaseHTTPMiddleware):
                         request.scope["avm_api_name"] = key_info.get("name") or ""
                         request.scope["avm_auth_type"] = "key"
 
+            # 4) 受信设备（「记住此设备 30 天」）：会话过期后自动续一个，
+            #    不用把用户再推回登录页找令牌。设备是在完整登录（含两步验证）
+            #    之后才登记的，因此不会绕过 2FA。
+            if not allowed:
+                did = auth.cookie_value(request.scope, auth.TRUST_COOKIE)
+                if did and auth.touch_trust(did):
+                    idle_d, absd_d = _session_limits(server)
+                    nsid, _info = auth.new_session(ip, ua, idle_d, absd_d)
+                    request.scope["avm_pending_session"] = (
+                        nsid, auth.is_https(request.scope), idle_d)
+                    request.scope["avm_auth_type"] = "device"
+                    request.scope["avm_session_ok"] = True   # 已续出真实会话，等同登录态
+                    allowed = True
+                    auth.audit("login", ip, ua, "受信设备自动登录", ok=True)
+
             if not allowed:
                 auth.audit("deny", ip, ua, path, ok=False)
                 resp = JSONResponse(
@@ -301,7 +333,14 @@ class AccessTokenMiddleware(BaseHTTPMiddleware):
                 content={"detail": "该 API Key 为只读，不能执行写操作", "code": "READ_ONLY"},
             )
 
-        return await call_next(request)
+        response = await call_next(request)
+        # 受信设备自动续期时补发会话 Cookie（放在响应上，客户端下次直接带会话）
+        pending = request.scope.get("avm_pending_session")
+        if pending:
+            nsid, https_flag, idle_d = pending
+            response.headers.append(
+                "Set-Cookie", auth.session_cookie(nsid, https_flag, idle_d))
+        return response
 
 
 # 前端为本地打包资源，无第三方 CDN：CSP 收紧脚本来源。

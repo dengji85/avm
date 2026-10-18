@@ -7,6 +7,7 @@ import {
   extractCover,
   listTags, renameTag, deleteTag,
   aiGenerateSynopsis, aiSuggestTags, aiStatus,
+  aiTranslate, aiDeleteSubtitle, subtitleFileUrl,
   getActress, avatarUrl, getConfig,
 } from '../api.js'
 import AddToCollectionBtn from './AddToCollectionBtn.vue'
@@ -57,6 +58,33 @@ function stepLightbox(delta) {
 }
 const aiReady = ref(false)
 const aiBusy = ref(false)
+/* AI 字幕翻译 */
+const aiTarget = ref('zh-Hans')
+const aiBilingual = ref(false)
+const aiSubs = computed(() => (mv.value?.subtitles || []).filter((s) => s.source === 'ai-translate'))
+const manualSubs = computed(() => (mv.value?.subtitles || []).filter((s) => s.source !== 'ai-translate'))
+
+function downloadSub(s) {
+  window.open(subtitleFileUrl(id.value, s.id), '_blank', 'noopener')
+}
+async function removeAiSub(s) {
+  const ok = await confirmDialog(t('detail.aiDelSub'), '', { danger: true, okText: t('common.delete') })
+  if (!ok) return
+  try {
+    await aiDeleteSubtitle(id.value, s.id)
+    toast(t('detail.aiSubDeleted'), 'ok')
+    await load()
+  } catch (e) { toast(e.message, 'err') }
+}
+async function doAiTranslate() {
+  aiBusy.value = true
+  try {
+    const r = await aiTranslate(id.value, aiTarget.value, aiBilingual.value)
+    toast(t('detail.aiTranslateDone', { n: r.cues }), 'ok', 3000)
+    await load()
+  } catch (e) { toast(e.message || t('detail.aiTranslateFail'), 'err') }
+  finally { aiBusy.value = false }
+}
 
 /* 常用在线站点：详情页一键打开影片在各站点的页面 */
 const sites = ref([])
@@ -93,7 +121,15 @@ async function checkAi() {
 }
 async function doAiSynopsis() {
   aiBusy.value = true
-  try {     const r = await aiGenerateSynopsis(id.value); mv.value.plot = r.plot; toast(t('detail.aiSynopsisDone'), 'ok') }
+  try {
+    const r = await aiGenerateSynopsis(id.value)
+    mv.value.plot = r.plot
+    mv.value.plot_source = r.source === 'subtitle' ? 'ai-subtitle' : 'ai-meta'
+    mv.value.ai_plot_at = new Date().toISOString()
+    toast(r.source === 'subtitle'
+      ? t('detail.aiPlotSubDone')
+      : t('detail.aiPlotMetaDone'), 'ok', 3500)
+  }
   catch (e) { toast(e.message || t('detail.aiSynopsisFail'), 'err') }
   finally { aiBusy.value = false }
 }
@@ -717,13 +753,38 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', onKey) })
                 <!-- 标记 -->
                 <div class="chip-list">
                   <span v-if="mv.subtitle" class="badge ok">{{ $t('detail.subtitle') }}</span>
+                <span v-if="mv.embed_sub_zh" class="badge ok" :title="$t('flag.embedZh')">{{ $t('flag.embedZh') }}</span>
                   <span v-if="mv.uncensored" class="badge warn">{{ $t('detail.uncensored') }}</span>
                   <span v-if="quality" class="badge accent">{{ quality }}</span>
                   <span v-if="mv.vr" class="badge">VR</span>
                   <span v-if="mv.leak" class="badge err">{{ $t('detail.leak') }}</span>
-                  <span v-for="s in (mv.subtitles || [])" :key="s.id" class="badge sub" :title="s.path">
+                  <span v-for="s in manualSubs" :key="s.id" class="badge sub" :title="s.path">
                     {{ $t('detail.subFile', { lang: s.lang || '字幕' }) }}
                   </span>
+                </div>
+
+                <!-- AI 字幕翻译：目标语言 + 双语 + 已有译文管理 -->
+                <div v-if="aiReady" class="ai-sub">
+                  <select v-model="aiTarget" class="inp tiny">
+                    <option value="zh-Hans">{{ $t('detail.aiTargetHans') }}</option>
+                    <option value="zh-Hant">{{ $t('detail.aiTargetHant') }}</option>
+                    <option value="en">{{ $t('detail.aiTargetEn') }}</option>
+                  </select>
+                  <label class="ai-sub-bi">
+                    <input type="checkbox" v-model="aiBilingual" />
+                    <span>{{ $t('detail.aiBilingual') }}</span>
+                  </label>
+                  <button class="btn tiny ghost" :disabled="aiBusy"
+                          :title="$t('detail.aiTranslateHint')"
+                          @click="doAiTranslate">{{ aiBusy ? $t('detail.generating') : $t('detail.aiTranslate') }}</button>
+                </div>
+                <div v-if="aiSubs.length" class="ai-subs">
+                  <div v-for="s in aiSubs" :key="s.id" class="ai-sub-row">
+                    <span class="mono">{{ s.lang }}{{ s.filename.includes('-双语') ? ' · ' + $t('detail.aiBilingual') : '' }}</span>
+                    <span class="spacer"></span>
+                    <button class="btn tiny ghost" @click="downloadSub(s)">{{ $t('common.download') }}</button>
+                    <button class="btn tiny ghost" @click="removeAiSub(s)">{{ $t('common.delete') }}</button>
+                  </div>
                 </div>
 
                 <!-- 关键信息 -->
@@ -853,9 +914,14 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', onKey) })
                 <div v-if="!editing">
                   <p v-if="mv.plot" class="plot">{{ mv.plot }}</p>
                   <p v-else class="muted">{{ $t('detail.noSynopsis') }}</p>
+                  <p v-if="mv.plot_source" class="plot-src">
+                    {{ mv.plot_source === 'ai-subtitle' ? $t('detail.aiFromSubs') : $t('detail.aiFromMeta') }}
+                    <template v-if="mv.ai_plot_at"> · {{ fmtAgo(mv.ai_plot_at) }}</template>
+                    · {{ $t('detail.aiEditable') }}
+                  </p>
                   <div v-if="mv.note" class="note-box"><b>{{ $t('detail.note') }}</b><p>{{ mv.note }}</p></div>
                   <div v-if="aiReady" class="hstack mt wrap">
-                    <button class="btn tiny ghost" :disabled="aiBusy" @click="doAiSynopsis">{{ aiBusy ? $t('detail.generating') : $t('detail.aiSynopsis') }}</button>
+                    <button class="btn tiny ghost" :disabled="aiBusy" :title="$t('detail.aiSynopsisHint')" @click="doAiSynopsis">{{ aiBusy ? $t('detail.generating') : $t('detail.aiSynopsis') }}</button>
                     <button class="btn tiny ghost" :disabled="aiBusy" @click="doAiTags">{{ $t('detail.aiTags') }}</button>
                   </div>
                   <button class="btn tiny mt" @click="startEdit">{{ $t('detail.editMeta') }}</button>
@@ -1153,6 +1219,16 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', onKey) })
 .dd-pane { padding: var(--sp-4) var(--sp-5) var(--sp-6); }
 
 .plot { line-height: 1.8; color: var(--c-text-2); white-space: pre-wrap; }
+.plot-src {
+  margin: 6px 0 0; font-size: var(--fs-sm); color: var(--c-text-3);
+}
+/* AI 字幕翻译控件与产物列表 */
+.ai-sub { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+.ai-sub .inp.tiny { padding: 3px 8px; font-size: var(--fs-sm); }
+.ai-sub-bi { display: inline-flex; align-items: center; gap: 6px; font-size: var(--fs-sm); color: var(--c-text-2); }
+.ai-sub-bi input { accent-color: var(--c-primary); }
+.ai-subs { margin-top: 6px; }
+.ai-sub-row { display: flex; align-items: center; gap: 8px; padding: 4px 0; font-size: var(--fs-sm); }
 .note-box {
   margin-top: var(--sp-3); padding: var(--sp-3);
   background: var(--c-surface); border-radius: var(--r-md);

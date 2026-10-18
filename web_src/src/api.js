@@ -114,7 +114,9 @@ export const clearStreamCache = () => post('/stream-cache/clear', {})
 export const csvUrl = () => `${API}/export/csv`
 
 /* ---------------- 登录 / 会话（见 docs/安全与隐私设计.md） ---------------- */
-export const login = (token, totp = '') => post('/auth/login', { token, totp })
+export const login = (token, totp = '', remember = false) => post('/auth/login', { token, totp, remember })
+export const trustedDevices = () => get('/auth/trusted')
+export const revokeTrusted = () => post('/auth/trusted/revoke-all', {})
 export const logout = () => post('/auth/logout', {})
 export const logoutAll = () => post('/auth/logout-all', {})
 export const getSession = () => get('/auth/session')
@@ -277,6 +279,19 @@ export const uploadAndMatchSubtitles = (formData) =>
 export const aiStatus = () => get('/ai/status')
 export const aiGenerateSynopsis = (id) => post(`/ai/generate-synopsis/${id}`, {})
 export const aiSuggestTags = (id) => post(`/ai/suggest-tags/${id}`, {})
+
+/* AI 字幕翻译：单部同步生成 */
+export const aiTranslate = (id, target = 'zh-Hans', bilingual = false) =>
+  post(`/ai/translate/${id}?target=${encodeURIComponent(target)}&bilingual=${bilingual ? '1' : '0'}`, {})
+export const aiDeleteSubtitle = (id, subId) => del(`/movies/${id}/subtitles/${subId}`)
+export const subtitleFileUrl = (id, subId) => `${API}/movies/${id}/subtitles/${subId}/file`
+/* AI 批量任务 */
+export const aiJobs = () => get('/ai/jobs')
+export const aiJobsCreate = (body) => post('/ai/jobs', body)
+export const aiJobsCancel = () => post('/ai/jobs/cancel', {})
+/* 术语表 */
+export const aiGlossary = () => get('/ai/glossary')
+export const aiGlossarySave = (items) => put('/ai/glossary', { items })
 export const aiSearchIntent = (query) => post('/ai/search-intent', { query })
 
 /* ---------------- 配置 ---------------- */

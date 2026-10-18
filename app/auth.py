@@ -30,6 +30,11 @@ COOKIE_TOKEN = "avm_token"  # 旧版前端写入的令牌 Cookie（升级后由�
 
 _LOCK = threading.RLock()
 _SESSIONS: Dict[str, Dict[str, Any]] = {}   # 指纹 -> {created, last, ip, ua}
+# 受信设备（「记住此设备 30 天」）：设备 Cookie 指纹 -> {created, last, ip, ua}
+_DEVICES: Dict[str, Dict[str, Any]] = {}
+TRUST_COOKIE = "avm_trust"                  # 实际名字由 main.py 按实例派生
+TRUST_DAYS = 30                             # 滑动有效期：30 天不用失效
+TRUST_MAX_DAYS = 90                         # 绝对上限：无论多常用，90 天后必须重新登录
 _FAILS: Dict[str, List[float]] = {}         # ip -> 失败时间戳列表
 _AUDIT: List[Dict[str, Any]] = []           # 最近事件（环形）
 MAX_AUDIT = 200
@@ -113,6 +118,9 @@ def load_persisted() -> int:
             if isinstance(info, dict) and float(info.get("created") or 0) > 0:
                 _SESSIONS[fp] = info
                 n += 1
+        for fp, info in (data.get("devices") or {}).items():
+            if isinstance(info, dict) and float(info.get("created") or 0) > 0:
+                _DEVICES[fp] = info
     if n:
         audit("restore", detail="已恢复 %d 个持久会话" % n)
     return n
@@ -124,7 +132,8 @@ def _save_persisted() -> None:
     try:
         path = _persist_path()
         with _LOCK:
-            payload = json.dumps({"sessions": _SESSIONS}, ensure_ascii=False)
+            payload = json.dumps({"sessions": _SESSIONS, "devices": _DEVICES},
+                                 ensure_ascii=False)
         tmp = path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             f.write(payload)
@@ -203,6 +212,85 @@ def drop_all() -> int:
     if n:
         _save_persisted()
     return n
+
+
+# ------------------------------------------------------------------ 受信设备
+def trust_cookie(did: str, https: bool, days: int = TRUST_DAYS) -> str:
+    """「记住此设备」Cookie：HttpOnly + SameSite=Lax，默认 30 天。"""
+    parts = ["%s=%s" % (TRUST_COOKIE, did), "Path=/", "HttpOnly", "SameSite=Lax",
+             "Max-Age=%d" % (max(1, days) * 86400)]
+    if https:
+        parts.append("Secure")
+    return "; ".join(parts)
+
+
+def add_trust(ip: str, ua: str, days: int = TRUST_DAYS) -> str:
+    """登记一台受信设备，返回写入 Cookie 的随机标识（服务端只存指纹）。"""
+    did = secrets.token_urlsafe(32)
+    now = time.time()
+    with _LOCK:
+        _DEVICES[fingerprint(did)] = {"created": now, "last": now,
+                                      "ip": ip or "", "ua": (ua or "")[:200]}
+    _save_persisted()
+    return did
+
+
+def touch_trust(did: str, days: int = TRUST_DAYS) -> Optional[Dict[str, Any]]:
+    """校验受信设备并刷新最后使用时间；过期 / 超过绝对上限返回 None。"""
+    if not did:
+        return None
+    fp = fingerprint(did)
+    now = time.time()
+    with _LOCK:
+        info = _DEVICES.get(fp)
+        if not info:
+            return None
+        created = float(info.get("created") or 0)
+        last = float(info.get("last") or created)
+        if now - created > TRUST_MAX_DAYS * 86400 \
+                or (days > 0 and now - last > days * 86400):
+            _DEVICES.pop(fp, None)
+            _save_persisted()
+            return None
+        info["last"] = now
+        return dict(info)
+
+
+def drop_trust(did: str) -> bool:
+    if not did:
+        return False
+    fp = fingerprint(did)
+    with _LOCK:
+        hit = _DEVICES.pop(fp, None) is not None
+    if hit:
+        _save_persisted()
+    return hit
+
+
+def drop_all_trust() -> int:
+    with _LOCK:
+        n = len(_DEVICES)
+        _DEVICES.clear()
+    if n:
+        _save_persisted()
+    return n
+
+
+def list_trust() -> List[Dict[str, Any]]:
+    """列出仍然有效的受信设备（不含指纹，仅用于设置页展示）。"""
+    now = time.time()
+    out: List[Dict[str, Any]] = []
+    with _LOCK:
+        for fp, info in list(_DEVICES.items()):
+            created = float(info.get("created") or 0)
+            last = float(info.get("last") or created)
+            if now - created > TRUST_MAX_DAYS * 86400 or now - last > TRUST_DAYS * 86400:
+                _DEVICES.pop(fp, None)
+                continue
+            out.append({"created": created, "last": last,
+                        "ip": info.get("ip") or "", "ua": info.get("ua") or ""})
+    out.sort(key=lambda x: x["last"], reverse=True)
+    return out
 
 
 def prune(idle_days: int, abs_days: int) -> int:

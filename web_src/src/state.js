@@ -72,6 +72,8 @@ export const state = reactive({
   // 也更友好。仅接受合法的 'light'，其余（空值/脏数据/旧版本遗留）一律回退深色，
   // 避免存档里残留异常值导致主题“静默失效”。
   theme: saved.theme === 'light' ? 'light' : 'dark',
+  // 跨页面请求设置页的某个标签（如解锁码提示 → 设置 → 隐私）；消费后置空
+  settingsTab: '',
   density: saved.density || 'cozy',
   cardSize: saved.cardSize || 'normal',   // dense | normal | large
   sidebarCollapsed: !!saved.sidebarCollapsed,
@@ -292,7 +294,8 @@ export function applyFacet(kind, name) {
 
 export const FLAGS = [
   ['favorite', 'flag.favorite', '♥'], ['watchlist', 'flag.watchlist', '⌚'],
-  ['subtitle', 'flag.subtitle', 'flag.subtitleShort'], ['uncensored', 'flag.uncensored', 'flag.uncensoredShort'],
+  ['subtitle', 'flag.subtitle', 'flag.subtitleShort'], ['embedzh', 'flag.embedZh', '内字'],
+  ['uncensored', 'flag.uncensored', 'flag.uncensoredShort'],
   ['hd4k', 'flag.hd4k', '4K'], ['vr', 'flag.vr', 'VR'],
   ['unwatched', 'flag.unwatched', '○'], ['watched', 'flag.watched', '●'],
   ['nocover', 'flag.nocover', '▢'], ['noscrape', 'flag.noscrape', '⚑'], ['nocode', 'flag.nocode', '?'],
