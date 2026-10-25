@@ -10,6 +10,11 @@ services:
     #   docker compose pull && docker compose up -d
     # 如需本地构建：注释掉下面的 image，取消 build 段注释
     image: ghcr.io/dengji85/avm:latest
+    # 要在 NAS 上跑「语音对白提取」（Whisper）？改用全量插件版镜像（仅 x86_64，+约170MB）：
+    #   image: ghcr.io/dengji85/avm:latest-full
+    # 模型不随镜像（约 460MB），放到挂载卷里即可：
+    #   volumes: - ./models:/data/models   ← 里面放 faster-whisper-small/
+    # 详见 docs/Docker部署.md「语音对白提取」一节
     # build:
     #   context: .
     #   args:

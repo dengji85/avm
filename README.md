@@ -18,7 +18,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-1.14.0-1f6feb.svg"/>
+  <img src="https://img.shields.io/badge/version-1.15.0-1f6feb.svg"/>
   <img src="https://img.shields.io/badge/backend-FastAPI-009688.svg"/>
   <img src="https://img.shields.io/badge/frontend-Vue%203%20%2F%20Vite-42b883.svg"/>
   <img src="https://img.shields.io/badge/database-SQLite-003b57.svg"/>
@@ -35,7 +35,7 @@
   <a href="#产品理念">产品理念</a> ·
   <a href="#核心功能">核心功能</a> ·
   <a href="#为什么选片匣而不是别的工具">为什么选它</a> ·
-  <a href="#本次更新亮点未发布">更新亮点</a> ·
+  <a href="#v1150-更新亮点">更新亮点</a> ·
   <a href="#快速开始">快速开始</a>
 </p>
 
@@ -55,7 +55,7 @@
 
 **方式一：Windows 免安装单文件 exe（推荐）**
 
-1. 到 **[Releases](https://github.com/dengji85/avm/releases)** 下载单个 `AVM-<版本号>.exe`（如 `AVM-1.14.0.exe`）。
+1. 到 **[Releases](https://github.com/dengji85/avm/releases)** 下载单个 `AVM-<版本号>.exe`（如 `AVM-1.15.0.exe`）。同页的 `asr-libs-*.zip` 是语音组件安装包，由程序内「一键安装」自动下载，无需手动处理；`SHA256.txt` 用于校验。
 2. 放到任意目录（如 `D:\AVM\`），双击启动，自动打开浏览器进入 Web UI。
 3. 升级时**把新 `AVM-*.exe` 放到同目录、删掉旧 exe 即可**——数据（`data/` 库/封面/配置）在同目录自动保留，无需手动替换前端资源。
 4. 备份迁移：`AVM-*.exe` 与 `data/` 一起拷贝即可。
@@ -87,8 +87,9 @@ docker compose pull && docker compose up -d
 | 标签 | 含义 | 适合 |
 | --- | --- | --- |
 | `latest` | 最近一次正式发布，稳定 | 日常使用（推荐） |
+| `latest-full` | 全量插件版：内置语音对白提取依赖（仅 x86_64，模型另放挂载卷） | 想在 NAS 上跑「提取对白 → AI 理解剧情」 |
 | `main` | `main` 分支最新构建，含尚未正式发布的修复 | 想第一时间验证新修复、反馈问题 |
-| `1.14.0` | 固定版本，不随更新变化 | 需要版本可控 |
+| `1.15.0` | 固定版本，不随更新变化 | 需要版本可控 |
 
 > 说明：`latest` 只在发布新版本时更新，**不会被 `main` 的构建覆盖**；想提前拿到修复就拉 `main`。
 
@@ -97,6 +98,13 @@ docker compose pull && docker compose up -d
 * 数据（配置 / 数据库 / 封面 / 头像 / 预览）全在 `/data` 卷，升级只换镜像、库自动迁移；
 * 镜像默认内置 `ffmpeg`（抽帧/预览）与 `chromium`（av-wiki 抓取）；自建时可用 `--build-arg INSTALL_CHROMIUM=0` 精简；
 * 容器内无桌面环境，「用系统播放器 / 在文件夹中显示」会自动隐藏，删除文件默认「仅移出媒体库」。
+
+**⬆️ 升级（数据都在 `data/`，自动迁移，无需重建库）**：
+
+* **Windows**：下载新 `AVM-*.exe` 放到原目录替换旧 exe，重启即可；
+* **Docker**：`docker compose pull && docker compose up -d`（数据在 `/data` 卷，原地保留）；
+* 用 `latest-full` 的同样 `pull` 升级，模型在 `/data/models` 不受影响；
+* 详细迁移 / 回滚见 **[docs/升级指南.md](docs/升级指南.md)**。
 
 > 完整说明（NAS 各平台、环境变量、反向代理、升级、FAQ）见 **[docs/Docker部署.md](docs/Docker部署.md)**；反代部署下的鉴权与会话安全必读 **[docs/安全与隐私设计.md](docs/安全与隐私设计.md)**。
 
@@ -188,12 +196,14 @@ docker compose pull && docker compose up -d
 
 ---
 
-## 🌟 本次更新亮点（未发布）
+## 🌟 v1.15.0 更新亮点
 
-- **🤖 AI 助手库模式**：右下角悬浮球随处唤起；自然语言找片、「今晚看什么」口味推荐、问库（口味画像 / 观看统计 / 库健康）——统计在本机执行，模型只解析意图，**库数据不出本机**；可选「AI 解读」把统计组织成人话（聚合摘要、可随时关闭）。
-- **🧩 扩展组件**：FFmpeg 与语音识别组件 / 模型在设置里**一键安装**（断点续传、多源回退、离线导入、卸载），不再需要命令行。
-- **🔊 语音对白提取 + 无字幕 AI 简介**：详情页一键提取对白喂给 AI 理解剧情；没有字幕的影片也能按元数据生成简介。
-- **🔍 调用记录透明化**：来源标注（页面内 / 外部 / 后台）、完整提示词与回复可查、一键清空。
+- **🔊 提取对白**：内置语音识别（Whisper）从影片提取对白——没有字幕的片也能生成简介、回答剧情问题。
+- **🌐 AI 字幕翻译**：内嵌 / 外挂字幕译成简 / 繁 / 英（可双语）；女优名、系列名用术语表固定译法。
+- **📝 AI 总结剧情**：按字幕（有对白按对白）生成简介并标注依据；支持批量处理，可中途取消。
+- **🖥 网页播放外挂字幕**：同目录字幕登记后播放器直接选用，不必依赖系统播放器。
+- **📤 导出到媒体库**：NFO + 封面写给 Emby / Jellyfin / Kodi（维护页工具，后台任务、可取消）。
+- **✨ AI 助手**：自然语言找片、问库统计、联网查资料（可选，默认不联网）。
 
 完整变更见 **[`CHANGELOG.md`](CHANGELOG.md)**。
 

@@ -21,7 +21,7 @@
   <a href="#why-do-you-need-filmbox">Why you need it</a> ·
   <a href="#core-features">Core features</a> ·
   <a href="#why-filmbox-instead-of-other-tools">Why choose it</a> ·
-  <a href="#highlights-unreleased">Highlights</a> ·
+  <a href="#v1150-highlights">Highlights</a> ·
   <a href="#download--install">Download</a> ·
   <a href="#quick-start">Quick start</a>
 </p>
@@ -98,12 +98,14 @@ Market options fall into two rough camps: **general media scrapers** (TinyMediaM
 
 ---
 
-## 🌟 Highlights (unreleased)
+## 🌟 v1.15.0 Highlights
 
-- **🤖 AI assistant library mode**: summon the ✨ bubble on any page; natural-language movie search, "what to watch tonight" taste-weighted picks, and library Q&A (taste profile / watch stats / library health) — stats run locally, the model only parses your question, **library data never leaves the machine**; an optional "AI summary" turns stats into prose (aggregate numbers only, off by default).
-- **🧩 Extension components**: install FFmpeg and speech-recognition components/models with one click from Settings (resumable downloads, multi-source fallback, offline import, uninstall) — no command line needed.
-- **🔊 Speech dialogue + AI plot without subtitles**: extract dialogue on the detail page for AI plot understanding; movies without subtitles get AI synopses from metadata.
-- **🔍 Transparent AI call log**: source labels (in-app / external / background), full prompts & replies inspectable, one-click clear.
+- **🔊 Dialogue extraction**: built-in speech recognition (Whisper) extracts dialogue from your videos — movies without subtitles can now get AI synopses and plot Q&A.
+- **🌐 AI subtitle translation**: embedded / external subtitles translated to Simplified / Traditional / English (bilingual optional); actress & series names pinned via a glossary.
+- **📝 AI plot summary**: generated from subtitles (or dialogue) and written back with source notes; batch processing with cancel support.
+- **🖥 External subtitles in web playback**: register same-folder subtitle files and pick them right in the web player.
+- **📤 Export to media library**: NFO + artwork for Emby / Jellyfin / Kodi (Maintenance tool, background job with cancel).
+- **✨ AI assistant**: natural-language search, library Q&A, optional web lookup (off by default).
 
 
 ---
@@ -149,8 +151,9 @@ docker compose pull && docker compose up -d
 | Tag | Meaning | Best for |
 | --- | --- | --- |
 | `latest` | Latest stable release | Everyday use (recommended) |
+| `latest-full` | Full variant with speech-recognition deps built in (x86_64 only; models stay in the mounted volume) | Running "dialog extraction → AI plot" on your NAS |
 | `main` | Newest build from the `main` branch, including fixes not yet released | Trying new fixes early / reporting issues |
-| `1.14.0` | Pinned version, never changes | Version-pinned deployments |
+| `1.15.0` | Pinned version, never changes | Version-pinned deployments |
 
 > Note: `latest` is only updated when a new release is published — it is **never overwritten** by `main` builds. Pull `main` if you want fixes early.
 
@@ -159,6 +162,13 @@ docker compose pull && docker compose up -d
 * Everything (config / DB / covers / avatars / previews) lives in the `/data` volume; upgrading only swaps the image.
 * The image bundles `ffmpeg` and `chromium`; use `--build-arg INSTALL_CHROMIUM=0` for a slimmer build.
 * No desktop inside a container — "open external player / reveal folder" are hidden and deletion defaults to "remove from library".
+
+**⬆️ Upgrade (all data lives in `data/`, migrated automatically — no library rebuild)**:
+
+* **Windows**: drop the new `AVM-*.exe` into the same folder replacing the old one, restart;
+* **Docker**: `docker compose pull && docker compose up -d` (data stays in the `/data` volume);
+* On `latest-full`, the same `pull` upgrades; models in `/data/models` are untouched;
+* Detailed migration / rollback: **[docs/升级指南.md](docs/升级指南.md)**.
 
 > Full guide (NAS platforms, env vars, reverse proxy, upgrade, FAQ): **[docs/Docker部署.md](docs/Docker部署.md)**; authentication & session security behind a reverse proxy: **[docs/安全与隐私设计.md](docs/安全与隐私设计.md)**.
 

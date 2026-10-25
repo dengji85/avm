@@ -33,7 +33,7 @@ docker compose exec avm cat /data/access_token.txt
 指定版本：
 
 ```bash
-docker pull ghcr.io/dengji85/avm:1.14.0
+docker pull ghcr.io/dengji85/avm:1.15.0
 ```
 
 > 首次使用需要把 GHCR 上的镜像包设为 **Public**（GitHub → 该仓库 → Packages → 对应镜像 → Package settings → Change visibility），
@@ -112,6 +112,7 @@ docker build -t avm:latest .
 | --- | --- |
 | `INSTALL_CHROMIUM=1`（默认） | 含 Chromium，`avwiki` 数据源可用（镜像较大，约 +300MB） |
 | `INSTALL_CHROMIUM=0` | 精简镜像；其余数据源（javbus / javdb / local_nfo / 自定义源）不受影响 |
+| `WITH_ASR=1` | 内置语音对白提取依赖（faster-whisper，约 +170MB）；**仅 x86_64**。模型（约 460MB）不进镜像，放挂载的 `/data/models/faster-whisper-small` |
 
 ```bash
 # 精简构建
@@ -119,6 +120,42 @@ docker build --build-arg INSTALL_CHROMIUM=0 -t avm:slim .
 ```
 
 `ffmpeg` 默认内置，用于封面抽帧与预览图；如需自备，可在设置页填写 `ffmpeg_path`。
+
+### 6.1 语音对白提取（NAS 上跑 Whisper）
+
+**方式一：全量插件版镜像（推荐，零安装）**
+
+CI 在每次发版时同时发布 `-full` 后缀镜像（`latest-full` / `x.y.z-full`），已内置 faster-whisper 依赖，改一行 compose 即可：
+
+```yaml
+    image: ghcr.io/dengji85/avm:latest-full
+```
+
+模型不随镜像，放到挂载卷（约 460MB，可用 `python tools/fetch_asr_model.py` 下载，或在扩展组件页下载）：
+
+```yaml
+    volumes:
+      - ./data:/data
+      - ./models:/data/models     # 里面放 faster-whisper-small/
+```
+
+**方式二：精简镜像 + 页面安装**
+
+`设置 → 扩展组件` 里「语音识别依赖」一键安装（同样仅 x86_64；断点续传、失败换源）。
+
+**性能参考（CPU 版 faster-whisper-small，int8，以实测为准）**
+
+| 机器 | `fast` 档（beam=1） |
+| --- | --- |
+| N100 / N5105 四核 | 约 3–6 倍实时，2 小时片 20–40 分钟 |
+| 老款 Celeron（J4105 级别） | 约 1–2 倍实时 |
+| ARM NAS | 慢于实时，不建议 |
+
+* 内存峰值约 0.7–1GB；任务**串行**执行（同一时间只跑一部），跑的时候 CPU 占满属正常，播放 / 扫描会被短暂挤压，建议在空闲时段批量跑。
+* 建议在 `config.json` 把 `asr.quality` 设为 `"fast"`：这类片对白清晰、基本单人说话，束宽几乎不影响准确度，速度快 2–3 倍。
+* 依赖装了但没模型时，接口会明确提示缺模型，其他 AI 功能不受影响。
+
+**升级**：普通升级 `docker compose pull && docker compose up -d` 即可——页面安装的组件在 `/data/ext`、模型在 `/data/models`，都在挂载卷里，**升级不丢、无需重装**；从精简镜像换 `latest-full` 也一样，换完依赖直接可用，`/data/ext` 里的旧安装可留可卸。库与配置自动迁移，媒体库无需重建。
 
 ## 7. 反向代理与 HTTPS
 
@@ -186,7 +223,8 @@ docker compose up -d --build
 
 | 触发 | 产出标签 |
 | --- | --- |
-| 推送 `v*` 标签（如 `v1.14.0`） | `1.14.0`、`1.14`、`latest` |
+| 推送 `v*` 标签（如 `v1.15.0`） | `1.15.0`、`1.15`、`latest`；并行产出 `-full` 全量插件版（amd64） |
+| 推送 `main` 分支 | `main`；另有 `main-full` |
 | 推送 `main` 分支 | `main` |
 | 手动触发（Actions → Run workflow） | 按当前分支规则 |
 
