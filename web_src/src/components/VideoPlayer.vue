@@ -1,5 +1,5 @@
 <script setup>
-import { ref, onMounted, onBeforeUnmount, watch, nextTick } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount, watch, nextTick } from 'vue'
 import videojs from 'video.js'
 import 'video.js/dist/video-js.css'
 import { streamUrl, strmHlsUrl, streamInfo, setProgress, playMovie, markPlayed, startSession, updateSession, endSession, getPreviews, genPreviews, playbackInfo, prepareStream, prepareStreamStatus, subtitleTracks, setSkipPoints } from '../api.js'
@@ -24,6 +24,62 @@ let videoEl = null         // 底层 <video> 元素
 const uiReady = ref(false)
 const subOpen = ref(false)
 const markOpen = ref(false)
+/* CC 按钮要挂进 video.js 控制条（原生按钮那一排），用 Teleport 渲染进去，
+   这样它的位置、显示/隐藏（含自动隐藏）都跟着控制条走，不用自己维护 */
+const ccHost = ref(null)
+/* 字幕菜单：悬停展开、移开延时收起，点一下也能开关。
+   延时是为了「从按钮滑到菜单」这段移动不被打断（触屏没有 hover，走点击）。 */
+let subTimer = 0
+function openSubMenu() {
+  clearTimeout(subTimer)
+  subOpen.value = true
+}
+function closeSubMenuSoon() {
+  clearTimeout(subTimer)
+  subTimer = setTimeout(() => { subOpen.value = false }, 200)
+}
+function toggleSubMenu() {
+  if (subOpen.value) {
+    clearTimeout(subTimer)
+    subOpen.value = false
+  } else {
+    openSubMenu()
+  }
+}
+function pickSub(id) {
+  selectSub(id)
+  clearTimeout(subTimer)
+  subOpen.value = false
+}
+/* 字幕样式：用分段按钮而不是原生下拉——原生 select 又高又和播放器风格不搭 */
+const subSizeOpts = computed(() => [
+  { v: 's', t: t('player.subSizeS') },
+  { v: 'm', t: t('player.subSizeM') },
+  { v: 'l', t: t('player.subSizeL') },
+])
+const subBgOpts = computed(() => [
+  { v: '0', t: t('player.subBgNone') },
+  { v: '1', t: t('player.subBgHalf') },
+  { v: '2', t: t('player.subBgFull') },
+])
+function setSubStyle(key, val) {
+  subStyle.value[key] = val
+  savePrefs()
+}
+/** 在控制条里插一个空位（全屏按钮左边），CC 用 Teleport 渲染进去 */
+function mountCcHost() {
+  const bar = player && player.controlBar && player.controlBar.el()
+  if (!bar) return
+  let host = bar.querySelector('.vjs-cc-host')
+  if (!host) {
+    host = document.createElement('div')
+    host.className = 'vjs-cc-host'
+    const fs = bar.querySelector('.vjs-fullscreen-control')
+    if (fs) bar.insertBefore(host, fs)
+    else bar.appendChild(host)
+  }
+  ccHost.value = host
+}
 const subTracks = ref([])
 const activeSub = ref('')
 const subStyle = ref({ size: 'm', bg: '1' })
@@ -117,10 +173,14 @@ async function loadSubtitleTracks() {
 function selectSub(id) {
   activeSub.value = id
   const list = subTracks.value
-  const tracks = (videoEl && videoEl.textTracks) || []
+  // 远程字幕轨（addRemoteTextTrack）在 video.js 里不一定会生成 <video><track>，
+  // 所以必须走 player.textTracks()；只看 videoEl.textTracks 会得到空列表，
+  // 表现就是「点了字幕没有任何反应」。
+  const tracks = (player && typeof player.textTracks === 'function' && player.textTracks())
+    || (videoEl && videoEl.textTracks) || []
   for (let i = 0; i < tracks.length; i++) {
     const tt = tracks[i]
-    if (tt.kind !== 'subtitles') continue
+    if (tt.kind !== 'subtitles' && tt.kind !== 'captions') continue
     // 按 label 对齐（video.js 会在原生轨之后追加远程轨，不能按下标猜）
     const hit = list.find((x) => x.label === tt.label)
     tt.mode = (hit && hit.id === id) ? 'showing' : 'disabled'
@@ -708,6 +768,7 @@ function initPlayer() {
     })
 
     videoEl = player.el().querySelector('video')
+    mountCcHost()
 
     player.on('loadedmetadata', () => { onLoaded() })
     player.on('timeupdate', () => onTime())
@@ -765,6 +826,8 @@ function destroyPlayer() {
         progressCtrl.removeEventListener('mousemove', onProgressMove)
         progressCtrl.removeEventListener('mouseleave', onProgressLeave)
       }
+      // 先摘掉 Teleport 目标，避免播放器销毁后 Vue 还往已分离的节点里操作
+      ccHost.value = null
       player.dispose()
     } catch (e) { /* 静默 */ }
     player = null
@@ -888,6 +951,7 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   // 离开播放器时保存当前的音量/倍速/字幕偏好（音量拖动过程不写盘，避免频繁 IO）
+  clearTimeout(subTimer)
   savePrefs()
   window.removeEventListener('avm-pause-player', onPauseRequest)
   window.removeEventListener('avm-seek', onSeekRequest)
@@ -918,32 +982,40 @@ watch(() => props.movieId, () => {
   <div class="player">
     <div v-show="!failed" ref="containerEl" class="vjs-wrap">
       <!-- 播放器浮层：字幕轨选择/样式、片头片尾跳过标记 -->
-      <div v-if="uiReady" class="vp-ui">
-        <div class="vp-btn" :class="{ on: subOpen }" @click.stop="subOpen = !subOpen">
+      <!-- 字幕入口挂在 control-bar 里（见 mountCcHost），和原生按钮同一排 -->
+      <Teleport v-if="uiReady && ccHost" :to="ccHost">
+        <div class="vp-cc" :class="{ on: subOpen }"
+             @click.stop="toggleSubMenu"
+             @mouseenter="openSubMenu"
+             @mouseleave="closeSubMenuSoon">
           CC
-          <div v-if="subOpen" class="vp-menu" @click.stop>
-            <button class="vp-item" :class="{ on: !activeSub }" @click="selectSub(null)">{{ $t('player.subOff') }}</button>
+          <div v-if="subOpen" class="vp-menu" @click.stop
+               @mouseenter="openSubMenu" @mouseleave="closeSubMenuSoon">
+            <button class="vp-item" :class="{ on: !activeSub }" @click="pickSub(null)">{{ $t('player.subOff') }}</button>
             <button v-for="t in subTracks" :key="t.id" class="vp-item"
-                    :class="{ on: activeSub === t.id }" @click="selectSub(t.id)">
+                    :class="{ on: activeSub === t.id }" @click="pickSub(t.id)">
               <span class="ellipsis">{{ t.label }}</span>
             </button>
             <div class="vp-sep"></div>
             <div class="vp-row">
-              <span>{{ $t('player.subSize') }}</span>
-              <select v-model="subStyle.size" @change="savePrefs">
-                <option value="s">小</option><option value="m">中</option><option value="l">大</option>
-              </select>
+              <span class="vp-row-label">{{ $t('player.subSize') }}</span>
+              <div class="vp-seg">
+                <button v-for="o in subSizeOpts" :key="o.v" :class="{ on: subStyle.size === o.v }"
+                        @click.stop="setSubStyle('size', o.v)">{{ o.t }}</button>
+              </div>
             </div>
             <div class="vp-row">
-              <span>{{ $t('player.subBg') }}</span>
-              <select v-model="subStyle.bg" @change="savePrefs">
-                <option value="0">{{ $t('player.subBgNone') }}</option>
-                <option value="1">{{ $t('player.subBgHalf') }}</option>
-                <option value="2">{{ $t('player.subBgFull') }}</option>
-              </select>
+              <span class="vp-row-label">{{ $t('player.subBg') }}</span>
+              <div class="vp-seg">
+                <button v-for="o in subBgOpts" :key="o.v" :class="{ on: subStyle.bg === o.v }"
+                        @click.stop="setSubStyle('bg', o.v)">{{ o.t }}</button>
+              </div>
             </div>
           </div>
         </div>
+      </Teleport>
+
+      <div v-if="uiReady" class="vp-ui">
         <div v-if="skipIntro" class="vp-btn" :title="$t('player.skipIntroClear')" @click.stop="clearSkip('intro')">片头</div>
         <div v-if="skipOutro" class="vp-btn" :title="$t('player.skipOutroClear')" @click.stop="clearSkip('outro')">片尾</div>
         <div v-if="canMarkIntro || canMarkOutro" class="vp-btn" :class="{ on: markOpen }" @click.stop="markOpen = !markOpen">
@@ -983,6 +1055,9 @@ watch(() => props.movieId, () => {
 .player { display: flex; flex-direction: column; background: var(--c-bg-sunken); }
 /* 给容器明确高度（16:9 比例），避免 video.js 在抽屉里高度塌缩导致"有声音无画面" */
 .vjs-wrap {
+  /* 浮层（字幕 / 片头片尾 / 提示）都锚在这里：缺了 relative 会跑到整个抽屉的右上角，
+     按钮和它的菜单就飘在「相似推荐」栏上，鼠标往下一挪就脱离按钮、菜单立刻收起 */
+  position: relative;
   width: 100%;
   height: 70vh;
   background: #000;
@@ -1083,6 +1158,7 @@ watch(() => props.movieId, () => {
   display: flex; align-items: center; gap: 6px;
 }
 .vp-btn {
+  position: relative;
   min-width: 30px; height: 26px; padding: 0 7px;
   display: inline-flex; align-items: center; justify-content: center;
   border-radius: 5px; border: 1px solid rgba(255,255,255,.22);
@@ -1090,31 +1166,62 @@ watch(() => props.movieId, () => {
   font-size: 12px; cursor: pointer; user-select: none;
 }
 .vp-btn:hover, .vp-btn.on { background: rgba(255,255,255,.18); }
+/* 字幕按钮挂在控制条里：外观向原生按钮看齐，菜单向上弹 */
+.vjs-cc-host { position: relative; display: flex; align-items: center; align-self: stretch; }
+.vjs-cc-host .vp-cc {
+  position: relative; height: 100%; min-width: 2.6em; padding: 0 .5em;
+  display: flex; align-items: center; justify-content: center;
+  font-size: .85em; letter-spacing: .5px; color: rgba(255,255,255,.85);
+  cursor: pointer; user-select: none;
+}
+.vjs-cc-host .vp-cc:hover, .vjs-cc-host .vp-cc.on { color: #fff; background: rgba(255,255,255,.14); }
+.vjs-cc-host .vp-menu { top: auto; bottom: calc(100% + 4px); right: 0; }
 .vp-menu {
-  position: absolute; top: 30px; right: 0; z-index: 13;
-  min-width: 190px; max-height: 46vh; overflow: auto;
-  padding: 6px; border-radius: 8px;
-  background: rgba(14,16,22,.96); border: 1px solid rgba(255,255,255,.14);
-  box-shadow: 0 8px 26px rgba(0,0,0,.45);
+  /* 紧贴按钮、不留空隙：中间只要隔几个像素，鼠标往下移就会先离开按钮，
+     菜单当场收起（这正是「想去点字幕却点不到」的原因） */
+  position: absolute; top: 100%; right: 0; z-index: 13;
+  width: 218px; max-height: 52vh; overflow: auto;
+  padding: 5px; border-radius: 10px;
+  /* 半透明 + 毛玻璃，和播放器其它浮层一个观感；配色吃主题变量 */
+  background: var(--c-surface);
+  background: color-mix(in srgb, var(--c-surface) 92%, transparent);
+  border: 1px solid var(--c-line);
+  box-shadow: var(--sh-3);
+  color: var(--c-text-2);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
 }
 .vp-item {
-  display: block; width: 100%; text-align: left;
-  padding: 6px 8px; border: 0; border-radius: 6px;
-  background: transparent; color: rgba(255,255,255,.86);
-  font-size: 12px; cursor: pointer;
+  display: flex; align-items: center; gap: 6px;
+  width: 100%; text-align: left;
+  padding: 7px 9px; border: 0; border-radius: 7px;
+  background: transparent; color: var(--c-text-2);
+  font-size: 12.5px; line-height: 1.25; cursor: pointer;
+  transition: background var(--t-fast, .12s) ease, color var(--t-fast, .12s) ease;
 }
-.vp-item:hover { background: rgba(255,255,255,.12); }
+.vp-item:hover { background: var(--c-surface-2); color: var(--c-text); }
 .vp-item.on { color: #fff; background: var(--c-primary); }
-.vp-sep { height: 1px; margin: 5px 2px; background: rgba(255,255,255,.12); }
+/* 字幕入口只保留浮层右上角的 CC：video.js 自带的按钮是「悬停弹出」，
+   鼠标往菜单上一挪就收起，几乎点不中，留着只会让人以为是 bug */
+.vjs-wrap :deep(.video-js .vjs-subs-caps-button) { display: none !important; }
+.vp-sep { height: 1px; margin: 5px 4px; background: var(--c-line); }
+/* 字号 / 背景：一行一个分段按钮，不再用原生下拉（又高又不像播放器） */
 .vp-row {
   display: flex; align-items: center; justify-content: space-between; gap: 8px;
-  padding: 5px 8px; font-size: 12px; color: rgba(255,255,255,.7);
+  padding: 3px 4px 3px 9px;
 }
-.vp-row select {
-  background: rgba(255,255,255,.1); color: #fff;
-  border: 1px solid rgba(255,255,255,.2); border-radius: 5px;
-  font-size: 12px; padding: 2px 4px;
+.vp-row-label { flex: none; font-size: 12px; color: var(--c-text-3); }
+.vp-seg {
+  display: inline-flex; gap: 2px; padding: 2px;
+  border-radius: 8px; background: var(--c-surface-2); border: 1px solid var(--c-line);
 }
+.vp-seg button {
+  border: 0; background: transparent; color: var(--c-text-3);
+  font-size: 11px; line-height: 1.2; padding: 4px 8px;
+  border-radius: 6px; cursor: pointer; white-space: nowrap;
+}
+.vp-seg button:hover { color: var(--c-text); }
+.vp-seg button.on { background: var(--c-primary); color: #fff; }
 .vp-toast {
   position: absolute; left: 50%; bottom: 64px; transform: translateX(-50%);
   z-index: 14; display: flex; align-items: center; gap: 10px;

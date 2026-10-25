@@ -318,9 +318,9 @@ def privacy_state() -> Dict[str, Any]:
     st = auth.privacy_state()
     privacy = _privacy_cfg()
     has_pin = bool((privacy.get("pin_hash") or "").strip())
-    mode = str(privacy.get("lock_unlock") or "token")
-    if mode != "pin" or not has_pin:
-        mode = "token"
+    # 以「是否真的设了解锁码」为准：lock_unlock 可能被设置页的其它自动保存覆盖成 token，
+    # 结果就是明明设了简单密码，遮挡层却只给令牌输入框（用户会以为要认证两次）。
+    mode = "pin" if has_pin else "token"
     return {
         "locked": bool(st.get("locked")),
         "since": st.get("since", 0),
@@ -386,11 +386,13 @@ def privacy_unlock(payload: Dict[str, Any], request: Request, response: Response
         update_config({"privacy": {
             "token_unlocks": int(privacy.get("token_unlocks") or 0) + 1}})
 
-    # 用「访问令牌」解锁本身就证明持有凭据：顺手签发会话。
-    # 否则未登录状态下（例如登出后又触发锁定）解锁完刷新会被登录页再要一次令牌。
-    if by_token:
-        sid = auth.cookie_value(request.scope, auth.SESSION_COOKIE)
-        idle, absd = _idle_abs(server)
+    # 解锁成功顺手签发会话，避免「遮挡层解开后又弹访问令牌」的二次认证。
+    # · 访问令牌解锁：无论本机/远程都签发（令牌本身就是登录凭据）。
+    # · 快速解锁码解锁：只在本机签发。远程设备能触发锁定说明本来就有会话，
+    #   而 PIN 是弱凭据，不该当作远程登录凭据使用。
+    sid = auth.cookie_value(request.scope, auth.SESSION_COOKIE)
+    idle, absd = _idle_abs(server)
+    if by_token or auth.is_local_ip(ip):
         if not (sid and auth.touch_session(sid, idle, absd)):
             newsid, _info = auth.new_session(ip, ua, idle, absd)
             _set_session_cookie(response, newsid, auth.is_https(request.scope), idle)

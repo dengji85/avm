@@ -374,9 +374,42 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         return resp
 
 
+class AiClientContextMiddleware:
+    """把「这次请求是谁发起的」记进 contextvar，供 AI 调用轨迹标注来源。
+
+    纯 ASGI 中间件（在最外层），因此 contextvar 在整个请求处理期间可见，
+    同步接口在线程池里执行时同样能读到（anyio 会复制上下文）。
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope.get("type") != "http":
+            await self.app(scope, receive, send)
+            return
+        headers = auth.http_headers(scope)
+        ua = headers.get("user-agent") or ""
+        referer = headers.get("referer") or headers.get("origin") or ""
+        ip = ""
+        try:
+            server = load_config().get("server") or {}
+            ip = auth.client_ip(scope, server.get("trusted_proxies") or ["127.0.0.1", "::1"])
+        except Exception:
+            ip = ""
+        from . import ai_core
+        token = ai_core.set_client(ip=ip, ua=ua, referer=referer)
+        try:
+            await self.app(scope, receive, send)
+        finally:
+            ai_core.reset_client(token)
+
+
 app.add_middleware(AccessTokenMiddleware)
 # 后添加者位于外层：安全响应头包裹访问控制，401 响应同样带上安全头
 app.add_middleware(SecurityHeadersMiddleware)
+# 最外层：先记下调用方，再交给访问控制 / 业务处理
+app.add_middleware(AiClientContextMiddleware)
 
 app.include_router(router)
 app.include_router(auth_router)

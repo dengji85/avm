@@ -29,8 +29,8 @@ from fastapi.responses import (FileResponse, PlainTextResponse, RedirectResponse
                                StreamingResponse)
 
 from . import ai as ai_mod
-from . import (ai_extra, ai_jobs, asr, dedupe, dlna, images, nfo as nfo_mod, plugins, providers, scanner,
-               scraper, scrape_diag, store, subprobe, subtext, subtitles, translate, vtt)
+from . import (ai_core, ai_extra, ai_jobs, asr, dedupe, dlna, images, nfo as nfo_mod, plugins, providers,
+               scanner, scraper, scrape_diag, store, subprobe, subtext, subtitles, translate, vtt)
 from .config import (COVER_DIR, DATA_DIR, IN_CONTAINER, avatar_dir, _deep_merge,
                      current_access_token, load_config, public_base_url, update_config)
 from .db import connect, db, query_all, query_one
@@ -1548,10 +1548,67 @@ def ai_trace_list(limit: int = 20, purpose: str = "") -> Dict[str, Any]:
     return {"items": ai_core.traces(limit=limit, purpose=purpose)}
 
 
+@router.delete("/ai/traces")
+def ai_trace_clear() -> Dict[str, Any]:
+    """清空调用记录：轨迹只在内存里，平时也只增不减，用户看着不直观。"""
+    from . import ai_core
+    return {"ok": True, "cleared": ai_core.clear_traces()}
+
+
 @router.get("/ai/asr/status")
 def ai_asr_status() -> Dict[str, Any]:
     """语音对白提取能力：依赖是否安装、模型是否就位。"""
     return asr.status()
+
+
+# ------------------------------------------------------------------ 扩展组件
+@router.get("/ext/status")
+def ext_status() -> Dict[str, Any]:
+    """全部可选组件（ffmpeg / ASR 依赖 / 模型）的检测状态与当前安装任务。"""
+    from . import ext_components
+    return ext_components.status()
+
+
+@router.get("/ext/task")
+def ext_task() -> Dict[str, Any]:
+    """当前安装任务进度（前端 2 秒轮询）。"""
+    from . import ext_components
+    return ext_components.task_state()
+
+
+@router.post("/ext/{cid}/install")
+def ext_install(cid: str, payload: Dict[str, Any] = Body(default={})) -> Dict[str, Any]:
+    """安装组件：下载（可断点续传）→ 解压 → 校验。同一时间只允许一个任务。"""
+    from . import ext_components
+    try:
+        return ext_components.install(cid, source=str((payload or {}).get("source") or "auto"))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e.args[0] if e.args else str(e)))
+
+
+@router.post("/ext/task/cancel")
+def ext_cancel() -> Dict[str, Any]:
+    from . import ext_components
+    return ext_components.cancel()
+
+
+@router.post("/ext/{cid}/import")
+def ext_import(cid: str, payload: Dict[str, Any] = Body(default={})) -> Dict[str, Any]:
+    """手动导入离线包：zip / tar 包或已解压目录（服务端所在机器可访问的路径）。"""
+    from . import ext_components
+    try:
+        return ext_components.import_component(cid, str((payload or {}).get("dir") or ""))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e.args[0] if e.args else str(e)))
+
+
+@router.post("/ext/{cid}/uninstall")
+def ext_uninstall(cid: str) -> Dict[str, Any]:
+    from . import ext_components
+    try:
+        return ext_components.uninstall(cid)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e.args[0] if e.args else str(e)))
 
 
 @router.get("/movies/{movie_id}/dialog")
@@ -1592,6 +1649,22 @@ def delete_movie_dialog(movie_id: int) -> Dict[str, Any]:
     return {"ok": True}
 
 
+@router.post("/movies/{movie_id}/dialog/export-srt")
+def export_movie_dialog_srt(movie_id: int) -> Dict[str, Any]:
+    """把对白导出成草稿 SRT 并登记为字幕（播放器字幕菜单可直接选）。
+
+    草稿字幕来自语音识别，可能有错字；可由用户导出后用字幕工具校对，
+    也可以在字幕区用现有的 AI 翻译生成中文轨。
+    """
+    with db() as conn:
+        if not store.movie_detail(conn, movie_id):
+            raise HTTPException(status_code=404, detail="影片不存在")
+    try:
+        return asr.export_srt(movie_id)
+    except RuntimeError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
 def _ai_plot_for_movie(movie_id: int, preview: bool = False) -> Dict[str, Any]:
     """AI 剧情分析：字幕优先 → 元数据回退。
 
@@ -1607,21 +1680,33 @@ def _ai_plot_for_movie(movie_id: int, preview: bool = False) -> Dict[str, Any]:
         raise ValueError("影片不存在")
     # 抽字幕会调用 ffmpeg，放到数据库连接之外，避免长时间占用
     sub = subtext.collect(m.get("files") or [], m.get("subtitles") or [], cfg)
-    used = "meta"
+    # 依次尝试：字幕 → 语音对白 → 元数据。
+    # 模型对某些内容会返回空串（内容过滤），这种情况下继续降级，而不是让用户看到
+    # 「全部分段摘要都失败了」这种无法操作的错误。
+    sources = []
     if sub["text"]:
-        text = ai_mod.summarize_subtitles(sub["text"], m, cfg)
-        used = "subtitle"
-    else:
-        # 没有字幕时，用「语音对白提取」的结果（如果做过），比纯元数据信息量大得多
-        dlg = asr.dialog_text(movie_id)
-        if dlg:
-            text = ai_mod.summarize_dialog(dlg, m, cfg)
-            used = "dialog"
-        else:
-            text = ai_mod.generate_synopsis(m, cfg)
+        sources.append(("subtitle",
+                        lambda: ai_mod.summarize_subtitles(sub["text"], m, cfg)))
+    dlg = asr.dialog_text(movie_id)
+    if dlg:
+        sources.append(("dialog", lambda: ai_mod.summarize_dialog(dlg, m, cfg)))
+    expected = sources[0][0] if sources else "meta"
+
+    text = ""
+    used = ""
+    for name, produce in sources:
+        text = produce()
+        if text:
+            used = name
+            break
+    if not text:
+        text = ai_mod.generate_synopsis(m, cfg)
+        used = "meta"
+    degraded_from = expected if (used == "meta" and expected != "meta") else ""
     text = (text or "").strip()
     if not text:
-        raise ValueError("AI 返回为空，请检查模型配置或稍后重试")
+        raise ValueError("AI 没有返回内容（可能触发内容过滤）：可到「提示词」调整措辞，"
+                         "或换一个模型后重试")
     old_plot = (m.get("plot") or "").strip()
     source = {"subtitle": "ai-subtitle", "dialog": "ai-dialog"}.get(used, "ai-meta")
     if not preview:
@@ -1634,6 +1719,7 @@ def _ai_plot_for_movie(movie_id: int, preview: bool = False) -> Dict[str, Any]:
             )
             conn.commit()
     return {"ok": True, "plot": text, "old_plot": old_plot, "source": used,
+            "degraded_from": degraded_from,
             "chars": sub["chars"], "track": sub["track"], "written": not preview}
 
 
@@ -2197,6 +2283,122 @@ def delete_movie_subtitle(movie_id: int, sub_id: int) -> Dict[str, Any]:
     return {"ok": True}
 
 
+def _mask_key(key: str) -> str:
+    """API Key 只回传首尾各 4 位，避免设置页明文显示。"""
+    key = str(key or "")
+    if not key:
+        return ""
+    if len(key) <= 8:
+        return "****"
+    return key[:4] + "****" + key[-4:]
+
+
+def _ai_models_payload(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    a = cfg.get("ai") or {}
+    default = str(a.get("default_model") or "")
+    items = []
+    for m in ai_core.model_entries(a):
+        key = str(m.get("api_key") or a.get("api_key") or "")
+        items.append({
+            "name": str(m.get("name") or ""),
+            "base_url": str(m.get("base_url") or a.get("base_url") or ""),
+            "model": str(m.get("model") or a.get("model") or ""),
+            "kind": str(m.get("kind") or "cloud"),
+            "enabled": bool(m.get("enabled", a.get("enabled", False))),
+            "has_key": bool(key),
+            "key_hint": _mask_key(key),
+            "temperature": m.get("temperature", a.get("temperature", 0.4)),
+            "timeout": m.get("timeout", a.get("timeout", 60)),
+            "is_default": str(m.get("name") or "") == default,
+        })
+    return {"enabled": bool(a.get("enabled", False)), "default": default, "models": items}
+
+
+@router.get("/ai/models")
+def ai_models_list() -> Dict[str, Any]:
+    """模型池列表（key 脱敏），供 AI 中心页使用。"""
+    return _ai_models_payload(load_config(refresh=True))
+
+
+@router.post("/ai/models")
+def ai_models_upsert(body: Dict[str, Any]) -> Dict[str, Any]:
+    """新增或更新一个模型；api_key 传掩码值表示「保持不变」。"""
+    name = str(body.get("name") or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="模型名称不能为空")
+    cfg = load_config(refresh=True)
+    a = cfg.get("ai") or {}
+    models = [dict(m) for m in ai_core.model_entries(a)]
+    idx = next((i for i, m in enumerate(models) if str(m.get("name")) == name), -1)
+    entry = models[idx] if idx >= 0 else {
+        "name": name, "kind": "cloud", "enabled": bool(a.get("enabled", False))}
+    for key in ("base_url", "model", "kind", "temperature", "timeout",
+                "max_retries", "enabled"):
+        if key in body and body[key] not in (None, ""):
+            entry[key] = body[key]
+    key_in = body.get("api_key")
+    if key_in is not None:
+        key_in = str(key_in)
+        if key_in and "****" not in key_in:
+            entry["api_key"] = key_in
+    if idx >= 0:
+        models[idx] = entry
+    else:
+        models.append(entry)
+    names = [str(m.get("name")) for m in models]
+    default = str(a.get("default_model") or "")
+    if body.get("make_default") or not default or default not in names:
+        default = name
+    update_config({"ai": {"models": models, "default_model": default}})
+    return _ai_models_payload(load_config(refresh=True))
+
+
+@router.delete("/ai/models/{name}")
+def ai_models_delete(name: str) -> Dict[str, Any]:
+    cfg = load_config(refresh=True)
+    a = cfg.get("ai") or {}
+    before = ai_core.model_entries(a)
+    models = [dict(m) for m in before if str(m.get("name")) != name]
+    if len(models) == len(before):
+        raise HTTPException(status_code=404, detail="模型不存在")
+    default = str(a.get("default_model") or "")
+    if default == name:
+        default = str(models[0].get("name") or "") if models else ""
+    update_config({"ai": {"models": models, "default_model": default}})
+    return _ai_models_payload(load_config(refresh=True))
+
+
+@router.post("/ai/models/{name}/default")
+def ai_models_set_default(name: str) -> Dict[str, Any]:
+    cfg = load_config(refresh=True)
+    a = cfg.get("ai") or {}
+    names = [str(m.get("name")) for m in ai_core.model_entries(a)]
+    if name not in names:
+        raise HTTPException(status_code=404, detail="模型不存在")
+    update_config({"ai": {"default_model": name}})
+    return _ai_models_payload(load_config(refresh=True))
+
+
+@router.post("/ai/models/{name}/test")
+def ai_models_test(name: str) -> Dict[str, Any]:
+    """连通性测试：发一条最短的 ping，返回耗时与回复片段。"""
+    cfg = load_config(refresh=True)
+    c = ai_core.AIConfig.from_config(cfg, name)
+    if not c.base_url or not c.model:
+        raise HTTPException(status_code=400, detail="模型地址或模型名未填写")
+    started = time.time()
+    try:
+        out = ai_core.chat(
+            c,
+            [{"role": "system", "content": "你是连通性测试。只回复 OK 两个字母，不要任何其他内容。"},
+             {"role": "user", "content": "ping"}],
+            max_tokens=256, temperature=0, purpose="models.test", use_cache=False)
+    except ai_core.AiError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"ok": True, "name": c.name, "model": c.model, "kind": c.kind,
+            "ms": int((time.time() - started) * 1000), "reply": (out or "")[:40]}
+
+
 @router.post("/ai/suggest-tags/{movie_id}")
 def ai_suggest_tags(movie_id: int) -> Dict[str, Any]:
     cfg = load_config(refresh=True)
@@ -2222,6 +2424,25 @@ def ai_search_intent(payload: Dict[str, Any] = Body(default={})) -> Dict[str, An
     except Exception as e:
         raise HTTPException(status_code=502, detail=str(e))
     return {"ok": True, "conditions": cond}
+
+
+@router.post("/ai/library-qa")
+def ai_library_qa(payload: Dict[str, Any] = Body(default={})) -> Dict[str, Any]:
+    """问库：自然语言问题 → 查询意图 → 本地执行。
+
+    隐私边界：模型只见到问题本身（意图解析），库数据全程不出本机。
+    """
+    from . import ai_library
+    cfg = load_config(refresh=True)
+    question = str(payload.get("question", "")).strip()
+    if not question:
+        raise HTTPException(status_code=400, detail="question 为空")
+    try:
+        return ai_library.ask_library(question, cfg)
+    except ai_core.AiError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))
 
 
 @router.post("/movies/{movie_id}/scrape")

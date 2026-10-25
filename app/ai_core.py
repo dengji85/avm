@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import copy
+import contextvars
 import hashlib
 import json
 import logging
@@ -42,7 +43,15 @@ CACHE_MAX = 200
 
 
 class AiError(RuntimeError):
-    """AI 调用失败：端点不可达、鉴权失败、返回结构异常等。"""
+    """AI 调用失败：端点不可达、鉴权失败、返回结构异常等。
+
+    ``retryable`` 决定 chat() 是否值得重试：网络/5xx/429 可以，
+    鉴权失败、模型名不存在、内容策略拒绝这类重试也没用。
+    """
+
+    def __init__(self, message: str, *, retryable: bool = True) -> None:
+        super().__init__(message)
+        self.retryable = retryable
 
 
 @dataclass
@@ -55,28 +64,82 @@ class AIConfig:
     timeout: int = DEFAULT_TIMEOUT
     max_retries: int = DEFAULT_RETRIES
     extra_headers: Dict[str, str] = field(default_factory=dict)
+    # 模型池里的身份：name 用于展示与「指定模型」，kind 只影响界面标签（cloud/local）
+    name: str = "default"
+    kind: str = "cloud"
 
     @classmethod
-    def from_config(cls, cfg: Optional[Dict[str, Any]]) -> "AIConfig":
+    def from_config(cls, cfg: Optional[Dict[str, Any]],
+                    model: Optional[str] = None) -> "AIConfig":
         a = (cfg or {}).get("ai", {}) if cfg else {}
+        entry = pick_model(a, model)
+        base: Dict[str, Any] = {
+            "enabled": bool(a.get("enabled", False)),
+            "base_url": str(a.get("base_url", "https://api.openai.com/v1")).rstrip("/"),
+            "api_key": str(a.get("api_key", "") or ""),
+            "model": str(a.get("model", "gpt-4o-mini")),
+            "temperature": a.get("temperature", 0.4),
+            "timeout": a.get("timeout", DEFAULT_TIMEOUT),
+            "max_retries": a.get("max_retries", DEFAULT_RETRIES),
+            "extra_headers": dict(a.get("extra_headers", {}) or {}),
+        }
+        name = str(model or "default")
+        kind = "cloud"
+        if entry:
+            for key in ("base_url", "api_key", "model", "temperature",
+                        "timeout", "max_retries"):
+                val = entry.get(key)
+                if val not in (None, ""):
+                    base[key] = val
+            if "enabled" in entry:
+                base["enabled"] = bool(entry.get("enabled"))
+            if entry.get("extra_headers"):
+                base["extra_headers"] = dict(entry["extra_headers"])
+            name = str(entry.get("name") or name)
+            kind = str(entry.get("kind") or kind)
+        else:
+            base_url = str(base["base_url"])
+            if "127.0.0.1" in base_url or "localhost" in base_url:
+                kind = "local"
         try:
-            timeout = int(a.get("timeout", DEFAULT_TIMEOUT) or DEFAULT_TIMEOUT)
+            timeout = int(base.get("timeout", DEFAULT_TIMEOUT) or DEFAULT_TIMEOUT)
         except (TypeError, ValueError):
             timeout = DEFAULT_TIMEOUT
         try:
-            retries = int(a.get("max_retries", DEFAULT_RETRIES) or 0)
+            retries = int(base.get("max_retries", DEFAULT_RETRIES) or 0)
         except (TypeError, ValueError):
             retries = DEFAULT_RETRIES
         return cls(
-            enabled=bool(a.get("enabled", False)),
-            base_url=str(a.get("base_url", "https://api.openai.com/v1")).rstrip("/"),
-            api_key=str(a.get("api_key", "") or ""),
-            model=str(a.get("model", "gpt-4o-mini")),
-            temperature=float(a.get("temperature", 0.4)),
+            enabled=bool(base.get("enabled", False)),
+            base_url=str(base.get("base_url", "https://api.openai.com/v1")).rstrip("/"),
+            api_key=str(base.get("api_key", "") or ""),
+            model=str(base.get("model", "gpt-4o-mini")),
+            temperature=float(base.get("temperature", 0.4) or 0.4),
             timeout=max(5, timeout),
             max_retries=max(0, retries),
-            extra_headers=dict(a.get("extra_headers", {}) or {}),
+            extra_headers=dict(base.get("extra_headers", {}) or {}),
+            name=name,
+            kind=kind,
         )
+
+
+def model_entries(ai_cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """模型池里的有效条目（至少有 name）。"""
+    items = (ai_cfg or {}).get("models") or []
+    return [m for m in items
+            if isinstance(m, dict) and str(m.get("name") or "").strip()]
+
+
+def pick_model(ai_cfg: Dict[str, Any], name: Optional[str] = None) -> Dict[str, Any]:
+    """挑一条模型配置：指定 name → default_model → 第一条；池为空返回 {}。"""
+    entries = model_entries(ai_cfg)
+    if not entries:
+        return {}
+    target = str(name or (ai_cfg or {}).get("default_model") or "").strip()
+    for m in entries:
+        if str(m.get("name") or "") == target:
+            return m
+    return entries[0]
 
 
 def is_available(cfg: Optional[Dict[str, Any]] = None) -> bool:
@@ -156,11 +219,46 @@ _TRACES: Deque[Dict[str, Any]] = deque(maxlen=_TRACE_MAX)
 _TRACE_LOCK = threading.Lock()
 _TRACE_SEQ = 0
 
+# 当前请求的调用方信息（由 main.py 的中间件写入）：用来区分「用户在页面上点的」
+# 与「脚本 / 外部工具直连的」——两者都走同一个 chat() 入口，此前混在一起，
+# 用户在「调用记录」里会看到自己没点过的调用，却无从判断来源。
+_CLIENT: "contextvars.ContextVar[Dict[str, str]]" = contextvars.ContextVar(
+    "avm_ai_client", default={})
+
+
+def set_client(ip: str = "", ua: str = "", referer: str = "") -> Any:
+    """登记当前请求的调用方（中间件调用），返回一个用于还原的令牌。"""
+    return _CLIENT.set({"ip": str(ip or ""), "ua": str(ua or ""),
+                        "referer": str(referer or "")})
+
+
+def reset_client(token: Any) -> None:
+    try:
+        _CLIENT.reset(token)
+    except Exception:
+        pass
+
+
+def _origin_of(client: Dict[str, str]) -> str:
+    """判断这次调用来自哪里：ui（页面内）/ external（脚本直连）/ internal（后台任务）。"""
+    if not client:
+        return "internal"
+    ua = str(client.get("ua") or "")
+    low = ua.lower()
+    # 无头浏览器 / 命令行脚本：不是用户手动点出来的
+    if "headlesschrome" in low or "python-requests" in low or "python-urllib" in low \
+            or "curl/" in low or "wget/" in low or "powershell" in low:
+        return "external"
+    if str(client.get("referer") or "") or "mozilla" in low:
+        return "ui"
+    return "external"
+
 
 def _record_trace(purpose: str, cfg: AIConfig, messages: List[Dict[str, str]], *,
                   reply: str = "", error: str = "", ms: float = 0,
                   cached: bool = False) -> None:
     global _TRACE_SEQ
+    client = dict(_CLIENT.get() or {})
     with _TRACE_LOCK:
         _TRACE_SEQ += 1
         _TRACES.appendleft({
@@ -175,19 +273,37 @@ def _record_trace(purpose: str, cfg: AIConfig, messages: List[Dict[str, str]], *
             "error": error or "",
             "ms": int(ms),
             "cached": bool(cached),
+            "origin": _origin_of(client),
+            "client_ip": client.get("ip") or "",
+            "client_ua": (client.get("ua") or "")[:120],
             "prompt_chars": sum(len(str(m.get("content") or "")) for m in messages),
             "reply_chars": len(reply or ""),
         })
 
 
 def traces(limit: int = 20, purpose: str = "") -> List[Dict[str, Any]]:
-    """最近的调用轨迹（新 → 旧）。purpose 非空时只取该用途。"""
+    """最近的调用轨迹（新 → 旧）。purpose 非空时按「精确匹配或同前缀分组」筛选。
+
+    前缀分组是必要的：剧情相关的 purpose 有 plot.subtitle / plot.subtitle.chunk /
+    plot.dialog / plot.qa 多个变体，按精确匹配筛「剧情」会一条都看不到。
+    """
     n = max(1, min(100, int(limit or 20)))
     with _TRACE_LOCK:
         items = [copy.deepcopy(x) for x in _TRACES]
-    if purpose:
-        items = [x for x in items if x.get("purpose") == purpose]
+    p = str(purpose or "").strip()
+    if p:
+        items = [x for x in items
+                 if x.get("purpose") == p or str(x.get("purpose") or "").startswith(p + ".")]
     return items[:n]
+
+
+def clear_traces() -> int:
+    """清空调用记录，返回清掉的条数（内存操作，重启本来也会清空）。"""
+    global _TRACE_SEQ
+    with _TRACE_LOCK:
+        n = len(_TRACES)
+        _TRACES.clear()
+    return n
 
 
 # ------------------------------------------------------------------ 统一入口
@@ -233,7 +349,12 @@ def chat(cfg: AIConfig, messages: List[Dict[str, str]], *,
     base = (cfg.base_url or "").rstrip("/")
     url = base if base.endswith("/chat/completions") else base + "/chat/completions"
     last = ""
-    for attempt in range(1 + max(0, cfg.max_retries)):
+    attempts = 1 + max(0, cfg.max_retries)
+    # 推理型模型（返回 reasoning_content）会把 max_tokens 全部用在思考上，
+    # 结果 finish_reason=length 而 content 为空。此时把额度翻倍重试一次，
+    # 而不是把空串当成功返回——空答案会让上层显示「模型没回答」。
+    bumped = False
+    for attempt in range(attempts):
         try:
             resp = requests.post(url, headers=headers, json=payload,
                                  timeout=(CONNECT_TIMEOUT, cfg.timeout))
@@ -246,10 +367,30 @@ def chat(cfg: AIConfig, messages: List[Dict[str, str]], *,
                     403: "（Key 没有该模型的权限）",
                     404: "（接口地址一般填到 /v1 为止；也可能是模型名不存在）",
                 }.get(resp.status_code, "")
-                raise AiError("HTTP %d：%s%s" % (resp.status_code, resp.text[:200], hint))
+                raise AiError("HTTP %d：%s%s" % (resp.status_code, resp.text[:200], hint),
+                              retryable=False)
             data = resp.json()
-            text = (data["choices"][0]["message"]["content"] or "")
+            choices = data.get("choices") or []
+            if not choices:
+                raise AiError("接口返回里没有 choices：%s" % str(data)[:200])
+            choice = choices[0]
+            text = (choice.get("message") or {}).get("content") or ""
             text = str(text).strip()
+            if not text:
+                finish = str(choice.get("finish_reason") or "")
+                if finish == "content_filter":
+                    raise AiError("模型按内容策略拒绝返回（finish_reason=content_filter），可换个模型或调整提示词",
+                                  retryable=False)
+                if finish == "length":
+                    if not bumped and attempt < attempts - 1:
+                        bumped = True
+                        payload["max_tokens"] = min(8000, max(int(payload["max_tokens"]) * 2, 1600))
+                        log.info("AI 返回被 token 上限截断（%s），max_tokens 提到 %d 重试",
+                                 purpose or "chat", payload["max_tokens"])
+                        continue
+                    raise AiError("模型返回被 token 上限截断（finish_reason=length）："
+                                  "推理型模型会先消耗额度思考，请调大该模型的 max_tokens 或换用非推理模型",
+                                  retryable=False)
             with _STATS_LOCK:
                 _STATS["calls"] += 1
                 _STATS["prompt_chars"] += sum(len(str(m.get("content") or "")) for m in messages)
@@ -264,11 +405,11 @@ def chat(cfg: AIConfig, messages: List[Dict[str, str]], *,
             return text
         except AiError as e:
             last = str(e)
-            retryable = not last.startswith("HTTP 4")
+            retryable = bool(getattr(e, "retryable", True))
         except (requests.RequestException, ValueError, KeyError, IndexError) as e:
             last = "%s: %s" % (type(e).__name__, e)
             retryable = True
-        if attempt >= cfg.max_retries:
+        if attempt >= cfg.max_retries or not retryable:
             break
         time.sleep(min(2 ** attempt, 4) * (1 + random.random() * 0.3))
         log.info("AI 调用重试（%s 第 %d 次）：%s", purpose or "chat", attempt + 1, last)

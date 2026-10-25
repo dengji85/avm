@@ -10,6 +10,7 @@ import MobileNav from './components/MobileNav.vue'
 import ToastLayer from './components/ToastLayer.vue'
 import ConfirmDialog from './components/ConfirmDialog.vue'
 import DetailDrawer from './components/DetailDrawer.vue'
+import AiWorkbench from './components/AiWorkbench.vue'
 import TokenGate from './components/TokenGate.vue'
 import PlaylistPlayer from './components/PlaylistPlayer.vue'
 import MiniPlayBar from './components/MiniPlayBar.vue'
@@ -60,6 +61,7 @@ import SwipeView from './views/SwipeView.vue'
 import StatsView from './views/StatsView.vue'
 import MaintenanceView from './views/MaintenanceView.vue'
 import SettingsView from './views/SettingsView.vue'
+import AiCenterView from './views/AiCenterView.vue'
 import YearReviewView from './views/YearReviewView.vue'
 import OnboardingView from './views/OnboardingView.vue'
 
@@ -75,6 +77,7 @@ const VIEWS = {
   stats: StatsView,
   maintenance: MaintenanceView,
   settings: SettingsView,
+  ai: AiCenterView,
   yearReview: YearReviewView,
 }
 
@@ -189,6 +192,8 @@ function onFilterChange() { /* 由各视图自行响应 state 变化 */ }
     </div>
 
     <DetailDrawer />
+    <!-- AI 助手浮窗：全局单例，任意页面都能弹出，层级高于抽屉与播放层 -->
+    <AiWorkbench />
     <ToastLayer />
     <ConfirmDialog />
     <TokenGate ref="tokenGate" />

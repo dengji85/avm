@@ -321,8 +321,20 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         # 单次请求读超时（秒）与失败重试次数；超时/重试只影响体验，不影响正确性
         "timeout": 60,
         "max_retries": 2,
+        # 模型池：每项 {name, base_url, api_key, model, kind(cloud/local), temperature,
+        #   timeout, max_retries, enabled}。空列表表示沿用上面的单套字段（首次启动会自动
+        # 迁移成一条 name=default，之后以 models 为准）。
+        "models": [],
+        # 默认使用哪个模型（models 里的 name）
+        "default_model": "",
         # 用户自定义的 system 提示词：{prompt_id: text}，缺省用内置默认值
         "prompts": {},
+        # 问库润色：允许把「问库」的聚合统计摘要（类型 / 数量等，不含文件路径、
+        # 视频内容）发给模型组织成自然语言回答。关闭时答案只展示结构化数据。
+        # 本地模型（kind=local 或 localhost）不受此开关限制——数据不出本机。
+        "insights": False,
+        # 子开关：摘要中允许包含女优名（聚合数据里识别性最强的字段）
+        "insights_actress": False,
         },
     # 语音对白提取（可选组件，需自行安装 faster-whisper 与模型）
     "asr": {
@@ -337,6 +349,19 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         # 模型根目录，下面放 faster-whisper-small / faster-whisper-medium。
         # 留空则用 data/models。例：D:\program my\avm-asr\models
         "model_dir": "",
+        # 临时音轨目录（16k 单声道 wav，约 32KB/秒，提取完自动删）。
+        # 留空则放在 data/asr；C 盘紧张时可指到别的盘。
+        # 例：D:\program my\avm-asr\tmp
+        "tmp_dir": "",
+    },
+    # 可选扩展组件（ffmpeg / 语音识别依赖，AI 中心 → 扩展组件 里安装）
+    "ext": {
+        # 组件根目录。留空 = data/ext。组件体积不小（ffmpeg 约 100MB、
+        # ASR 依赖约 170MB），C 盘紧张可指到别的盘。例：D:\program my\avm-ext
+        "dir": "",
+        # 语音识别依赖预打包 zip 的下载地址。留空用内置发布页地址；
+        # 自建镜像源 / 离线分发的用户可指向自己的地址。
+        "asr_libs_url": "",
     },
     # 隐私保护（桌面 / 大屏场景）：离开电脑时自动遮挡，避免"忘记关"的尴尬
     "privacy": {
@@ -429,6 +454,32 @@ def _migrate_legacy(cfg: Dict[str, Any]) -> bool:
         mode = str(privacy.get("lock_unlock") or "token")
         if mode not in ("pin", "token"):
             privacy["lock_unlock"] = "pin" if (privacy.get("pin_hash") or "").strip() else "token"
+            changed = True
+    ai = cfg.get("ai")
+    if isinstance(ai, dict):
+        # 单套模型配置 → 模型池（只迁移一次；迁移后 models 非空就不再动）
+        models = ai.get("models")
+        if not isinstance(models, list) or not models:
+            base_url = str(ai.get("base_url") or "").strip()
+            if base_url and str(ai.get("model") or "").strip():
+                is_local = ("127.0.0.1" in base_url) or ("localhost" in base_url)
+                ai["models"] = [{
+                    "name": "default",
+                    "base_url": base_url,
+                    "api_key": str(ai.get("api_key") or ""),
+                    "model": str(ai.get("model") or ""),
+                    "temperature": ai.get("temperature", 0.4),
+                    "timeout": ai.get("timeout", 60),
+                    "max_retries": ai.get("max_retries", 2),
+                    "kind": "local" if is_local else "cloud",
+                    "enabled": bool(ai.get("enabled", False)),
+                }]
+                ai["default_model"] = "default"
+                changed = True
+        names = [str(m.get("name") or "") for m in (ai.get("models") or [])
+                 if isinstance(m, dict)]
+        if names and str(ai.get("default_model") or "") not in names:
+            ai["default_model"] = names[0]
             changed = True
     return changed
 

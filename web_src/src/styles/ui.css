@@ -45,7 +45,20 @@
 .btn.icon  { width: 32px; padding: 0; }
 .btn.icon.tiny { width: 26px; }
 .btn.round { border-radius: var(--r-full); }
-.btn.active { background: var(--c-primary-soft); border-color: var(--c-primary-line); color: var(--c-primary-h); }
+/* 选中态：暗色主题下 .14 的玫红叠在深灰按钮上几乎看不出来，
+   底色加深、描边用实色，两个主题都靠 --c-primary-soft-strong 区分档次 */
+.btn.active {
+  background: var(--c-primary-soft-strong);
+  border-color: var(--c-primary);
+  color: var(--c-primary-h);
+}
+/* 纯图标按钮（♥ ⌚ ○ ▪◼⬛）：只有一个小字符，最清楚的选中态是「玫红底 + 白字」 */
+.btn.icon.active {
+  background: var(--c-primary);
+  border-color: var(--c-primary);
+  color: #fff;
+}
+.btn.icon.active:hover:not(:disabled) { background: var(--c-primary-h); border-color: var(--c-primary-h); }
 
 /* 按钮编组 */
 .btn-group { display: inline-flex; }

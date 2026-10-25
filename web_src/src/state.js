@@ -48,6 +48,8 @@ export const state = reactive({
   currentId: null,
   // 从详情页点击筛选条件跳转时，记录来源影片，便于在影片库一键返回
   returnFromFilter: null,   // { id, title }
+  // AI 问答里点时间戳：请求详情页播放器跳到该秒（{ id, seconds, n }；n 用于重复点击同一点也能触发）
+  aiSeek: null,
 
   // ---- 女优 ----
   actFollowOnly: false,
@@ -83,6 +85,8 @@ export const state = reactive({
   // 历史 tab 行为偏好
   recentOpenPlaylist: saved.recentOpenPlaylist !== false,  // 进入历史是否自动打开播放列表（迅雷式），默认开
   recentAutoPlay: saved.recentAutoPlay !== false,          // 打开播放列表后是否自动播放，默认开
+  // AI 助手悬浮球（右下角）：可在 设置 → 外观 关闭
+  aiFab: saved.aiFab !== false,
 
   // ---- 上次加入的片单（快速加片单/队列用）----
   lastCollection: saved.lastCollection || 0,
@@ -123,6 +127,7 @@ watch(
     playOrder: state.playQueue.order, playLoop: state.playQueue.loop,
     playerMode: state.playerMode,
     recentOpenPlaylist: state.recentOpenPlaylist, recentAutoPlay: state.recentAutoPlay,
+    aiFab: state.aiFab,
   }),
   (v) => { try { localStorage.setItem(PREF_KEY, JSON.stringify(v)) } catch (e) {} },
   { deep: true },
@@ -195,7 +200,7 @@ export function clearPlayQueue() {
  *       #/maintenance/<tab>     维护中心并定位到指定子 tab
  * 仅在合法视图 id 内生效，非法 hash 退回默认 home。
  */
-const VALID_VIEWS = ['home', 'gallery', 'stats', 'maintenance', 'actress',
+const VALID_VIEWS = ['home', 'gallery', 'stats', 'maintenance', 'actress', 'ai',
   'collections', 'rankings', 'swipe', 'settings', 'recent']
 const VALID_MAINT = ['overview', 'storage', 'logs']
 
@@ -336,6 +341,8 @@ export const NAV_ICONS = {
   yearReview: 'M19 4h-1V2h-2v2H8V2H6v2H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm0 16H5V10h14v10zM5 8V6h14v2H5z',
   recent: 'M11.99 2C6.47 2 2 6.48 2 12s4.47 10 9.99 10C17.52 22 22 17.52 22 12S17.52 2 11.99 2zM12 20c-4.42 0-8-3.58-8-8s3.58-8 8-8 8 3.58 8 8-3.58 8-8 8zM12.5 7H11v6l5.25 3.15.75-1.23-4.5-2.67z',
   shuffle: 'M10.59 9.17L5.41 4 4 5.41l5.17 5.17 1.42-1.41zM14.5 4l2.04 2.04L4 18.59 5.41 20 17.96 7.46 20 9.5V4h-5.5zm.33 9.41l-1.41 1.41 3.13 3.13L14.5 20H20v-5.5l-2.04 2.04-3.13-3.13z',
+  // 扩展组件：拼图块
+  ext: 'M10 3a2 2 0 0 1 2 2v1h3.5a1.5 1.5 0 0 1 1.5 1.5V11h1a2 2 0 1 1 0 4h-1v3.5a1.5 1.5 0 0 1-1.5 1.5H12v-1a2 2 0 1 0-4 0v1H4.5A1.5 1.5 0 0 1 3 18.5V15H2a2 2 0 1 1 0-4h1V7.5A1.5 1.5 0 0 1 4.5 6H8V5a2 2 0 0 1 2-2z',
 }
 
 /* 顶部主导航（Tab）：核心内容用文字，最近观看用图标，其余收进「更多」hover 菜单 */

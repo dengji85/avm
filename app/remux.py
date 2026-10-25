@@ -36,13 +36,24 @@ _PROCS: Dict[int, subprocess.Popen] = {}        # movie_id -> ffmpeg 进程（�
 
 
 # ------------------------------------------------------------------ ffmpeg 定位
+def _bundled_candidates():
+    """无配置、不在 PATH 时的兜底候选：组件页安装位 > 便携包自带 tools/ffmpeg。"""
+    try:
+        from .ext_components import ffmpeg_ext_paths
+        for p in ffmpeg_ext_paths():
+            yield p
+    except Exception:
+        pass
+    base = Path(__file__).resolve().parent.parent
+    yield base / "tools" / "ffmpeg" / "bin" / "ffmpeg.exe"
+    yield base / "tools" / "ffmpeg" / "bin" / "ffmpeg"
+
+
 def _resolve_ffmpeg(cfg: Dict[str, Any]) -> tuple:
-    """返回 (ffmpeg, ffprobe)：支持配置绝对路径 / PATH / 项目自带 tools/ffmpeg。"""
+    """返回 (ffmpeg, ffprobe)：支持配置绝对路径 / 组件目录 / PATH / 自带 tools/ffmpeg。"""
     ffmpeg = str(cfg.get("ffmpeg_path") or "").strip() or "ffmpeg"
     if not os.path.dirname(ffmpeg) and not shutil.which(ffmpeg):
-        base = Path(__file__).resolve().parent.parent
-        for cand in (base / "tools" / "ffmpeg" / "bin" / "ffmpeg.exe",
-                     base / "tools" / "ffmpeg" / "bin" / "ffmpeg"):
+        for cand in _bundled_candidates():
             if cand.exists():
                 ffmpeg = str(cand)
                 break

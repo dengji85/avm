@@ -1,6 +1,7 @@
 <script setup>
 import { ref, reactive, computed, onBeforeUnmount, onMounted, watch } from 'vue'
 import { state } from '../state.js'
+import ExtPanel from '../components/ExtPanel.vue'
 import {
   API, getConfig, putConfig, listProviders, testScraper as apiTest, aiAsrStatus,
   parsePreview as apiParse, fsList, sniffCovers, extractAllCovers, csvUrl, cacheAvatars,
@@ -9,7 +10,6 @@ import {
   listPlugins, togglePlugin, regenAllPreviews, streamCacheStats, clearStreamCache,
   listSessions, revokeSession, getAudit, logout as apiLogout, logoutAll as apiLogoutAll,
   setPin, privacyState, privacyLock, trustedDevices, revokeTrusted,
-  aiJobs, aiJobsCreate, aiJobsCancel, aiGlossary, aiGlossarySave,
   totpStatus, totpSetup, totpEnable, totpDisable,
   listApiKeys, createApiKey, revokeApiKey,
 } from '../api.js'
@@ -24,10 +24,10 @@ const TABS = [
   ['library', 'settings.tab.library'],
   ['scraper', 'settings.tab.scraper'],
   ['parser', 'settings.tab.parser'],
-  ['ai', 'settings.tab.ai'],
   ['appearance', 'settings.tab.appearance'],
   ['sites', 'settings.tab.sites'],
   ['remote', 'settings.tab.remote'],
+  ['ext', 'settings.tab.ext'],
   ['privacy', 'settings.tab.privacy'],
   ['about', 'settings.tab.about'],
 ]
@@ -55,7 +55,7 @@ const cfg = reactive({
   ffmpeg_path: '',
   previews_quality: 'smart',
   ai: { enabled: false, base_url: 'https://api.openai.com/v1', api_key: '', model: 'gpt-4o-mini', temperature: 0.4 },
-  asr: { libs_dir: '', model_dir: '', model: 'small', language: 'ja' },
+  asr: { libs_dir: '', model_dir: '', tmp_dir: '', model: 'small', language: 'ja' },
   stream: { auto_remux: true, remux_cache_mb: 4096 },
   wiki: { languages: ['ja', 'zh'] },
   online_sites: [],
@@ -173,7 +173,7 @@ async function saveLibrary() {
   saving.value = true
   try {
     const patch = {
-      ffmpeg_path: cfg.ffmpeg_path || '',
+      // ffmpeg_path 已迁到「AI 中心 → 扩展组件」编辑；这里不回写，避免用旧值覆盖
       previews_quality: cfg.previews_quality || 'smart',
       library: {
         paths: cfg.library.paths || [],
@@ -252,7 +252,6 @@ const totpQrUrl = computed(() => `${API}/auth/totp/qr?_=${totpQrSeq.value}`)
 onBeforeUnmount(() => {
   if (clockTimer) clearInterval(clockTimer)
   if (revealTimer) clearInterval(revealTimer)   // 令牌明文 30 秒倒计时，离开页面也要停
-  if (aiJobTimer) clearInterval(aiJobTimer)
 })
 
 // 服务器时间：验证码对不上十有八九是手机时钟偏了，绑定面板里直接显示对比
@@ -407,7 +406,8 @@ async function savePrivacy(silent = true) {
     await putConfig({
       privacy: {
         idle_lock_minutes: Math.max(0, Number(cfg.privacy.idle_lock_minutes) || 0),
-        lock_unlock: cfg.privacy.lock_unlock === 'pin' ? 'pin' : 'token',
+        // 不在这里提交 lock_unlock：它由「设置/清除解锁码」接口维护。
+        // 之前每次改空闲分钟数都会把它按前端旧值写回 token，导致设过 PIN 却又只给令牌输入框。
         panic_key: (cfg.privacy.panic_key || '').trim() || 'Ctrl+Shift+H',
         neutral_title: !!cfg.privacy.neutral_title,
         pause_when_hidden: !!cfg.privacy.pause_when_hidden,
@@ -499,55 +499,6 @@ async function forgetTrusted() {
     trusted.value = []
     toast(t('privacy.trustedDone', { n: (r && r.revoked) || 0 }), 'ok')
   } catch (e) { toast(e.message, 'err') }
-}
-
-/* ---------- AI 批量任务 / 术语表 ---------- */
-const aiJobKind = ref('translate')
-const aiJobCount = ref(20)
-const aiJobBusy = ref(false)
-const aiJobState = ref({ running: false, total: 0, done: 0, fail: 0, items: [],
-                         budget_chars_per_run: 0, job_concurrency: 2 })
-const aiGlossaryText = ref('')
-const aiGlossaryBusy = ref(false)
-const aiGlossaryOk = ref(false)
-let aiJobTimer = null
-
-async function refreshAiJobs() {
-  try { aiJobState.value = Object.assign({ items: [] }, await aiJobs()) }
-  catch (e) { /* 忽略瞬时失败 */ }
-}
-async function startAiJob() {
-  aiJobBusy.value = true
-  try {
-    const r = await aiJobsCreate({ kind: aiJobKind.value, latest: Math.max(1, Math.min(200, aiJobCount.value)) })
-    toast(t('settings.aiJobsStarted', { n: r.count }), 'ok')
-    await refreshAiJobs()
-  } catch (e) { toast(e.message, 'err') } finally { aiJobBusy.value = false }
-}
-async function cancelAiJob() {
-  try { await aiJobsCancel(); await refreshAiJobs() } catch (e) { toast(e.message, 'err') }
-}
-async function loadGlossary() {
-  try {
-    const g = await aiGlossary()
-    aiGlossaryText.value = (g.items || []).map((i) => `${i.term} = ${i.translation}`).join('\n')
-  } catch (e) { /* 忽略 */ }
-}
-async function saveAiGlossary() {
-  aiGlossaryBusy.value = true
-  aiGlossaryOk.value = false
-  try {
-    const items = aiGlossaryText.value.split('\n').map((l) => l.trim()).filter(Boolean)
-      .map((l) => {
-        const i = Math.max(l.indexOf('='), l.indexOf('＝'))
-        return { term: (i > 0 ? l.slice(0, i) : '').trim(),
-                 translation: (i > 0 ? l.slice(i + 1) : '').trim() }
-      })
-      .filter((i) => i.term && i.translation)
-    await aiGlossarySave(items)
-    aiGlossaryOk.value = true
-    toast(t('settings.aiGlossarySaved'), 'ok')
-  } catch (e) { toast(e.message, 'err') } finally { aiGlossaryBusy.value = false }
 }
 
 async function doLogout() {
@@ -789,24 +740,18 @@ async function loadAsr() {
   }
 }
 
+/** 打开独立的 AI 中心页（模型/提示词/任务/日志） */
+function openAiCenter() {
+  state.view = 'ai'
+}
+
 async function save() {
   saving.value = true
   aiOk.value = null
   try {
     await putConfig({
-      ai: {
-        enabled: !!cfg.ai.enabled,
-        base_url: (cfg.ai.base_url || '').trim(),
-        api_key: cfg.ai.api_key || '',
-        model: (cfg.ai.model || '').trim(),
-        temperature: Number(cfg.ai.temperature) || 0,
-      },
-      asr: {
-        libs_dir: (cfg.asr.libs_dir || '').trim(),
-        model_dir: (cfg.asr.model_dir || '').trim(),
-        model: cfg.asr.model || 'small',
-        language: cfg.asr.language || 'ja',
-      },
+      // AI（模型池/提示词/任务/术语表）与语音组件已迁到 /ai，
+      // 这里不再提交 ai/asr，避免用旧表单值覆盖 AI 中心的修改。
     })
     await loadAsr()
     aiOk.value = true
@@ -1122,9 +1067,6 @@ onMounted(async () => {
   await loadServerInfo()
   loadPlugins()
   loadTrusted()
-  refreshAiJobs()
-  loadGlossary()
-  aiJobTimer = setInterval(() => { if (aiJobState.value.running) refreshAiJobs() }, 2500)
 })
 </script>
 
@@ -1134,6 +1076,7 @@ onMounted(async () => {
       <h1 class="tb-title">{{ $t('view.settings') }}</h1>
       <span v-if="loading || saving" class="spinner"></span>
       <div class="spacer"></div>
+      <button class="btn tiny ghost" @click="openAiCenter">{{ $t('aiCenter.open') }}</button>
       <div class="tabs st-tabs">
         <button v-for="t in TABS" :key="t[0]" class="tab" :class="{ on: tab === t[0] }" @click="tab = t[0]">{{ $t(t[1]) }}</button>
       </div>
@@ -1200,11 +1143,6 @@ onMounted(async () => {
               <label>{{ $t('settings.videoExt') }}</label>
               <input v-model="extText" :placeholder="$t('settings.videoExtPh')" />
               <span class="hint">{{ $t('settings.videoExtHint') }}</span>
-            </div>
-            <div class="field">
-              <label>{{ $t('settings.ffmpegPath') }}</label>
-              <input v-model="cfg.ffmpeg_path" :placeholder="$t('settings.ffmpegPh')" />
-              <span class="hint">{{ $t('settings.ffmpegHint') }}</span>
             </div>
             <div class="field">
               <label>{{ $t('settings.previewQuality') }}</label>
@@ -1485,134 +1423,6 @@ onMounted(async () => {
         </div>
       </template>
 
-      <!-- ============ AI 增强 ============ -->
-      <template v-else-if="tab === 'ai'">
-        <div class="panel">
-          <div class="panel-head">
-            {{ $t('settings.aiTitle') }}
-            <span class="sub">{{ $t('settings.aiSub') }}</span>
-          </div>
-          <div class="panel-body">
-            <div class="field">
-              <label class="toggle">
-                <input type="checkbox" v-model="cfg.ai.enabled" /><span class="track"></span>
-              </label>
-              <span>{{ $t('settings.aiEnable') }}</span>
-            </div>
-            <div class="field">
-              <label>Base URL</label>
-              <input v-model="cfg.ai.base_url" :placeholder="$t('settings.aiBasePh')" />
-              <span class="hint">{{ $t('settings.aiBaseHint') }}</span>
-            </div>
-            <div class="field">
-              <label>API Key</label>
-              <input v-model="cfg.ai.api_key" type="password" name="avm-code" autocomplete="new-password" autocapitalize="off" spellcheck="false" data-lpignore="true" data-1p-ignore data-bwignore :placeholder="$t('settings.aiKeyPh')" />
-            </div>
-            <div class="field">
-              <label>{{ $t('settings.aiModel') }}</label>
-              <input v-model="cfg.ai.model" :placeholder="$t('settings.aiModelPh')" />
-            </div>
-            <div class="field">
-              <label>{{ $t('settings.aiTemp') }}</label>
-              <input type="number" step="0.1" min="0" max="1" v-model.number="cfg.ai.temperature" style="width:100px" />
-              <span class="muted">{{ $t('settings.aiTempSub') }}</span>
-            </div>
-
-            <!-- 语音对白提取（可选组件）：依赖与模型可以放在任意盘 -->
-            <div class="field">
-              <label>{{ $t('settings.asrTitle') }}</label>
-              <span class="hint">{{ $t('settings.asrSub') }}</span>
-            </div>
-            <div class="field">
-              <label>{{ $t('settings.asrLibs') }}</label>
-              <input v-model="cfg.asr.libs_dir" :placeholder="$t('settings.asrLibsPh')" />
-              <span class="hint">{{ $t('settings.asrLibsHint') }}</span>
-            </div>
-            <div class="field">
-              <label>{{ $t('settings.asrModelDir') }}</label>
-              <input v-model="cfg.asr.model_dir" :placeholder="$t('settings.asrModelDirPh')" />
-              <span class="hint">{{ $t('settings.asrModelDirHint') }}</span>
-            </div>
-            <div class="field-row">
-              <label>{{ $t('settings.asrSize') }}</label>
-              <select v-model="cfg.asr.model" style="width:130px">
-                <option value="small">small</option>
-                <option value="medium">medium</option>
-              </select>
-              <label>{{ $t('settings.asrLang') }}</label>
-              <select v-model="cfg.asr.language" style="width:130px">
-                <option value="ja">日本語</option>
-                <option value="zh">中文</option>
-                <option value="en">English</option>
-                <option value="auto">{{ $t('settings.asrAuto') }}</option>
-              </select>
-            </div>
-            <div class="field">
-              <span class="hint">
-                {{ asrInfo
-                  ? (asrInfo.lib_available
-                    ? (asrInfo.model_available ? $t('settings.asrReady') : $t('settings.asrNoModel', { dir: asrInfo.model_dir }))
-                    : $t('settings.asrNoLib'))
-                  : $t('settings.asrUnknown') }}
-              </span>
-              <button class="btn tiny ghost" @click="loadAsr">{{ $t('settings.asrRecheck') }}</button>
-            </div>
-          </div>
-          <div class="panel-foot">
-            <button class="btn primary" :disabled="saving" @click="save">{{ $t('settings.aiSave') }}</button>
-            <span v-if="aiOk===true" class="ok">{{ $t('settings.aiSaved') }}</span>
-            <span v-else-if="aiOk===false" class="err">{{ $t('settings.aiSaveFail') }}</span>
-          </div>
-        </div>
-
-        <!-- AI 批量任务：剧情分析 / 字幕翻译，限并发、可取消、带预算 -->
-        <div class="panel">
-          <div class="panel-head">
-            {{ $t('settings.aiJobsTitle') }}
-            <span class="sub">{{ $t('settings.aiJobsSub') }}</span>
-          </div>
-          <div class="panel-body">
-            <div class="field-row">
-              <label>{{ $t('settings.aiJobsKind') }}</label>
-              <select v-model="aiJobKind" style="width:170px">
-                <option value="translate">{{ $t('settings.aiJobsTranslate') }}</option>
-                <option value="plot">{{ $t('settings.aiJobsPlot') }}</option>
-              </select>
-              <label>{{ $t('settings.aiJobsCount') }}</label>
-              <input type="number" min="1" max="200" v-model.number="aiJobCount" style="width:90px" />
-              <button class="btn primary" :disabled="aiJobBusy" @click="startAiJob">{{ $t('settings.aiJobsStart') }}</button>
-              <button class="btn ghost" :disabled="!aiJobState.running" @click="cancelAiJob">{{ $t('settings.aiJobsCancel') }}</button>
-            </div>
-            <p class="hint">{{ $t('settings.aiJobsHint', { n: aiJobCount, budget: aiJobState.budget_chars_per_run || '∞' }) }}</p>
-            <div v-if="aiJobState.items && aiJobState.items.length" class="field col" style="margin-top:8px">
-              <div v-for="j in aiJobState.items" :key="j.id" class="sec-row">
-                <span class="mono">#{{ j.id }}</span>
-                <span>{{ j.kind === 'translate' ? $t('settings.aiJobsTranslate') : $t('settings.aiJobsPlot') }}</span>
-                <span class="muted sm sec-grow ellipsis">{{ j.status }}</span>
-                <span v-if="j.error" class="err sm ellipsis" :title="j.error">{{ j.error }}</span>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <!-- 翻译术语表：固定译法，避免每部片译名漂移 -->
-        <div class="panel">
-          <div class="panel-head">
-            {{ $t('settings.aiGlossaryTitle') }}
-            <span class="sub">{{ $t('settings.aiGlossarySub') }}</span>
-          </div>
-          <div class="panel-body">
-            <p class="hint">{{ $t('settings.aiGlossaryHint') }}</p>
-            <textarea v-model="aiGlossaryText" rows="6" spellcheck="false"
-                      :placeholder="$t('settings.aiGlossaryPh')"></textarea>
-            <div class="hstack">
-              <button class="btn primary" :disabled="aiGlossaryBusy" @click="saveAiGlossary">{{ $t('settings.aiGlossarySave') }}</button>
-              <span v-if="aiGlossaryOk" class="ok">{{ $t('settings.aiGlossarySaved') }}</span>
-            </div>
-          </div>
-        </div>
-      </template>
-
       <!-- ============ 解析预览 ============ -->
       <template v-else-if="tab === 'parser'">
         <div class="panel">
@@ -1728,6 +1538,9 @@ onMounted(async () => {
           </div>
         </div>
       </template>
+
+      <!-- ============ 扩展组件（FFmpeg / 语音识别依赖 / 模型） ============ -->
+      <ExtPanel v-else-if="tab === 'ext'" />
 
       <!-- ============ 隐私 ============ -->
       <template v-else-if="tab === 'privacy'">
@@ -1882,6 +1695,13 @@ onMounted(async () => {
               </label>
               <span>{{ $t('settings.recentAutoPlay') }}</span>
               <span class="hint">{{ $t('settings.recentAutoPlayHint') }}</span>
+            </div>
+            <div class="field">
+              <label class="toggle">
+                <input type="checkbox" v-model="state.aiFab" /><span class="track"></span>
+              </label>
+              <span>{{ $t('settings.aiFab') }}</span>
+              <span class="hint">{{ $t('settings.aiFabHint') }}</span>
             </div>
           </div>
         </div>

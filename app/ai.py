@@ -17,10 +17,10 @@ from .ai_core import AIConfig, AiError, chat, chat_json, is_available, register_
 
 # 提示词版本：改动提示词时递增，方便线上问题回溯（见 GET /api/ai/status）
 register_prompt("synopsis", "v1")
-register_prompt("plot.subtitle", "v2")
-register_prompt("plot.subtitle.chunk", "v1")
-register_prompt("plot.dialog", "v1")
-register_prompt("plot.dialog.chunk", "v1")
+register_prompt("plot.subtitle", "v4")
+register_prompt("plot.subtitle.chunk", "v3")
+register_prompt("plot.dialog", "v3")
+register_prompt("plot.dialog.chunk", "v2")
 register_prompt("tags", "v2")
 register_prompt("search.intent", "v1")
 
@@ -73,44 +73,69 @@ def generate_synopsis(movie: Dict[str, Any], cfg: Optional[Dict[str, Any]] = Non
                 max_tokens=500, purpose="synopsis").strip()
 
 
+# 模型对成人向内容可能直接返回空串（不是报错）。此时换一条中性措辞重试，
+# 仍为空则由调用方降级到元数据，避免用户看到「全部分段摘要都失败了」这种死路。
+_FALLBACK_SUMMARY = (
+    "你是影视剧情分析助手。根据下面的文本，用 3–5 句中文概括主要情节、人物关系与走向。"
+    "使用概括性语言，避免细节描写。只输出正文，不要标题。"
+)
+
+
+def _summary_call(c, sys_text: str, user: str, tag: str,
+                  temperature: Optional[float] = None, max_tokens: int = 700) -> str:
+    try:
+        return chat(c, [{"role": "system", "content": sys_text},
+                        {"role": "user", "content": user}],
+                    max_tokens=max_tokens, temperature=temperature,
+                    purpose=tag).strip()
+    except AiError as e:
+        ai_core.log.warning("摘要调用失败（%s）：%s", tag, e)
+        return ""
+
+
+def _summary_with_fallback(c, sys_text: str, user: str, tag: str,
+                           max_tokens: int = 700) -> str:
+    out = _summary_call(c, sys_text, user, tag, max_tokens=max_tokens)
+    if out:
+        return out
+    return _summary_call(c, _FALLBACK_SUMMARY, user, tag + ".fallback",
+                         temperature=0.2, max_tokens=max_tokens)
+
+
+def _summarize_chunks(c, chunks: List[str], sys_part: str,
+                      purpose: str, label: str) -> List[str]:
+    parts: List[str] = []
+    for i, ch in enumerate(chunks, 1):
+        user = "第 %d/%d 段%s：\n%s" % (i, len(chunks), label, ch)
+        part = _summary_with_fallback(c, sys_part, user, purpose, max_tokens=300)
+        if part:
+            parts.append(part)
+    return parts
+
+
 def summarize_subtitles(text: str, movie: Dict[str, Any],
                         cfg: Optional[Dict[str, Any]] = None) -> str:
     """根据字幕内容生成剧情简介（不编造、不写露骨细节）。
 
     字幕超过一块时先分块提炼，再合成最终简介，避免超出上下文。
+    模型全部返回空时返回空串，由调用方决定降级（不要再抛「全部分段失败」）。
     """
     c = AIConfig.from_config(cfg)
     sys_final = ai_prompts.system("plot.subtitle", cfg)
-    chunks = _split_chunks(text)
+    chunks = _split_chunks(text, size=8000)
     if not chunks:
         return ""
     if len(chunks) == 1:
         user = _meta_block(movie) + "\n字幕内容：\n" + chunks[0] + "\n\n请总结这部影片的剧情。"
-        return chat(c, [{"role": "system", "content": sys_final},
-                        {"role": "user", "content": user}],
-                    max_tokens=700, purpose="plot.subtitle").strip()
+        return _summary_with_fallback(c, sys_final, user, "plot.subtitle")
 
     sys_part = ai_prompts.system("plot.subtitle.chunk", cfg)
-    parts: List[str] = []
-    for i, ch in enumerate(chunks, 1):
-        try:
-            part = chat(c, [
-                {"role": "system", "content": sys_part},
-                {"role": "user", "content": "第 %d/%d 段字幕：\n%s" % (i, len(chunks), ch)},
-            ], max_tokens=300, purpose="plot.subtitle.chunk").strip()
-            if part:
-                parts.append(part)
-        except AiError as e:
-            # 单段失败不阻断整体：丢一段比整体失败更可接受
-            ai_core.log.warning("字幕分段摘要失败（第 %d/%d 段）：%s",
-                                i, len(chunks), e)
+    parts = _summarize_chunks(c, chunks, sys_part, "plot.subtitle.chunk", "字幕")
     if not parts:
-        raise AiError("全部分段摘要都失败了")
+        return ""
     user = (_meta_block(movie) + "\n以下是按时间顺序的分段剧情摘要：\n"
             + "\n".join(parts) + "\n\n请合并成 3–5 句完整剧情简介，不要重复，不要分点。")
-    return chat(c, [{"role": "system", "content": sys_final},
-                    {"role": "user", "content": user}],
-                max_tokens=700, purpose="plot.subtitle").strip()
+    return _summary_with_fallback(c, sys_final, user, "plot.subtitle")
 
 
 def summarize_dialog(text: str, movie: Dict[str, Any],
@@ -122,35 +147,22 @@ def summarize_dialog(text: str, movie: Dict[str, Any],
     """
     c = AIConfig.from_config(cfg)
     sys_final = ai_prompts.system("plot.dialog", cfg)
-    chunks = _split_chunks(text, size=5000, limit=6)
+    # 一部片的对白通常 5–8 千字：尽量一次喂完，分段摘要会丢人物名、地点这类细节。
+    chunks = _split_chunks(text, size=9000, limit=6)
     if not chunks:
         return ""
     if len(chunks) == 1:
         user = _meta_block(movie) + "\n语音对白（含识别误差）：\n" + chunks[0] + \
                "\n\n请总结这部影片的剧情。"
-        return chat(c, [{"role": "system", "content": sys_final},
-                        {"role": "user", "content": user}],
-                    max_tokens=700, purpose="plot.dialog").strip()
+        return _summary_with_fallback(c, sys_final, user, "plot.dialog")
 
     sys_part = ai_prompts.system("plot.subtitle.chunk", cfg)
-    parts: List[str] = []
-    for i, ch in enumerate(chunks, 1):
-        try:
-            part = chat(c, [
-                {"role": "system", "content": sys_part},
-                {"role": "user", "content": "第 %d/%d 段对白：\n%s" % (i, len(chunks), ch)},
-            ], max_tokens=300, purpose="plot.dialog.chunk").strip()
-            if part:
-                parts.append(part)
-        except AiError as e:
-            ai_core.log.warning("对白分段摘要失败（第 %d/%d 段）：%s", i, len(chunks), e)
+    parts = _summarize_chunks(c, chunks, sys_part, "plot.dialog.chunk", "对白")
     if not parts:
-        raise AiError("全部分段摘要都失败了")
+        return ""
     user = (_meta_block(movie) + "\n以下是按时间顺序的对白摘要（来自语音识别，可能有误差）：\n"
             + "\n".join(parts) + "\n\n请合并成 3–5 句完整剧情简介，不要重复，不要分点。")
-    return chat(c, [{"role": "system", "content": sys_final},
-                    {"role": "user", "content": user}],
-                max_tokens=700, purpose="plot.dialog").strip()
+    return _summary_with_fallback(c, sys_final, user, "plot.dialog")
 
 
 def suggest_tags(movie: Dict[str, Any], cfg: Optional[Dict[str, Any]] = None) -> List[str]:

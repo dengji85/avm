@@ -4,7 +4,7 @@ import {
   aiTranslate, aiDeleteSubtitle, subtitleFileUrl,
   aiAsk, aiAskHistory, aiSimilar, subtitleTracks, updateMovie,
   aiPrompts, aiSavePrompt, aiResetPrompt, aiTraces,
-  aiAsrStatus, movieDialog, startMovieDialog, deleteMovieDialog,
+  aiAsrStatus, movieDialog, startMovieDialog, deleteMovieDialog, exportDialogSrt,
 } from '../api.js'
 import { t } from '../i18n/index.js'
 
@@ -25,6 +25,8 @@ export function useAiAssistant({ movieId, movie, toast, confirm, onChange }) {
   /* ---------------- 剧情 ---------------- */
   const plot = reactive({
     loading: false, error: '', draft: '', old: '', source: '', track: '', chars: 0,
+    // 模型对字幕/对白返回空时，后端会降级到元数据，并把原因放在这里
+    degradedFrom: '',
   })
 
   /* ---------------- 标签 ---------------- */
@@ -39,6 +41,8 @@ export function useAiAssistant({ movieId, movie, toast, confirm, onChange }) {
   const ask = reactive({
     loading: false, error: '', question: '', answer: '', refs: [],
     track: '', history: [], openId: 0,
+    // 后端取片段的方式：match（命中句）/ digest（整片抽样，泛问时用）
+    mode: '',
   })
 
   /* ---------------- 相似推荐 ---------------- */
@@ -99,6 +103,7 @@ export function useAiAssistant({ movieId, movie, toast, confirm, onChange }) {
       plot.source = r.source || 'meta'
       plot.track = r.track || ''
       plot.chars = r.chars || 0
+      plot.degradedFrom = r.degraded_from || ''
       loadTrace('plot')
     } catch (e) {
       plot.error = e.message || t('ai.failed')
@@ -130,6 +135,7 @@ export function useAiAssistant({ movieId, movie, toast, confirm, onChange }) {
     plot.draft = ''
     plot.error = ''
     plot.old = ''
+    plot.degradedFrom = ''
   }
 
   /* ---------------- 标签建议 ---------------- */
@@ -234,6 +240,7 @@ export function useAiAssistant({ movieId, movie, toast, confirm, onChange }) {
       ask.answer = r.answer || ''
       ask.refs = r.refs || []
       ask.track = r.track || ''
+      ask.mode = r.mode || ''
       ask.question = ''
       loadTrace('ask')
       await loadAskHistory()
@@ -256,6 +263,7 @@ export function useAiAssistant({ movieId, movie, toast, confirm, onChange }) {
     ask.answer = h.answer || ''
     ask.refs = h.refs || []
     ask.track = ''
+    ask.mode = ''
     ask.error = ''
   }
 
@@ -279,6 +287,8 @@ export function useAiAssistant({ movieId, movie, toast, confirm, onChange }) {
   const dialog = reactive({
     status: 'idle', percent: 0, message: '', error: '',
     segments: 0, chars: 0, model: '', text: '', has_text: false, show: false,
+    // 只有新版本提取才带逐段时间轴，能导出草稿字幕
+    hasSegments: false,
   })
   let dialogTimer = 0
 
@@ -307,6 +317,7 @@ export function useAiAssistant({ movieId, movie, toast, confirm, onChange }) {
     dialog.model = r.model || ''
     if (withText && r.text !== undefined) dialog.text = r.text || ''
     dialog.has_text = (r.chars || 0) > 0 && dialog.status === 'done'
+    dialog.hasSegments = !!r.has_segments
   }
 
   function startDialogPoll() {
@@ -333,11 +344,13 @@ export function useAiAssistant({ movieId, movie, toast, confirm, onChange }) {
     }
   }
 
-  async function startDialog() {
+  async function startDialog(maxSeconds = 0) {
     if (dialog.status === 'running') return
     dialog.error = ''
     try {
-      const r = await startMovieDialog(movieId.value, {})
+      // max_seconds：只提取前 N 分钟（快速模式）。AI 写梗概/问答通常够用，
+      // 但整片提取要按小时算，先给用户一个「快点看到结果」的选择。
+      const r = await startMovieDialog(movieId.value, { max_seconds: Number(maxSeconds) || 0 })
       applyDialog({ ...r, status: r.status || 'running' }, false)
       startDialogPoll()
     } catch (e) {
@@ -348,6 +361,18 @@ export function useAiAssistant({ movieId, movie, toast, confirm, onChange }) {
   async function toggleDialogText() {
     dialog.show = !dialog.show
     if (dialog.show) await loadDialog(20000)
+  }
+
+  /** 导出草稿 SRT：登记后播放器字幕菜单里会多一条「日文 · ASR」 */
+  async function exportSrt() {
+    try {
+      const r = await exportDialogSrt(movieId.value)
+      const key = r.estimated ? 'ai.dialogExportedEstimated' : 'ai.dialogExported'
+      toast(t(key, { n: r.cues }), 'ok', 4000)
+      if (onChange) await onChange()
+    } catch (e) {
+      dialog.error = e.message || t('ai.failed')
+    }
   }
 
   async function deleteDialog() {
@@ -370,7 +395,7 @@ export function useAiAssistant({ movieId, movie, toast, confirm, onChange }) {
   const traces = reactive({ open: '', loadingKey: '', error: '', byKey: {}, summary: {} })
   // 卡片 → 可能产生调用的 purpose 列表（剧情有分块摘要，字幕翻译有整篇/逐条）
   const TRACE_PURPOSES = {
-    plot: ['synopsis', 'plot.subtitle', 'plot.subtitle.chunk'],
+    plot: ['synopsis', 'plot.subtitle', 'plot.subtitle.chunk', 'plot.dialog', 'plot.dialog.chunk'],
     tags: ['tags'],
     subs: ['subtitle.translate', 'subtitle.translate.one'],
     ask: ['plot.qa'],
@@ -477,12 +502,14 @@ export function useAiAssistant({ movieId, movie, toast, confirm, onChange }) {
     plot.source = ''
     plot.track = ''
     plot.chars = 0
+    plot.degradedFrom = ''
     tags.items = []
     tags.error = ''
     subs.error = ''
     subs.tracks = []
     ask.answer = ''
     ask.refs = []
+    ask.mode = ''
     ask.error = ''
     ask.question = ''
     ask.history = []
@@ -519,7 +546,7 @@ export function useAiAssistant({ movieId, movie, toast, confirm, onChange }) {
     ask, similar, prompts, traces, asr, dialog,
     loadPrompts, startEditPrompt, cancelPrompt, savePrompt, restorePrompt,
     toggleTrace, loadTrace,
-    loadAsrStatus, loadDialog, startDialog, toggleDialogText, deleteDialog, stopDialogPoll,
+    loadAsrStatus, loadDialog, startDialog, toggleDialogText, deleteDialog, exportSrt, stopDialogPoll,
     refreshStatus, loadTracks, reset, timeToSeconds,
     generatePlot, applyPlot, discardPlot,
     suggestTags, toggleTag, pickAllTags, applyTags,

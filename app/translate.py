@@ -278,10 +278,15 @@ def register(conn: sqlite3.Connection, movie_id: int, path: str, lang: str) -> i
 
 
 def unregister(conn: sqlite3.Connection, movie_id: int, sub_id: int) -> Optional[str]:
+    """删除字幕登记，返回文件路径（由调用方决定是否删盘上的文件）。
+
+    以前只允许删 ai-translate，导致 ASR 草稿字幕删除时返回 404、记录删不掉。
+    现在任何来源都能注销：data/subs 下的产物会被一并删除，视频目录里的外挂文件保留。
+    """
     row = conn.execute(
         "SELECT id, file_path, source FROM movie_subtitles WHERE id=? AND movie_id=?",
         (int(sub_id), int(movie_id))).fetchone()
-    if not row or row["source"] != "ai-translate":
+    if not row:
         return None
     conn.execute("DELETE FROM movie_subtitles WHERE id=?", (row["id"],))
     return row["file_path"]

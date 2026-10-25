@@ -16,7 +16,7 @@ import {
 } from '../utils.js'
 import { t } from '../i18n/index.js'
 import { useTasks } from '../composables/useTasks.js'
-import { useAiAssistant } from '../composables/useAiAssistant.js'
+import { aiWorkspace as ws } from '../composables/aiWorkspace.js'
 
 const { runScrape } = useTasks()
 import VideoPlayer from './VideoPlayer.vue'
@@ -56,70 +56,45 @@ function stepLightbox(delta) {
   if (n < 2) return
   lightboxIndex.value = (lightboxIndex.value + delta + n) % n
 }
-/* ---------- AI 工作台：状态与动作集中在 composable 中 ---------- */
-const ai = useAiAssistant({
-  movieId: computed(() => state.currentId),
-  movie: mv,
-  toast,
-  confirm: confirmDialog,
-  onChange: () => refreshMovie(),
-})
-const aiOpen = ref(false)
+/* ---------- AI 助手：状态在全局浮窗（composables/aiWorkspace）里，这里只留入口 ---------- */
+const ai = ws.ai
 const manualSubs = computed(() => (mv.value?.subtitles || []).filter((s) => s.source !== 'ai-translate'))
+const aiSubs = computed(() => (mv.value?.subtitles || []).filter((s) => s.source === 'ai-translate'))
 
-/** 当前简介来源标签：抓取 / AI 字幕 / AI 元数据 / 人工 */
-const plotSourceLabel = computed(() => {
-  const s = ai.plotSource
-  if (s === 'subtitle') return t('ai.srcAiSubtitle')
-  if (s === 'dialog') return t('ai.srcAiDialog')
-  if (s === 'meta') return t('ai.srcAiMeta')
-  if (s === 'manual') return t('ai.srcManual')
-  if (s === 'scraped') return t('ai.srcScraped')
-  return ''
-})
-/** 收藏者最常问的几件事，点一下就能问，不用想措辞 */
-const aiQuick = computed(() => [t('ai.askQuick1'), t('ai.askQuick2'), t('ai.askQuick3')])
-
-/* AI 工作台视图：任务卡片 / 提示词审查 */
-const aiView = ref('tasks')
+/** 打开全局 AI 浮窗：把详情页已加载的影片对象一并交过去，省一次请求 */
 function openAi() {
-  aiOpen.value = true
-  aiView.value = 'tasks'
-  ai.refreshStatus()
-  ai.loadTracks()
-  ai.loadAskHistory()
-  ai.loadAsrStatus()
-  ai.loadDialog(ai.dialog.show ? 20000 : 0)
-  if (!ai.similar.items.length) ai.loadSimilar()
+  ws.openWorkspace(mv.value)
 }
-function toggleAiView() {
-  aiView.value = aiView.value === 'tasks' ? 'prompts' : 'tasks'
-  if (aiView.value === 'prompts' && !ai.prompts.items.length) ai.loadPrompts()
-}
-/** 从调用详情直接跳到对应提示词并进入编辑 */
-function openPromptEdit(id) {
-  aiView.value = 'prompts'
-  const pick = () => ai.startEditPrompt(ai.prompts.items.find((x) => x.id === id) || null)
-  if (!ai.prompts.items.length) ai.loadPrompts().then(pick)
-  else pick()
-}
-function fmtTraceTime(at) {
-  if (!at) return ''
-  try {
-    return new Date(at * 1000).toLocaleTimeString([], {
-      hour: '2-digit', minute: '2-digit', second: '2-digit',
-    })
-  } catch (e) { return '' }
-}
-/** 简介旁的「AI 重写」：打开工作台并直接开始，少点一次 */
+/** 简介旁的「AI 重写」：打开浮窗并直接开始，少点一次 */
 function openAiWithPlot() {
-  openAi()
+  ws.cards.plot = true
+  ws.openWorkspace(mv.value)
   if (!ai.plot.draft) ai.generatePlot()
 }
 /** 标签旁的「AI 建议」 */
 function openAiWithTags() {
-  openAi()
+  ws.cards.tags = true
+  ws.openWorkspace(mv.value)
   if (!ai.tags.items.length) ai.suggestTags()
+}
+/**
+ * 详情页的轻量 AI：写简介 / 问剧情都直接在页面上完成。
+ * 写简介没有字幕也能按元数据兜底；问剧情要读字幕时间点，必须先把字幕补上。
+ */
+const canQuickAi = computed(() => ai.ready && ai.hasSubtitles)
+/** 元数据有多厚：决定「按元数据生成」能给出多少东西 */
+const metaRich = computed(() => !!(
+  (mv.value?.actresses && mv.value.actresses.length)
+  || (mv.value?.series || '')
+  || (mv.value?.studio || '')
+  || (mv.value?.genres && mv.value.genres.length)
+  || (mv.value?.tags && mv.value.tags.length)))
+/** 语音提取的时长上限：0 = 全片；只取前 N 分钟能快 4~8 倍，梗概/问答通常够用 */
+const asrLimit = ref('0')
+/** 需要深功能（提示词、调用日志、对白提取）时去 AI 中心 */
+function openAiCenter() {
+  close()
+  state.view = 'ai'
 }
 
 /* 扫描同目录外挂字幕：放好 srt/ass 后点一下即可登记 */
@@ -138,8 +113,6 @@ async function scanSidecars() {
     scanningSubs.value = false
   }
 }
-function closeAi() { aiOpen.value = false }
-
 /** AI 操作后的轻量刷新：只重取影片数据，不重置当前 tab 与播放状态 */
 async function refreshMovie() {
   if (!state.currentId) return
@@ -151,39 +124,24 @@ async function refreshMovie() {
     else if (!Array.isArray(tg)) tg = []
     m.tags = tg
     mv.value = m
-    ai.loadTracks()
+    ws.syncMovie(m)
   } catch (e) { /* 静默：AI 卡片内已有错误提示 */ }
 }
 
-/** 点击问答的时间戳依据：打开内嵌播放器并跳到该时间 */
-function seekToRef(timeText) {
-  const sec = ai.timeToSeconds(timeText)
-  if (!Number.isFinite(sec) || sec <= 0) return
+/**
+ * AI 问答里点时间戳：打开内嵌播放器并跳到那一秒。
+ * 浮窗是全局的，所以由它写 state.aiSeek，这里负责真正去播。
+ */
+watch(() => state.aiSeek, (req) => {
+  if (!req || req.id !== id.value) return
   if (!playing.value) {
     playing.value = true
     // 播放器是 v-if 挂载的，等它初始化完再发跳转请求
-    setTimeout(() => window.dispatchEvent(new CustomEvent('avm-seek', { detail: { seconds: sec } })), 700)
+    setTimeout(() => window.dispatchEvent(new CustomEvent('avm-seek', { detail: { seconds: req.seconds } })), 700)
     return
   }
-  window.dispatchEvent(new CustomEvent('avm-seek', { detail: { seconds: sec } }))
-}
-
-function openSettingsFromAi() {
-  closeAi()
-  close()
-  state.view = 'settings'
-}
-
-/** 相似推荐的原因文案 */
-function reasonText(r) {
-  if (!r) return ''
-  const names = (r.names || []).filter(Boolean).join(' / ')
-  if (r.kind === 'actress') return names ? t('ai.whyActress', { names }) : t('ai.whyActressBare')
-  if (r.kind === 'series') return t('ai.whySeries', { names })
-  if (r.kind === 'studio') return t('ai.whyStudio', { names })
-  if (r.kind === 'tag') return t('ai.whyTag', { names })
-  return t('ai.whyPlot')
-}
+  window.dispatchEvent(new CustomEvent('avm-seek', { detail: { seconds: req.seconds } }))
+})
 
 /* 常用在线站点：详情页一键打开影片在各站点的页面 */
 const sites = ref([])
@@ -238,6 +196,15 @@ function openCast() {
   castDevices.value = []
   scanCast()
 }
+/** 设备副标题：优先显示 IP（从 description 地址里取），再带上厂商型号 */
+function castSub(d) {
+  const loc = (d && d.location) ? String(d.location) : ''
+  const m = loc.match(/^https?:\/\/([^/]+)/)
+  const host = m ? m[1] : ''
+  const bits = [d && d.manufacturer, d && d.model].filter(Boolean).join(' ')
+  if (host && bits) return host + ' · ' + bits
+  return host || bits || (d && d.usn) || ''
+}
 async function addCastDevice() {
   const ip = castIp.value.trim()
   if (!ip) return
@@ -269,11 +236,6 @@ async function stopCast() {
   } catch (e) { toast(e.message, 'err') }
   castTo.value = ''
   castUsn.value = ''
-}
-
-function gotoMovie(mid) {
-  closeAi()
-  state.currentId = mid
 }
 
 const open = computed(() => !!state.currentId)
@@ -331,9 +293,9 @@ async function load() {
       m.tags = t
     }
     mv.value = m
-    ai.reset()
-    ai.refreshStatus()
-    ai.loadTracks()
+    // 交给全局 AI 浮窗共用同一个影片对象，并顺手探测一次 AI 是否可用（按钮据此高亮）
+    ws.syncMovie(m)
+    ws.ensureStatus()
   } catch (e) {
     toast(e.message, 'err')
     close()
@@ -846,6 +808,34 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', onKey) })
 
                   <AddToCollectionBtn :movie-id="id" variant="detail" />
 
+                  <!-- 投屏：选同网段的 DLNA 设备；扫不到就手动填电视 IP -->
+                  <div v-if="castOpen" class="cast-mask" @click.self="castOpen = false">
+                    <div class="cast-box">
+                      <div class="cast-head">
+                        <b>{{ $t('detail.castTitle') }}</b>
+                        <button class="btn tiny ghost" @click="castOpen = false">✕</button>
+                      </div>
+                      <p class="hint">{{ $t('detail.castHint') }}</p>
+                      <div class="cast-list">
+                        <p v-if="castBusy" class="hint">{{ $t('detail.castScanning') }}</p>
+                        <template v-else-if="castDevices.length">
+                          <button v-for="d in castDevices" :key="d.usn" class="cast-item" @click="doCast(d)">
+                            <b>{{ d.name }}</b>
+                            <span class="muted sm">{{ castSub(d) }}</span>
+                          </button>
+                        </template>
+                        <p v-else class="hint">{{ $t('detail.castNone') }}</p>
+                      </div>
+                      <div class="cast-add">
+                        <input v-model="castIp" class="inp" :placeholder="$t('detail.castIpPh')"
+                               @keydown.enter.prevent="addCastDevice" />
+                        <button class="btn tiny" :disabled="castBusy || !castIp.trim()" @click="addCastDevice">
+                          {{ $t('detail.castAdd') }}
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+
                   <!-- 打开在线页面：前 3 个平铺，更多 hover 展开 -->
                   <template v-if="sites.length">
                     <button
@@ -913,8 +903,8 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', onKey) })
                 </div>
 
                 <!-- 已生成的 AI 字幕译文：下载 / 删除（生成入口统一在 AI 工作台） -->
-                <div v-if="ai.aiSubs.length" class="ai-subs">
-                  <div v-for="s in ai.aiSubs" :key="s.id" class="ai-sub-row">
+                <div v-if="aiSubs.length" class="ai-subs">
+                  <div v-for="s in aiSubs" :key="s.id" class="ai-sub-row">
                     <span class="mono">{{ s.lang }}{{ (s.filename || '').includes('-双语') ? ' · ' + $t('detail.aiBilingual') : '' }}</span>
                     <span class="spacer"></span>
                     <button class="btn tiny ghost" @click="ai.downloadSub(s)">{{ $t('common.download') }}</button>
@@ -1055,11 +1045,114 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', onKey) })
                     · {{ $t('detail.aiEditable') }}
                   </p>
                   <div v-if="mv.note" class="note-box"><b>{{ $t('detail.note') }}</b><p>{{ mv.note }}</p></div>
-                  <div v-if="ai.ready" class="hstack mt wrap">
-                    <button class="btn tiny ghost" :title="$t('ai.plotHint')" @click="openAiWithPlot">
-                      ✨ {{ mv.plot ? $t('ai.plotRewrite') : $t('ai.plotCreate') }}
-                    </button>
+
+                  <!-- AI 快捷：写简介（就地生成、对照确认才写库）；问剧情要字幕 -->
+                  <div v-if="ai.ready" class="aiq">
+                    <!-- 写简介不强制要字幕：没字幕时后端按标题/演员/系列等元数据兜底，
+                         依据在标题和角标上都写清楚，避免用户以为读了片子内容 -->
+                    <div class="hstack wrap">
+                      <button v-if="!ai.plot.draft" class="btn tiny ghost" :disabled="ai.plot.loading"
+                              :title="canQuickAi ? $t('ai.plotHint') : $t('ai.plotHintMeta')"
+                              @click="ai.generatePlot">
+                        ✨ {{ ai.plot.loading ? $t('ai.working') : (mv.plot ? $t('ai.plotRewrite') : $t('ai.plotCreate')) }}
+                      </button>
+                      <button v-else class="btn tiny ghost" @click="openAiWithPlot">{{ $t('ai.openPanel') }}</button>
+                    </div>
+                    <p v-if="ai.plot.error" class="aiq-err">{{ ai.plot.error }}</p>
+                    <!-- 没字幕时说明依据，别让用户以为 AI 读过片子内容 -->
+                    <p v-else-if="!canQuickAi && !ai.plot.draft && !ai.probing" class="aiq-need">
+                      {{ metaRich ? $t('ai.plotHintMeta') : $t('ai.plotHintThin') }}
+                    </p>
+
+                    <!-- 新旧对照：点「采用」才写入 -->
+                    <div v-if="ai.plot.draft" class="aiq-compare">
+                      <div class="aiq-col">
+                        <div class="aiq-col-head">{{ $t('ai.oldVersion') }}</div>
+                        <p class="aiq-text">{{ ai.plot.old || $t('ai.none') }}</p>
+                      </div>
+                      <div class="aiq-col new">
+                        <div class="aiq-col-head">
+                          {{ $t('ai.newVersion') }}
+                          <span class="badge ok">{{ ai.plot.source === 'subtitle' ? $t('ai.srcSubtitle') : $t('ai.srcMeta') }}</span>
+                        </div>
+                        <p class="aiq-text">{{ ai.plot.draft }}</p>
+                      </div>
+                      <div class="hstack wrap">
+                        <button class="btn tiny primary" @click="ai.applyPlot">{{ $t('ai.useNew') }}</button>
+                        <button class="btn tiny ghost" @click="ai.discardPlot">{{ $t('ai.keepOld') }}</button>
+                      </div>
+                    </div>
+
+                    <template v-if="canQuickAi">
+                      <!-- 问剧情：答案带时间点，点了直接跳到片中那一刻 -->
+                      <div class="aiq-ask">
+                        <div class="aiq-ask-row">
+                          <input v-model="ai.ask.question" class="inp" :placeholder="$t('ai.askPh')"
+                                 @keydown.enter.prevent="ai.sendAsk()" />
+                          <button class="btn tiny primary"
+                                  :disabled="ai.ask.loading || !ai.ask.question.trim()"
+                                  @click="ai.sendAsk">
+                            {{ ai.ask.loading ? $t('ai.working') : $t('ai.askRun') }}
+                          </button>
+                        </div>
+                        <p v-if="ai.ask.error" class="aiq-err">{{ ai.ask.error }}</p>
+                        <div v-if="ai.ask.answer" class="aiq-answer">
+                          <p class="aiq-text">{{ ai.ask.answer }}</p>
+                          <div v-if="ai.ask.refs.length" class="aiq-refs">
+                            <button v-for="(r, i) in ai.ask.refs" :key="i" class="aiq-ref"
+                                    :title="r.text" @click="ws.seekToRef(r.time)">[{{ r.time }}]</button>
+                            <span class="muted sm">{{ ai.ask.mode === 'digest' ? $t('ai.refHintDigest') : $t('ai.refHint') }}</span>
+                          </div>
+                        </div>
+                      </div>
+                    </template>
+
+                    <!-- 没字幕：说清楚要怎么补，而不是给个点了报错的按钮 -->
+                    <div v-else-if="!ai.probing" class="aiq-need-box">
+                      <p class="aiq-need">{{ $t('ai.needSubs') }}</p>
+                      <div class="hstack wrap">
+                        <button class="btn tiny ghost" @click="scanSidecars">{{ $t('detail.scanSubs') }}</button>
+                        <select v-if="ai.dialog.status !== 'running' && !ai.dialog.has_text"
+                                v-model="asrLimit" class="inp tiny asr-limit"
+                                :title="$t('ai.asrLimitTip')">
+                          <option value="0">{{ $t('ai.asrFull') }}</option>
+                          <option value="600">{{ $t('ai.asrFirst10') }}</option>
+                          <option value="1200">{{ $t('ai.asrFirst20') }}</option>
+                          <option value="1800">{{ $t('ai.asrFirst30') }}</option>
+                        </select>
+                        <button
+                          v-if="ai.dialog.status !== 'running' && !ai.dialog.has_text"
+                          class="btn tiny"
+                          :title="$t('ai.extractDialogHint')"
+                          :disabled="!ai.asr.lib_available || !ai.asr.model_available"
+                          @click="ai.startDialog(asrLimit)"
+                        >{{ $t('ai.extractDialog') }}</button>
+                        <span v-if="ai.dialog.status === 'running'" class="badge">{{ ai.dialog.percent }}%</span>
+                        <span v-else-if="ai.dialog.has_text" class="badge ok">{{ $t('ai.dialogDone', { n: ai.dialog.segments }) }}</span>
+                        <span v-else-if="ai.dialog.status === 'error'" class="badge err">{{ $t('ai.dialogFailed') }}</span>
+                        <button v-if="ai.dialog.has_text" class="btn tiny ghost" @click="ai.toggleDialogText">
+                          {{ ai.dialog.show ? $t('ai.hideDialog') : $t('ai.viewDialog') }}
+                        </button>
+                        <button v-if="ai.dialog.has_text" class="btn tiny" :title="$t('ai.dialogDraftHint')" @click="ai.exportSrt">
+                          {{ $t('ai.dialogExportSrt') }}
+                        </button>
+                        <button v-if="ai.dialog.has_text" class="btn tiny ghost" @click="ai.deleteDialog">{{ $t('common.delete') }}</button>
+                        <button v-if="!ai.asr.lib_available || !ai.asr.model_available"
+                                class="link-btn" @click="openAiCenter">{{ $t('ai.needSubsCenter') }}</button>
+                      </div>
+
+                      <p v-if="ai.dialog.status === 'running'" class="hint">{{ ai.dialog.message || $t('ai.dialogRunning') }}</p>
+                      <div v-if="ai.dialog.status === 'running'" class="aiq-bar">
+                        <span :style="{ width: (ai.dialog.percent || 0) + '%' }"></span>
+                      </div>
+                      <p v-if="!ai.asr.lib_available" class="hint">{{ $t('ai.dialogNoLib') }}</p>
+                      <p v-else-if="!ai.asr.model_available" class="hint">{{ $t('ai.dialogNoModel', { dir: ai.asr.model_dir }) }}</p>
+                      <p v-if="ai.dialog.error" class="aiq-err">{{ ai.dialog.error }}</p>
+                      <p v-if="ai.dialog.has_text" class="hint">{{ $t('ai.dialogThenExport') }}</p>
+                      <pre v-if="ai.dialog.show && ai.dialog.text" class="aiq-dlg">{{ ai.dialog.text }}</pre>
+                    </div>
                   </div>
+
                   <button class="btn tiny mt" @click="startEdit">{{ $t('detail.editMeta') }}</button>
                 </div>
 
@@ -1161,462 +1254,6 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', onKey) })
 
     <!-- 女优弹框：在详情页内查看女优介绍，不关闭当前详情 -->
     <ActressModal v-if="actressModal" :ident="actressModal" @close="actressModal = ''" />
-
-    <!-- AI 工作台：卡片式分区；写库前先预览，避免一键覆盖人工整理的内容 -->
-    <div v-if="aiOpen" class="aiw-mask" @click.self="closeAi">
-      <section class="aiw-panel" role="dialog" aria-modal="true">
-        <header class="aiw-head">
-          <div class="aiw-head-title">
-            <b>✨ {{ $t('ai.title') }}</b>
-            <span v-if="ai.ready" class="badge ok">{{ ai.model || $t('ai.modelFallback') }}</span>
-            <span v-else-if="!ai.checking" class="badge warn">{{ $t('ai.notReady') }}</span>
-          </div>
-          <div class="aiw-head-actions">
-            <button v-if="ai.ready" class="btn tiny ghost" :class="{ 'ai-entry-on': aiView === 'prompts' }" @click="toggleAiView">
-              {{ aiView === 'prompts' ? $t('ai.backToTasks') : $t('ai.prompts') }}
-            </button>
-            <button class="btn tiny ghost" @click="closeAi">{{ $t('common.close') }}</button>
-          </div>
-        </header>
-
-        <!-- 未启用：直接给出口子，不让人在空面板里猜 -->
-        <div v-if="ai.checking" class="aiw-empty">
-          <p class="hint">{{ $t('ai.working') }}</p>
-        </div>
-        <div v-else-if="!ai.ready" class="aiw-empty">
-          <p>{{ $t('ai.notReadyHint') }}</p>
-          <button class="btn primary" @click="openSettingsFromAi">{{ $t('ai.goSettings') }}</button>
-        </div>
-
-        <div v-else-if="aiView === 'tasks'" class="aiw-body">
-          <!-- 1. 剧情简介：新旧对照，确认才写 -->
-          <article class="aiw-card">
-            <div class="aiw-card-head">
-              <b>{{ $t('ai.plotTitle') }}</b>
-              <span v-if="plotSourceLabel" class="badge">{{ plotSourceLabel }}</span>
-              <span class="spacer"></span>
-              <span v-if="ai.plot.chars" class="muted sm">{{ $t('ai.plotBasis', { n: ai.plot.chars }) }}</span>
-            </div>
-            <p class="hint">{{ $t('ai.plotHint') }}</p>
-
-            <p v-if="!ai.hasDraft" class="aiw-text">{{ (mv && mv.plot) || $t('ai.plotEmpty') }}</p>
-
-            <div v-else class="aiw-compare">
-              <div class="aiw-col">
-                <div class="aiw-col-head">{{ $t('ai.oldVersion') }}</div>
-                <p class="aiw-text">{{ ai.plot.old || $t('ai.none') }}</p>
-              </div>
-              <div class="aiw-col new">
-                <div class="aiw-col-head">
-                  {{ $t('ai.newVersion') }}
-                  <span class="badge ok">{{ ai.plot.source === 'subtitle' ? $t('ai.srcSubtitle') : $t('ai.srcMeta') }}</span>
-                </div>
-                <p class="aiw-text">{{ ai.plot.draft }}</p>
-              </div>
-            </div>
-
-            <p v-if="ai.plot.track" class="hint">{{ $t('ai.plotTrack', { track: ai.plot.track }) }}</p>
-            <p v-if="ai.plot.error" class="aiw-err">{{ ai.plot.error }}</p>
-
-            <div class="aiw-actions">
-              <button class="btn tiny primary" :disabled="ai.plot.loading" @click="ai.generatePlot">
-                {{ ai.plot.loading ? $t('ai.working') : (ai.hasDraft ? $t('ai.regenerate') : $t('ai.generate')) }}
-              </button>
-              <template v-if="ai.hasDraft">
-                <button class="btn tiny" @click="ai.applyPlot">{{ $t('ai.useNew') }}</button>
-                <button class="btn tiny ghost" @click="ai.discardPlot">{{ $t('ai.keepOld') }}</button>
-              </template>
-            </div>
-
-            <!-- 没有字幕时的第二条输入：语音对白（只喂给 AI，不产出字幕） -->
-            <div v-if="!ai.hasSubtitles" class="aiw-dialog">
-              <div class="aiw-row">
-                <b>{{ $t('ai.dialogTitle') }}</b>
-                <span v-if="ai.dialog.status === 'running'" class="badge">{{ ai.dialog.percent }}%</span>
-                <span v-else-if="ai.dialog.has_text" class="badge ok">{{ $t('ai.dialogDone', { n: ai.dialog.segments }) }}</span>
-                <span v-else-if="ai.dialog.status === 'error'" class="badge err">{{ $t('ai.dialogFailed') }}</span>
-                <span class="spacer"></span>
-                <button v-if="ai.dialog.status !== 'running' && !ai.dialog.has_text"
-                        class="btn tiny"
-                        :disabled="!ai.asr.lib_available || !ai.asr.model_available"
-                        @click="ai.startDialog">{{ $t('ai.extractDialog') }}</button>
-                <button v-if="ai.dialog.has_text" class="btn tiny ghost" @click="ai.toggleDialogText">
-                  {{ ai.dialog.show ? $t('ai.hideDialog') : $t('ai.viewDialog') }}
-                </button>
-                <button v-if="ai.dialog.has_text" class="btn tiny ghost" @click="ai.deleteDialog">{{ $t('common.delete') }}</button>
-              </div>
-
-              <p v-if="ai.dialog.status === 'running'" class="hint">{{ ai.dialog.message || $t('ai.dialogRunning') }}</p>
-              <div v-if="ai.dialog.status === 'running'" class="aiw-bar">
-                <span :style="{ width: (ai.dialog.percent || 0) + '%' }"></span>
-              </div>
-
-              <p v-if="!ai.asr.lib_available" class="hint">{{ $t('ai.dialogNoLib') }}</p>
-              <p v-else-if="!ai.asr.model_available" class="hint">{{ $t('ai.dialogNoModel', { dir: ai.asr.model_dir }) }}</p>
-              <p v-else-if="ai.dialog.status === 'idle' && !ai.dialog.has_text" class="hint">{{ $t('ai.extractDialogHint') }}</p>
-              <p v-if="ai.dialog.error" class="aiw-err">{{ ai.dialog.error }}</p>
-
-              <pre v-if="ai.dialog.show && ai.dialog.text" class="aiw-pre">{{ ai.dialog.text }}</pre>
-            </div>
-
-            <!-- 审查：这次到底发了什么、模型原样回了什么 -->
-            <div class="aiw-trace">
-              <button class="link-btn" @click="ai.toggleTrace('plot')">
-                {{ ai.traces.open === 'plot' ? $t('ai.traceHide') : $t('ai.traceShow') }}
-              </button>
-              <button class="link-btn" @click="openPromptEdit(ai.plot.source === 'subtitle' ? 'plot.subtitle' : 'synopsis')">
-                {{ $t('ai.editPrompt') }}
-              </button>
-              <span v-if="ai.traces.summary.plot" class="muted sm">
-                {{ ai.traces.summary.plot.model }} · {{ ai.traces.summary.plot.ms }} ms
-              </span>
-            </div>
-            <div v-if="ai.traces.open === 'plot'" class="aiw-trace-box">
-              <p v-if="ai.traces.loadingKey === 'plot'" class="hint">{{ $t('ai.traceLoading') }}</p>
-              <p v-else-if="ai.traces.error" class="aiw-err">{{ ai.traces.error }}</p>
-              <p v-else-if="!ai.traceItems('plot').length" class="hint">{{ $t('ai.traceEmpty') }}</p>
-              <div v-for="tr in ai.traceItems('plot')" :key="tr.id" class="aiw-trace-item">
-                <div class="aiw-trace-meta">
-                  <span class="badge">{{ tr.purpose }}</span>
-                  <span>{{ tr.model }}</span>
-                  <span>{{ tr.ms }} ms</span>
-                  <span v-if="tr.cached" class="badge ok">{{ $t('ai.traceCached') }}</span>
-                  <span class="muted sm">{{ fmtTraceTime(tr.at) }}</span>
-                </div>
-                <div class="hint">{{ $t('ai.traceSystem') }}</div>
-                <pre class="aiw-pre">{{ tr.messages[0] ? tr.messages[0].content : '' }}</pre>
-                <div class="hint">{{ $t('ai.traceUser') }}</div>
-                <pre class="aiw-pre">{{ tr.messages[1] ? tr.messages[1].content : '' }}</pre>
-                <div class="hint">{{ tr.error ? $t('ai.traceError') : $t('ai.traceReply') }}</div>
-                <pre class="aiw-pre" :class="{ err: tr.error }">{{ tr.error || tr.reply }}</pre>
-              </div>
-            </div>
-          </article>
-
-          <!-- 2. 标签：逐条勾选；已存在的默认不勾，避免无意义写入 -->
-          <article class="aiw-card">
-            <div class="aiw-card-head">
-              <b>{{ $t('ai.tagsTitle') }}</b>
-              <span class="spacer"></span>
-              <span class="muted sm">{{ $t('ai.tagsCurrent', { n: (mv && mv.tags ? mv.tags.length : 0) }) }}</span>
-            </div>
-            <p class="hint">{{ $t('ai.tagsHint') }}</p>
-
-            <div v-if="ai.tags.items.length" class="aiw-chips">
-              <button v-for="it in ai.tags.items" :key="it.name"
-                      class="chip aiw-chip"
-                      :class="{ on: it.picked, existing: it.existing }"
-                      @click="ai.toggleTag(it.name)">
-                <span v-if="it.picked">✓ </span>{{ it.name }}
-                <em v-if="it.existing">{{ $t('ai.exists') }}</em>
-              </button>
-            </div>
-            <p v-if="ai.tags.error" class="aiw-err">{{ ai.tags.error }}</p>
-
-            <div class="aiw-actions">
-              <button class="btn tiny primary" :disabled="ai.tags.loading" @click="ai.suggestTags">
-                {{ ai.tags.loading ? $t('ai.working') : $t('ai.tagsRun') }}
-              </button>
-              <template v-if="ai.tags.items.length">
-                <button class="btn tiny ghost" @click="ai.pickAllTags(true)">{{ $t('ai.selectAll') }}</button>
-                <button class="btn tiny ghost" @click="ai.pickAllTags(false)">{{ $t('ai.clearSel') }}</button>
-                <button class="btn tiny" :disabled="!ai.pickedTags.length" @click="ai.applyTags">
-                  {{ $t('ai.tagsAdd', { n: ai.pickedTags.length }) }}
-                </button>
-              </template>
-            </div>
-
-            <div class="aiw-trace">
-              <button class="link-btn" @click="ai.toggleTrace('tags')">
-                {{ ai.traces.open === 'tags' ? $t('ai.traceHide') : $t('ai.traceShow') }}
-              </button>
-              <button class="link-btn" @click="openPromptEdit('tags')">{{ $t('ai.editPrompt') }}</button>
-              <span v-if="ai.traces.summary.tags" class="muted sm">
-                {{ ai.traces.summary.tags.model }} · {{ ai.traces.summary.tags.ms }} ms
-              </span>
-            </div>
-            <div v-if="ai.traces.open === 'tags'" class="aiw-trace-box">
-              <p v-if="ai.traces.loadingKey === 'tags'" class="hint">{{ $t('ai.traceLoading') }}</p>
-              <p v-else-if="ai.traces.error" class="aiw-err">{{ ai.traces.error }}</p>
-              <p v-else-if="!ai.traceItems('tags').length" class="hint">{{ $t('ai.traceEmpty') }}</p>
-              <div v-for="tr in ai.traceItems('tags')" :key="tr.id" class="aiw-trace-item">
-                <div class="aiw-trace-meta">
-                  <span class="badge">{{ tr.purpose }}</span>
-                  <span>{{ tr.model }}</span>
-                  <span>{{ tr.ms }} ms</span>
-                  <span v-if="tr.cached" class="badge ok">{{ $t('ai.traceCached') }}</span>
-                  <span class="muted sm">{{ fmtTraceTime(tr.at) }}</span>
-                </div>
-                <div class="hint">{{ $t('ai.traceSystem') }}</div>
-                <pre class="aiw-pre">{{ tr.messages[0] ? tr.messages[0].content : '' }}</pre>
-                <div class="hint">{{ $t('ai.traceUser') }}</div>
-                <pre class="aiw-pre">{{ tr.messages[1] ? tr.messages[1].content : '' }}</pre>
-                <div class="hint">{{ tr.error ? $t('ai.traceError') : $t('ai.traceReply') }}</div>
-                <pre class="aiw-pre" :class="{ err: tr.error }">{{ tr.error || tr.reply }}</pre>
-              </div>
-            </div>
-          </article>
-
-          <!-- 3. 字幕翻译：没有字幕就直接说明原因，而不是给个点了报错的按钮 -->
-          <article class="aiw-card">
-            <div class="aiw-card-head">
-              <b>{{ $t('ai.subsTitle') }}</b>
-              <span class="spacer"></span>
-              <span class="muted sm">
-                {{ ai.hasSubtitles ? $t('ai.subsTracks', { n: ai.subs.tracks.length || ai.aiSubs.length }) : $t('ai.subsNone') }}
-              </span>
-            </div>
-            <div class="aiw-row">
-              <select v-model="ai.subs.target" class="inp tiny">
-                <option value="zh-Hans">{{ $t('detail.aiTargetHans') }}</option>
-                <option value="zh-Hant">{{ $t('detail.aiTargetHant') }}</option>
-                <option value="en">{{ $t('detail.aiTargetEn') }}</option>
-              </select>
-              <label class="aiw-check">
-                <input type="checkbox" v-model="ai.subs.bilingual" />
-                <span>{{ $t('detail.aiBilingual') }}</span>
-              </label>
-              <button class="btn tiny primary" :disabled="ai.subs.loading || !ai.hasSubtitles" @click="ai.translateSubs">
-                {{ ai.subs.loading ? $t('ai.working') : $t('detail.aiTranslate') }}
-              </button>
-            </div>
-            <p v-if="!ai.hasSubtitles && !ai.probing" class="hint">{{ $t('ai.subsNoSource') }}</p>
-            <div v-if="ai.aiSubs.length" class="aiw-list">
-              <div v-for="s in ai.aiSubs" :key="s.id" class="aiw-list-row">
-                <span class="mono">{{ s.lang || 'AI' }}</span>
-                <span class="ellipsis dim">{{ s.filename }}</span>
-                <button class="btn tiny ghost" @click="ai.downloadSub(s)">{{ $t('common.download') }}</button>
-                <button class="btn tiny ghost" @click="ai.removeAiSub(s)">{{ $t('common.delete') }}</button>
-              </div>
-            </div>
-            <p v-if="ai.subs.error" class="aiw-err">{{ ai.subs.error }}</p>
-
-            <div class="aiw-trace">
-              <button class="link-btn" @click="ai.toggleTrace('subs')">
-                {{ ai.traces.open === 'subs' ? $t('ai.traceHide') : $t('ai.traceShow') }}
-              </button>
-              <button class="link-btn" @click="openPromptEdit('subtitle.translate')">{{ $t('ai.editPrompt') }}</button>
-              <span v-if="ai.traces.summary.subs" class="muted sm">
-                {{ ai.traces.summary.subs.model }} · {{ ai.traces.summary.subs.ms }} ms
-              </span>
-            </div>
-            <div v-if="ai.traces.open === 'subs'" class="aiw-trace-box">
-              <p v-if="ai.traces.loadingKey === 'subs'" class="hint">{{ $t('ai.traceLoading') }}</p>
-              <p v-else-if="ai.traces.error" class="aiw-err">{{ ai.traces.error }}</p>
-              <p v-else-if="!ai.traceItems('subs').length" class="hint">{{ $t('ai.traceEmpty') }}</p>
-              <div v-for="tr in ai.traceItems('subs')" :key="tr.id" class="aiw-trace-item">
-                <div class="aiw-trace-meta">
-                  <span class="badge">{{ tr.purpose }}</span>
-                  <span>{{ tr.model }}</span>
-                  <span>{{ tr.ms }} ms</span>
-                  <span v-if="tr.cached" class="badge ok">{{ $t('ai.traceCached') }}</span>
-                  <span class="muted sm">{{ fmtTraceTime(tr.at) }}</span>
-                </div>
-                <div class="hint">{{ $t('ai.traceSystem') }}</div>
-                <pre class="aiw-pre">{{ tr.messages[0] ? tr.messages[0].content : '' }}</pre>
-                <div class="hint">{{ $t('ai.traceUser') }}</div>
-                <pre class="aiw-pre">{{ tr.messages[1] ? tr.messages[1].content : '' }}</pre>
-                <div class="hint">{{ tr.error ? $t('ai.traceError') : $t('ai.traceReply') }}</div>
-                <pre class="aiw-pre" :class="{ err: tr.error }">{{ tr.error || tr.reply }}</pre>
-              </div>
-            </div>
-          </article>
-
-          <!-- 4. 剧情问答：时间戳可点击直接跳到片中的那一刻 -->
-          <article class="aiw-card">
-            <div class="aiw-card-head">
-              <b>{{ $t('ai.askTitle') }}</b>
-              <span class="spacer"></span>
-              <span v-if="ai.ask.track" class="muted sm">{{ ai.ask.track }}</span>
-            </div>
-            <p class="hint">{{ $t('ai.askHint') }}</p>
-
-            <div class="aiw-row">
-              <input v-model="ai.ask.question" class="inp" :placeholder="$t('ai.askPh')" @keyup.enter="ai.sendAsk" />
-              <button class="btn tiny primary" :disabled="ai.ask.loading || !ai.ask.question.trim()" @click="ai.sendAsk">
-                {{ ai.ask.loading ? $t('ai.working') : $t('ai.askRun') }}
-              </button>
-            </div>
-            <div class="aiw-chips">
-              <button v-for="q in aiQuick" :key="q" class="chip" :disabled="!ai.hasSubtitles" @click="ai.ask.question = q; ai.sendAsk()">{{ q }}</button>
-            </div>
-
-            <p v-if="!ai.hasSubtitles && !ai.probing" class="hint">{{ $t('ai.askNoSubs') }}</p>
-            <p v-if="ai.ask.error" class="aiw-err">{{ ai.ask.error }}</p>
-
-            <div v-if="ai.ask.answer" class="aiw-answer">
-              <p class="aiw-text">{{ ai.ask.answer }}</p>
-              <div v-if="ai.ask.refs.length" class="aiw-refs">
-                <button v-for="(r, i) in ai.ask.refs" :key="i" class="aiw-ref" :title="r.text" @click="seekToRef(r.time)">
-                  [{{ r.time }}]
-                </button>
-                <span class="muted sm">{{ $t('ai.refHint') }}</span>
-              </div>
-            </div>
-
-            <div v-if="ai.ask.history.length" class="aiw-history">
-              <div class="hint">{{ $t('ai.askHistory') }}</div>
-              <button v-for="h in ai.ask.history" :key="h.id"
-                      class="aiw-hist-row" :class="{ on: ai.ask.openId === h.id }"
-                      @click="ai.toggleHistory(h)">
-                <span class="ellipsis">{{ h.question }}</span>
-                <span class="muted sm">{{ fmtAgo(h.created_at) }}</span>
-              </button>
-            </div>
-
-            <div class="aiw-trace">
-              <button class="link-btn" @click="ai.toggleTrace('ask')">
-                {{ ai.traces.open === 'ask' ? $t('ai.traceHide') : $t('ai.traceShow') }}
-              </button>
-              <button class="link-btn" @click="openPromptEdit('plot.qa')">{{ $t('ai.editPrompt') }}</button>
-              <span v-if="ai.traces.summary.ask" class="muted sm">
-                {{ ai.traces.summary.ask.model }} · {{ ai.traces.summary.ask.ms }} ms
-              </span>
-            </div>
-            <div v-if="ai.traces.open === 'ask'" class="aiw-trace-box">
-              <p v-if="ai.traces.loadingKey === 'ask'" class="hint">{{ $t('ai.traceLoading') }}</p>
-              <p v-else-if="ai.traces.error" class="aiw-err">{{ ai.traces.error }}</p>
-              <p v-else-if="!ai.traceItems('ask').length" class="hint">{{ $t('ai.traceEmpty') }}</p>
-              <div v-for="tr in ai.traceItems('ask')" :key="tr.id" class="aiw-trace-item">
-                <div class="aiw-trace-meta">
-                  <span class="badge">{{ tr.purpose }}</span>
-                  <span>{{ tr.model }}</span>
-                  <span>{{ tr.ms }} ms</span>
-                  <span v-if="tr.cached" class="badge ok">{{ $t('ai.traceCached') }}</span>
-                  <span class="muted sm">{{ fmtTraceTime(tr.at) }}</span>
-                </div>
-                <div class="hint">{{ $t('ai.traceSystem') }}</div>
-                <pre class="aiw-pre">{{ tr.messages[0] ? tr.messages[0].content : '' }}</pre>
-                <div class="hint">{{ $t('ai.traceUser') }}</div>
-                <pre class="aiw-pre">{{ tr.messages[1] ? tr.messages[1].content : '' }}</pre>
-                <div class="hint">{{ tr.error ? $t('ai.traceError') : $t('ai.traceReply') }}</div>
-                <pre class="aiw-pre" :class="{ err: tr.error }">{{ tr.error || tr.reply }}</pre>
-              </div>
-            </div>
-          </article>
-
-          <!-- 5. 相似推荐：带「为什么相似」，可解释才敢信 -->
-          <article class="aiw-card">
-            <div class="aiw-card-head">
-              <b>{{ $t('ai.simTitle') }}</b>
-              <span class="spacer"></span>
-              <button class="btn tiny ghost" :disabled="ai.similar.loading" @click="ai.loadSimilar">{{ $t('ai.simRefresh') }}</button>
-            </div>
-            <div v-if="ai.similar.items.length" class="aiw-sim">
-              <div v-for="s in ai.similar.items" :key="s.id" class="aiw-sim-card">
-                <button class="aiw-sim-open" @click="gotoMovie(s.id)">
-                  <img v-if="s.cover" :src="coverThumbUrl(s.id)" alt="" loading="lazy" />
-                  <span class="ellipsis">{{ s.code || s.title }}</span>
-                </button>
-                <div v-if="(s.reasons || []).length" class="aiw-reasons">
-                  <span v-for="(r, i) in s.reasons" :key="i" class="aiw-reason">{{ reasonText(r) }}</span>
-                </div>
-              </div>
-            </div>
-            <p v-else-if="ai.similar.loading" class="hint">{{ $t('ai.simLoading') }}</p>
-            <p v-else-if="!ai.similar.error" class="hint">{{ $t('ai.simEmpty') }}</p>
-            <p v-if="ai.similar.error" class="aiw-err">{{ ai.similar.error }}</p>
-          </article>
-        </div>
-
-        <!-- 提示词审查 / 修改：保存后立即生效，可随时恢复默认 -->
-        <div v-else class="aiw-body">
-          <p class="hint">{{ $t('ai.promptsHint') }}</p>
-          <p v-if="ai.prompts.loading" class="hint">{{ $t('ai.working') }}</p>
-          <p v-if="ai.prompts.error" class="aiw-err">{{ ai.prompts.error }}</p>
-
-          <article v-for="p in ai.prompts.items" :key="p.id" class="aiw-card">
-            <div class="aiw-card-head">
-              <b>{{ p.title }}</b>
-              <span class="badge" :class="{ ok: p.overridden }">
-                {{ p.overridden ? $t('ai.customized') : $t('ai.builtin') }}
-              </span>
-              <span class="spacer"></span>
-              <span class="muted sm">{{ p.id }} · {{ p.version || '-' }}</span>
-            </div>
-            <p class="hint">{{ p.desc }}</p>
-            <p class="aiw-vars">{{ $t('ai.promptVars') }}：{{ p.variables.length ? p.variables.join(' / ') : $t('ai.none') }}</p>
-
-            <template v-if="ai.prompts.editingId === p.id">
-              <textarea v-model="ai.prompts.draft" class="inp aiw-ta" rows="6" spellcheck="false"></textarea>
-              <div class="aiw-actions">
-                <button class="btn tiny primary" :disabled="ai.prompts.saving" @click="ai.savePrompt">
-                  {{ ai.prompts.saving ? $t('ai.working') : $t('common.save') }}
-                </button>
-                <button class="btn tiny ghost" @click="ai.cancelPrompt">{{ $t('common.cancel') }}</button>
-                <button class="btn tiny ghost" :disabled="!p.overridden" @click="ai.restorePrompt(p.id)">
-                  {{ $t('ai.restoreDefault') }}
-                </button>
-              </div>
-            </template>
-            <template v-else>
-              <p class="aiw-text">{{ p.system }}</p>
-              <div class="aiw-actions">
-                <button class="btn tiny" @click="ai.startEditPrompt(p)">{{ $t('ai.editPrompt') }}</button>
-                <button class="btn tiny ghost" :disabled="!p.overridden" @click="ai.restorePrompt(p.id)">
-                  {{ $t('ai.restoreDefault') }}
-                </button>
-              </div>
-            </template>
-          </article>
-        </div>
-      </section>
-    </div>
-
-    <!-- DLNA 投屏：选设备（组播发现 + 按 IP 探测） -->
-    <div v-if="castOpen" class="cast-mask" @click.self="castOpen = false">
-      <div class="cast-box">
-        <div class="cast-head">
-          <b>{{ $t('detail.castTitle') }}</b>
-          <button class="btn tiny ghost" @click="castOpen = false">{{ $t('common.cancel') }}</button>
-        </div>
-        <p class="hint">{{ $t('detail.castHint') }}</p>
-        <div class="hstack" style="gap:6px;margin:6px 0">
-          <input v-model="castIp" class="inp" :placeholder="$t('detail.castIpPh')" @keyup.enter="addCastDevice" />
-          <button class="btn tiny" :disabled="castBusy || !castIp.trim()" @click="addCastDevice">{{ $t('detail.castAdd') }}</button>
-        </div>
-        <div class="cast-list">
-          <button v-for="d in castDevices" :key="d.usn" class="cast-item" :disabled="castBusy" @click="doCast(d)">
-            <b class="ellipsis">{{ d.name }}</b>
-            <span class="muted sm ellipsis">{{ d.manufacturer }} {{ d.model }}</span>
-          </button>
-          <p v-if="!castDevices.length && !castBusy" class="muted sm">{{ $t('detail.castNone') }}</p>
-          <p v-if="castBusy" class="muted sm">{{ $t('detail.castScanning') }}</p>
-        </div>
-      </div>
-    </div>
-
-    <!-- 女优悬停预览浮层（鼠标移到女优名字上显示基本信息） -->
-    <transition name="fade">
-      <div
-        v-if="hoverShow"
-        class="actress-pop"
-        :class="{ up: hoverDir === 'up' }"
-        :style="{ left: hoverPos.x + 'px', top: hoverPos.y + 'px' }"
-        @mouseenter="cancelHoverEnd"
-        @mouseleave="scheduleHoverEnd"
-      >
-        <div v-if="hoverLoading" class="actress-pop-load"><span class="spinner sm"></span></div>
-        <template v-else-if="hoverInfo">
-          <div class="ap-head">
-            <img v-if="hoverAvatar" class="ap-av" :src="hoverAvatar" alt="" @error="avatarFallback" />
-            <div class="ap-id">
-              <div class="ap-name">{{ hoverInfo.name || hoverActress }}</div>
-              <div v-if="hoverInfo.alias" class="ap-alias">{{ hoverInfo.alias }}</div>
-            </div>
-          </div>
-          <div v-if="hoverInfo.birthday || hoverInfo.height || hoverMeasure" class="ap-attr">
-            <span v-if="hoverInfo.birthday">{{ hoverInfo.birthday }}<template v-if="hoverAge != null">（{{ hoverAge }}岁）</template></span>
-            <span v-if="hoverInfo.height">{{ hoverInfo.height }}cm</span>
-            <span v-if="hoverMeasure">{{ hoverMeasure }}</span>
-            <span v-if="hoverInfo.cup">罩杯 {{ hoverInfo.cup }}</span>
-            <span v-if="hoverInfo.birthplace">{{ hoverInfo.birthplace }}</span>
-          </div>
-          <p v-if="hoverInfo.profile" class="ap-text">{{ hoverInfo.profile }}</p>
-        </template>
-        <div v-else class="ap-none">{{ $t('detail.noActressInfo') }}</div>
-      </div>
-    </transition>
   </Teleport>
 </template>
 
@@ -1782,6 +1419,52 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', onKey) })
 .plot-src {
   margin: 6px 0 0; font-size: var(--fs-sm); color: var(--c-text-3);
 }
+
+/* 详情页轻量 AI：一句话动作 + 就地确认，不进工作台 */
+.aiq { margin-top: var(--sp-3); display: flex; flex-direction: column; gap: 8px; }
+.aiq-need { margin: 0; font-size: var(--fs-sm); color: var(--c-text-3); line-height: 1.7; }
+.aiq-need-box { display: flex; flex-direction: column; gap: 6px; }
+/* 提取时长选择：跟着内容宽度，不要撑满一行 */
+.asr-limit { width: auto; min-width: 132px; }
+.aiq-bar {
+  height: 4px; border-radius: 999px; overflow: hidden;
+  background: var(--c-surface-2); border: 1px solid var(--c-line);
+}
+.aiq-bar > span { display: block; height: 100%; background: var(--c-primary); transition: width .3s; }
+.aiq-dlg {
+  margin: 0; padding: 8px; max-height: 200px; overflow: auto;
+  background: var(--c-surface); border: 1px solid var(--c-line); border-radius: var(--r-sm);
+  font-size: 11px; line-height: 1.6; color: var(--c-text-2);
+  white-space: pre-wrap; word-break: break-word;
+}
+.aiq-err { margin: 0; font-size: var(--fs-sm); color: var(--c-err); }
+.aiq-compare { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; align-items: start; }
+.aiq-compare .hstack { grid-column: 1 / -1; }
+.aiq-col {
+  min-width: 0; padding: 8px 10px; border-radius: var(--r-md);
+  border: 1px solid var(--c-line); background: var(--c-surface);
+}
+.aiq-col.new { border-color: var(--c-primary); }
+.aiq-col-head {
+  display: flex; align-items: center; gap: 6px; margin-bottom: 4px;
+  font-size: var(--fs-xs); color: var(--c-text-3);
+}
+.aiq-text {
+  margin: 0; font-size: var(--fs-sm); line-height: 1.75; color: var(--c-text-2);
+  white-space: pre-wrap; max-height: 220px; overflow: auto;
+}
+.aiq-ask { display: flex; flex-direction: column; gap: 6px; }
+.aiq-ask-row { display: flex; align-items: center; gap: 8px; }
+.aiq-ask-row .inp { flex: 1; min-width: 0; }
+.aiq-answer { display: flex; flex-direction: column; gap: 6px; }
+.aiq-refs { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.aiq-ref {
+  padding: 2px 7px; border-radius: 999px; cursor: pointer; font-size: 11px;
+  font-variant-numeric: tabular-nums; border: 1px solid var(--c-line);
+  background: var(--c-surface); color: var(--c-primary);
+}
+.aiq-ref:hover { border-color: var(--c-primary); }
+@media (max-width: 720px) { .aiq-compare { grid-template-columns: 1fr; } }
 /* AI 字幕翻译控件与产物列表 */
 .ai-sub { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
 .ai-sub .inp.tiny { padding: 3px 8px; font-size: var(--fs-sm); }
@@ -1808,145 +1491,12 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', onKey) })
   background: var(--c-surface-2); border: 1px solid var(--c-line); color: var(--c-text);
 }
 .cast-item:hover { border-color: var(--c-primary); }
+.cast-add { display: flex; align-items: center; gap: 8px; margin-top: 10px; }
+.cast-add .inp { flex: 1; min-width: 0; }
 .cast-on { color: var(--c-primary); font-weight: 600; }
 /* AI 已就绪时入口按钮高亮，未启用时保持中性外观 */
 .ai-entry-on { border-color: var(--c-primary); color: var(--c-primary); }
 
-/* ===== AI 工作台：卡片式分区 ===== */
-.aiw-mask {
-  position: fixed; inset: 0; z-index: 1300;
-  background: rgba(0, 0, 0, .55); backdrop-filter: blur(3px);
-  display: flex; align-items: center; justify-content: center; padding: 16px;
-}
-.aiw-panel {
-  width: min(560px, 96vw); max-height: 88vh;
-  display: flex; flex-direction: column; overflow: hidden;
-  background: var(--c-surface); border: 1px solid var(--c-line);
-  border-radius: var(--r-lg); box-shadow: 0 24px 60px rgba(0, 0, 0, .5);
-}
-.aiw-head {
-  display: flex; align-items: center; justify-content: space-between;
-  padding: 12px 14px; border-bottom: 1px solid var(--c-line);
-}
-.aiw-head-title { display: flex; align-items: center; gap: 8px; }
-.aiw-empty {
-  padding: 28px 18px; display: flex; flex-direction: column;
-  align-items: center; gap: 14px; text-align: center;
-}
-.aiw-body {
-  padding: 12px 14px 16px; overflow: auto;
-  display: flex; flex-direction: column; gap: 12px;
-}
-.aiw-card {
-  display: flex; flex-direction: column; gap: 8px;
-  padding: 10px 12px; border-radius: var(--r-md);
-  border: 1px solid var(--c-line); background: var(--c-surface-2);
-}
-.aiw-card-head { display: flex; align-items: center; gap: 8px; font-size: var(--fs-sm); }
-.aiw-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.aiw-row .inp { flex: 1; min-width: 150px; }
-.aiw-check { display: inline-flex; align-items: center; gap: 5px; font-size: var(--fs-sm); color: var(--c-text-2); }
-.aiw-text {
-  margin: 0; font-size: var(--fs-sm); line-height: 1.75; color: var(--c-text-2);
-  white-space: pre-wrap; max-height: 220px; overflow: auto;
-}
-.aiw-compare { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
-@media (max-width: 640px) { .aiw-compare { grid-template-columns: 1fr; } }
-.aiw-col {
-  min-width: 0; padding: 8px; border-radius: var(--r-sm);
-  border: 1px solid var(--c-line); background: var(--c-surface);
-}
-.aiw-col.new { border-color: var(--c-primary); }
-.aiw-col-head {
-  display: flex; align-items: center; gap: 6px;
-  margin-bottom: 4px; font-size: var(--fs-xs); color: var(--c-text-3);
-}
-.aiw-actions { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
-.aiw-head-actions { display: flex; align-items: center; gap: 6px; }
-.aiw-vars { margin: 0; font-size: var(--fs-xs); color: var(--c-text-3); }
-.aiw-ta {
-  width: 100%; resize: vertical; font-size: 12px; line-height: 1.6;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-}
-/* 语音对白区块：与剧情简介同卡，但用虚线分隔 */
-.aiw-dialog {
-  display: flex; flex-direction: column; gap: 6px;
-  border-top: 1px dashed var(--c-line); padding-top: 8px;
-}
-.aiw-bar {
-  height: 4px; border-radius: 999px; overflow: hidden;
-  background: var(--c-surface); border: 1px solid var(--c-line);
-}
-.aiw-bar span { display: block; height: 100%; background: var(--c-primary); transition: width .3s; }
-/* 调用详情：提示词 / 原始返回，等宽可滚动，方便逐字核对 */
-.aiw-trace { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-.aiw-trace-box {
-  display: flex; flex-direction: column; gap: 6px;
-  border-top: 1px dashed var(--c-line); padding-top: 8px;
-}
-.aiw-trace-item {
-  display: flex; flex-direction: column; gap: 4px;
-  padding: 8px; border-radius: var(--r-sm);
-  border: 1px solid var(--c-line); background: var(--c-surface);
-}
-.aiw-trace-meta {
-  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
-  font-size: var(--fs-xs); color: var(--c-text-2);
-}
-.aiw-pre {
-  margin: 0; padding: 6px 8px; border-radius: var(--r-sm);
-  max-height: 180px; overflow: auto;
-  background: var(--c-surface-2); color: var(--c-text-2);
-  font-size: 11px; line-height: 1.6; white-space: pre-wrap; word-break: break-word;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-}
-.aiw-pre.err { color: var(--c-err); }
-.aiw-err { margin: 0; font-size: var(--fs-sm); color: var(--c-err); }
-.aiw-chips { display: flex; gap: 6px; flex-wrap: wrap; }
-.aiw-chip { display: inline-flex; align-items: center; gap: 4px; }
-.aiw-chip em { font-style: normal; font-size: 10px; opacity: .6; }
-.aiw-chip.existing { opacity: .7; }
-.aiw-list { display: flex; flex-direction: column; gap: 4px; }
-.aiw-list-row { display: flex; align-items: center; gap: 8px; font-size: var(--fs-sm); }
-.aiw-list-row .ellipsis { flex: 1; min-width: 0; }
-.aiw-answer {
-  display: flex; flex-direction: column; gap: 6px;
-  border-top: 1px dashed var(--c-line); padding-top: 8px;
-}
-.aiw-refs { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
-.aiw-ref {
-  padding: 2px 7px; border-radius: 999px; cursor: pointer;
-  font-size: 11px; font-variant-numeric: tabular-nums;
-  border: 1px solid var(--c-line); background: var(--c-surface); color: var(--c-primary);
-}
-.aiw-ref:hover { border-color: var(--c-primary); }
-.aiw-history {
-  display: flex; flex-direction: column; gap: 4px;
-  border-top: 1px dashed var(--c-line); padding-top: 8px;
-}
-.aiw-hist-row {
-  display: flex; align-items: center; gap: 8px; width: 100%;
-  padding: 5px 6px; border-radius: var(--r-sm); cursor: pointer; text-align: left;
-  font-size: var(--fs-sm); color: var(--c-text-2);
-  background: transparent; border: 1px solid transparent;
-}
-.aiw-hist-row:hover { background: var(--c-surface); }
-.aiw-hist-row.on { border-color: var(--c-primary); }
-.aiw-sim { display: grid; grid-template-columns: repeat(auto-fill, minmax(104px, 1fr)); gap: 8px; }
-.aiw-sim-card { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
-.aiw-sim-open {
-  display: flex; flex-direction: column; gap: 4px; padding: 4px; cursor: pointer;
-  border: 1px solid var(--c-line); border-radius: var(--r-md);
-  background: var(--c-surface); color: var(--c-text-2);
-  font-size: 11px; text-align: left;
-}
-.aiw-sim-open:hover { border-color: var(--c-primary); }
-.aiw-sim-open img { width: 100%; aspect-ratio: 3/4; object-fit: cover; border-radius: var(--r-sm); }
-.aiw-reasons { display: flex; gap: 3px; flex-wrap: wrap; }
-.aiw-reason {
-  padding: 1px 5px; border-radius: 999px; font-size: 10px;
-  background: var(--c-surface-2); border: 1px solid var(--c-line); color: var(--c-text-3);
-}
 .ai-sub-row { display: flex; align-items: center; gap: 8px; padding: 4px 0; font-size: var(--fs-sm); }
 .note-box {
   margin-top: var(--sp-3); padding: var(--sp-3);

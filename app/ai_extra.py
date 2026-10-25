@@ -30,36 +30,101 @@ def _clock(sec: float) -> str:
     return "%d:%02d" % (sec // 60, sec % 60)
 
 
+# 泛问词：先从句子里剔掉再抽二元组。
+# 「简单讲讲剧情」这类问题本身没有可检索的关键词，若直接按二元组匹配，
+# 只会命中台词里恰好出现的「简单」，结果是给模型两句无关对白。
+_QA_STOP = (
+    "请帮我", "帮我", "请你", "麻烦", "简单", "简要", "大概", "大致", "总体",
+    "讲讲", "讲一讲", "讲下", "说说", "说一说", "说一下", "介绍一下", "介绍",
+    "剧情", "故事", "情节", "内容", "大意", "概要", "梗概", "梗",
+    "整个", "全部", "这部", "这个片", "影片", "电影", "作品",
+    "什么", "怎么样", "怎么", "如何", "一下", "告诉", "描述", "说",
+)
+
+DIGEST_CHARS = 9000        # 泛问时送给模型的整片抽样上限（约 5 千 token）
+DIGEST_LINES = 300         # 抽样条数上限
+DIGEST_REFS = 12           # 抽样模式下展示的依据条数上限
+
+
+def _query_bigrams(question: str) -> set:
+    """问题里的内容词二元组（剔除泛问词后）。"""
+    s = "".join(ch for ch in (question or "").lower() if not ch.isspace())
+    for w in _QA_STOP:
+        s = s.replace(w, "")
+    return _bigrams(s)
+
+
+def _digest(cues: List[Tuple[float, str]],
+            max_chars: int = DIGEST_CHARS, max_lines: int = DIGEST_LINES) -> List[Tuple[float, str]]:
+    """整片字幕等距抽样：覆盖开头到结尾，超出字数就整体调粗而不是截断后半段。"""
+    n = len(cues or [])
+    if not n:
+        return []
+    step = max(1, (n + max_lines - 1) // max_lines)   # 向上取整，保证条数不超上限
+    while True:
+        picked = [cues[i] for i in range(0, n, step)]
+        if sum(len(t) for _s, t in picked) <= max_chars or step >= n:
+            return picked
+        step = int(step * 1.5) + 1
+
+
+def _with_neighbors(cues: List[Tuple[float, str]], idx: List[int]) -> List[int]:
+    """给命中句补上前一句/后一句：单句脱离上下文经常读不出意思。"""
+    if not idx:
+        return []
+    lo, hi = idx[0], idx[-1]
+    # 命中点太分散时不扩邻句，否则会把半部片都拉进上下文
+    if hi - lo > max(24, len(idx) * 4):
+        return idx
+    return sorted({j for i in idx for j in (i - 1, i, i + 1) if 0 <= j < len(cues)})
+
+
 def answer_about_plot(question: str, cues: List[Tuple[float, str]],
                       movie: Dict[str, Any], top: int = 10,
                       cfg: Dict[str, Any] | None = None) -> Dict[str, Any]:
-    """基于字幕回答剧情问题，并给出字幕时间戳。"""
+    """基于字幕回答剧情问题，并给出字幕时间戳依据。"""
     c = AIConfig.from_config(cfg)
-    q = _bigrams(question)
-    scored: List[Tuple[float, float, str]] = []
-    for start, text in cues or []:
-        g = _bigrams(text)
-        if not g:
-            continue
-        hit = len(q & g)
-        if hit:
-            # 长句天然更容易命中二元组，按长度做归一，避免一整段台词占满候选
-            length_penalty = 1.0 / (1.0 + len(g) / 40.0)
-            scored.append((hit / (len(q) ** 0.5 + 1.0) * length_penalty, start, text))
+    cues = list(cues or [])
+    q = _query_bigrams(question)
+    scored: List[Tuple[float, int]] = []
+    if q:
+        for i, (_start, text) in enumerate(cues):
+            g = _bigrams(text)
+            if not g:
+                continue
+            hit = len(q & g)
+            if hit:
+                # 长句天然更容易命中二元组，按长度做归一，避免一整段台词占满候选
+                length_penalty = 1.0 / (1.0 + len(g) / 40.0)
+                scored.append((hit / (len(q) ** 0.5 + 1.0) * length_penalty, i))
     scored.sort(key=lambda x: (-x[0], x[1]))
-    picked = sorted(scored[:max(3, top)], key=lambda x: x[1])
-    if not picked:
-        return {"answer": "", "refs": [], "reason": "no-match"}
 
-    blocks = ["[%s] %s" % (_clock(start), text) for _s, start, text in picked]
+    mode = "match"
+    if len(q) < 2:
+        # 没有可检索的关键词（「简单讲讲剧情」）：给整片抽样，而不是碰巧命中的几句
+        picked = _digest(cues)
+        mode = "digest"
+    else:
+        idx = sorted(i for _s, i in scored[:max(3, top)])
+        picked = [cues[i] for i in _with_neighbors(cues, idx)]
+    if not picked:
+        return {"answer": "", "refs": [], "reason": "no-match", "mode": mode}
+
+    blocks = ["[%s] %s" % (_clock(start), text) for start, text in picked]
     sys = ai_prompts.system("plot.qa", cfg)
-    user = ("影片：%s\n\n问题：%s\n\n字幕片段：\n%s"
-            % (movie.get("title") or movie.get("code") or "", question, "\n".join(blocks)))
+    hint = ("（以下是整片字幕按时间均匀抽取的片段，可用于概括整体剧情）\n"
+            if mode == "digest" else "")
+    user = ("影片：%s\n\n问题：%s\n\n字幕片段：\n%s%s"
+            % (movie.get("title") or movie.get("code") or "", question, hint, "\n".join(blocks)))
     out = chat(c, [{"role": "system", "content": sys}, {"role": "user", "content": user}],
-               max_tokens=600, purpose="plot.qa").strip()
+               max_tokens=1200, purpose="plot.qa").strip()
     # 依据列表与真正送给模型的片段保持一致：截断会漏掉答案引用的时间戳
-    refs = [{"time": _clock(start), "text": txt[:120]} for _s, start, txt in picked]
-    return {"answer": out, "refs": refs, "reason": "ok"}
+    refs_src = picked
+    if mode == "digest" and len(picked) > DIGEST_REFS:
+        stride = max(1, len(picked) // DIGEST_REFS)
+        refs_src = picked[::stride][:DIGEST_REFS]
+    refs = [{"time": _clock(start), "text": txt[:120]} for start, txt in refs_src]
+    return {"answer": out, "refs": refs, "reason": "ok", "mode": mode}
 
 
 def _to_set(v: Any) -> set:

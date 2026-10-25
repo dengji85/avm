@@ -12,7 +12,7 @@
  * 启动即遮挡（privacy.lock_on_start）。
  * 解锁只有两种凭据：pin = 快速解锁码（设了就用它）/ token = 访问令牌（始终可兜底）。
  */
-import { ref, onMounted, onBeforeUnmount } from 'vue'
+import { computed, ref, onMounted, onBeforeUnmount } from 'vue'
 import { getConfig, onLocked, privacyLock, privacyState, privacyUnlock } from '../api.js'
 import { useI18n } from '../i18n/index.js'
 
@@ -32,7 +32,13 @@ const DEFAULT_CFG = {
 
 const cfg = ref({ ...DEFAULT_CFG })
 const locked = ref(false)          // 服务端锁定的本地镜像
+const lockedSince = ref(0)         // 锁定开始时间（服务端时间戳）
 const reason = ref('idle')         // idle / panic / start / server
+/* 锁定已持续多少分钟：用来区分「刚锁」和「早就锁了、只是刚刷新」 */
+const lockAgeMinutes = computed(() => {
+  if (!lockedSince.value) return 0
+  return Math.max(0, Math.floor((Date.now() / 1000 - lockedSince.value) / 60))
+})
 const unlockMode = ref('token')    // pin / token（按服务端状态计算，未设解锁码时回退 token）
 const secret = ref('')
 const showSecret = ref(false) // 解锁输入框的明文 / 密文切换
@@ -95,6 +101,7 @@ function applyState(st) {
   unlockMode.value = (m === 'pin' && st.has_pin) ? 'pin' : 'token'
   if (st.locked && !locked.value) {
     locked.value = true
+    lockedSince.value = Number(st.since) || 0
     reason.value = st.reason || 'idle'
     markLocked(true)
     pauseAll(true)
@@ -102,6 +109,7 @@ function applyState(st) {
     if (locked.value) {
       markLocked(false)
       locked.value = false
+      lockedSince.value = 0
       // 其它标签页 / 其它设备解锁时，本页同步解除遮挡：把锁定期间被暂停、静音的视频
       // 恢复回来，并刷新视图（锁定期间内容接口返回 423，视图数据是空的）。
       // 原先只置 locked=false，会出现「遮挡层没了，但播放器一直停着」的状态。
@@ -123,6 +131,7 @@ async function lockNow(why) {
   if (locked.value) return
   reason.value = why
   locked.value = true      // 先本地遮挡（即时反馈），再落服务端状态
+  lockedSince.value = Date.now() / 1000
   secret.value = ''
   showSecret.value = false // 每次遮挡都回到密文，避免明文残留在屏幕上
   err.value = ''
@@ -262,6 +271,7 @@ onBeforeUnmount(() => {
       <div class="pv-icon">🔒</div>
       <div class="pv-title">{{ reason === 'panic' ? $t('privacy.panicTitle') : $t('privacy.locked') }}</div>
       <p class="pv-desc">{{ reason === 'panic' ? $t('privacy.panicHint') : $t('privacy.lockedHint') }}</p>
+      <p v-if="lockAgeMinutes > 0" class="pv-hint">{{ $t('privacy.lockedFor', { n: lockAgeMinutes }) }}</p>
 
       <div class="pv-unlock">
         <div class="pv-input">

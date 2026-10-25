@@ -286,6 +286,13 @@ export const aiSuggestTags = (id) => post(`/ai/suggest-tags/${id}`, {})
 export const aiTranslate = (id, target = 'zh-Hans', bilingual = false) =>
   post(`/ai/translate/${id}?target=${encodeURIComponent(target)}&bilingual=${bilingual ? '1' : '0'}`, {})
 export const aiDeleteSubtitle = (id, subId) => del(`/movies/${id}/subtitles/${subId}`)
+
+/* ---- 模型池 ---- */
+export const aiModels = () => get('/ai/models')
+export const aiModelSave = (body) => post('/ai/models', body)
+export const aiModelDelete = (name) => del(`/ai/models/${encodeURIComponent(name)}`)
+export const aiModelSetDefault = (name) => post(`/ai/models/${encodeURIComponent(name)}/default`, {})
+export const aiModelTest = (name) => post(`/ai/models/${encodeURIComponent(name)}/test`, {})
 /* 播放器字幕轨（内嵌轨 + 已登记字幕，均转 VTT）与片头片尾跳过点 */
 export const subtitleTracks = (id) => get(`/movies/${id}/subtitle-tracks`)
 /* 扫描视频同目录的外挂字幕并登记（幂等） */
@@ -297,14 +304,24 @@ export const aiAskHistory = (id, limit = 10) => get(`/ai/ask/${id}`, { limit })
 export const aiSimilar = (id, limit = 5) => get(`/ai/similar/${id}`, { limit })
 /* 语音对白提取（只喂给 AI 剧情，不产出字幕） */
 export const aiAsrStatus = () => get('/ai/asr/status')
+/* 可选扩展组件（ffmpeg / 语音识别依赖 / 模型） */
+export const extStatus = () => get('/ext/status')
+export const extTask = () => get('/ext/task')
+export const extInstall = (cid, source = 'auto') => post(`/ext/${cid}/install`, { source })
+export const extCancel = () => post('/ext/task/cancel', {})
+export const extImport = (cid, dir) => post(`/ext/${cid}/import`, { dir })
+export const extUninstall = (cid) => post(`/ext/${cid}/uninstall`, {})
 export const movieDialog = (id, preview = 0) => get(`/movies/${id}/dialog`, { preview })
 export const startMovieDialog = (id, body = {}) => post(`/movies/${id}/dialog`, body)
 export const deleteMovieDialog = (id) => del(`/movies/${id}/dialog`)
+/* 把提取的对白导出成草稿 SRT，并登记为字幕 */
+export const exportDialogSrt = (id) => post(`/movies/${id}/dialog/export-srt`, {})
 /* AI 提示词审查 / 修改，以及每次调用的提示词与原始返回 */
 export const aiPrompts = () => get('/ai/prompts')
 export const aiSavePrompt = (id, system) => put(`/ai/prompts/${id}`, { system })
 export const aiResetPrompt = (id) => del(`/ai/prompts/${id}`)
 export const aiTraces = (limit = 20, purpose = '') => get('/ai/traces', { limit, purpose })
+export const aiTracesClear = () => del('/ai/traces')
 /* DLNA 投屏 */
 export const dlnaDevices = () => get('/dlna/devices')
 export const dlnaAddDevice = (ip, port = 1900) => post('/dlna/devices', { ip, port })
@@ -319,6 +336,7 @@ export const aiJobsCancel = () => post('/ai/jobs/cancel', {})
 export const aiGlossary = () => get('/ai/glossary')
 export const aiGlossarySave = (items) => put('/ai/glossary', { items })
 export const aiSearchIntent = (query) => post('/ai/search-intent', { query })
+export const aiLibraryQa = (question) => post('/ai/library-qa', { question })
 
 /* ---------------- 配置 ---------------- */
 export const getConfig = () => get('/config')

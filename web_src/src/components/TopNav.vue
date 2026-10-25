@@ -26,6 +26,8 @@ async function refreshAi() {
   try { const r = await aiStatus(); aiEnabled.value = !!r.enabled } catch { aiEnabled.value = false }
 }
 
+/* AI 助手入口已收敛到右下角悬浮球（可在 设置 → 外观 关闭），顶栏不再重复放置 */
+
 function resetFilters() {
   state.actress = []
   state.genre = []
@@ -492,6 +494,9 @@ async function setScrapeFilter(taskId, f) {
 .si.busy { position: absolute; right: 10px; top: 50%; transform: translateY(-50%); color: var(--c-accent); }
 
 .task-wrap { position: relative; }
+/* AI 助手入口：未启用时保持中性，启用后描边高亮 */
+.ai-launch { padding: 0 var(--sp-2); min-width: 32px; font-size: 15px; }
+.ai-launch.on { color: var(--c-primary); border-color: var(--c-primary); }
 .task-btn { gap: 6px; padding: 0 var(--sp-2); min-width: 32px; }
 .task-btn.busy { color: var(--c-primary-h); }
 .task-btn .ico { font-size: 15px; }
