@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from . import subprobe, subtitles
+from .concepts import expand_term
 from .db import query_all, query_one, scalar
 
 _TAXONOMY = {"actresses", "genres", "studios", "series", "tags"}
@@ -402,11 +403,18 @@ def _build_where(params: Dict[str, Any]) -> Tuple[str, List[Any]]:
     args: List[Any] = []
     op = " OR " if str(params.get("op") or "AND").upper() == "OR" else " AND "
 
-    q = norm_name(params.get("q"))
-    if q:
+    # q 支持字符串或数组：数组时按「任一命中」展开。
+    # 数组形式给「问库」用——模型拆出来的多个关键词不该被拼成一个长串再 LIKE。
+    q_val = params.get("q")
+    q_items = q_val if isinstance(q_val, (list, tuple)) else [q_val]
+    q_subs: List[str] = []
+    for qv in q_items:
+        q = norm_name(qv)
+        if not q:
+            continue
         like = f"%{q}%"
         code_like = f"%{_smart_code(q)}%"
-        clauses.append(
+        q_subs.append(
             "(m.code_norm LIKE ?"
             " OR m.title LIKE ? OR m.original_title LIKE ? OR m.plot LIKE ?"
             " OR m.director LIKE ? OR m.folder LIKE ?"
@@ -416,9 +424,19 @@ def _build_where(params: Dict[str, Any]) -> Tuple[str, List[Any]]:
         )
         args.append(code_like)
         args.extend([like] * 7)
+    if q_subs:
+        clauses.append("(" + " OR ".join(q_subs) + ")")
 
-    for kind in ("actress", "genre", "tag"):
-        sub = _multi_clause(kind, params.get(kind), op, args)
+    # 单数 / 复数都认：问库的意图规格用的是 genres / tags / actress，
+    # 早期的筛选接口用的是 genre / tag。只认单数会让模型给的复数条件被静默丢弃，
+    # 表现就是「不管问什么都返回全库」。
+    for kind, keys in (
+        ("actress", ("actress", "actresses")),
+        ("genre", ("genre", "genres")),
+        ("tag", ("tag", "tags")),
+    ):
+        value = next((params.get(k) for k in keys if params.get(k)), None)
+        sub = _multi_clause(kind, value, op, args)
         if sub:
             clauses.append(sub)
 
@@ -436,11 +454,67 @@ def _build_where(params: Dict[str, Any]) -> Tuple[str, List[Any]]:
     if year:
         clauses.append("m.year = ?")
         args.append(int(year))
+    # 年份区间：「最近三年」「2020 年之后」这类
+    year_min = _int_or_zero(params.get("year_min"))
+    if year_min:
+        clauses.append("m.year >= ?")
+        args.append(year_min)
+    year_max = _int_or_zero(params.get("year_max"))
+    if year_max:
+        clauses.append("m.year <= ?")
+        args.append(year_max)
 
     prefix = norm_name(params.get("prefix"))
     if prefix:
         clauses.append("m.code LIKE ?")
         args.append(f"{prefix}-%")
+
+    # ---- 女优年龄：「50岁以上的影片」这类问法 ----
+    # 用「发行年份 - 出生年份」，精确到年（对筛选足够，也不依赖生日是否带日月）。
+    # 只有填了生日的女优参与判断：库里的生日靠「补全女优资料」慢慢攒，
+    # 覆盖率低时结果会偏少，界面上要把这句说明白，否则会被当成「搜不到」。
+    age_min = _int_or_zero(params.get("actress_age_min"))
+    age_max = _int_or_zero(params.get("actress_age_max"))
+    if age_min or age_max:
+        rel_year = ("CAST(COALESCE(NULLIF(substr(m.release_date,1,4),''), "
+                    "strftime('%Y','now')) AS INTEGER)")
+        age_expr = f"({rel_year} - CAST(substr(a.birthday,1,4) AS INTEGER))"
+        cond = ["a.birthday GLOB '[0-9][0-9][0-9][0-9]*'"]
+        if age_min:
+            cond.append(f"{age_expr} >= ?")
+            args.append(age_min)
+        if age_max:
+            cond.append(f"{age_expr} <= ?")
+            args.append(age_max)
+        clauses.append(
+            "EXISTS(SELECT 1 FROM movie_actress ma JOIN actresses a ON a.id = ma.actress_id"
+            f" WHERE ma.movie_id = m.id AND {' AND '.join(cond)})"
+        )
+
+    # ---- 题材词模糊匹配：「丝袜」「护士」这类，库里可能写成日文或繁体 ----
+    # 先在 concepts 里展开同义词（丝袜 → パンスト / 絲襪 / stockings），
+    # 再对「类型 + 标签」做子串匹配；表里没有的词原样参与匹配。
+    like_terms: List[str] = []
+    raw_like = params.get("like")
+    raw_items = (raw_like if isinstance(raw_like, (list, tuple, set))
+                 else re.split(r"[,，、;；/]", str(raw_like or "")))
+    for raw in raw_items:
+        # 再按空格切一次：模型偶尔会把一句话塞进一个数组元素
+        for piece in re.split(r"\s+", str(raw or "")):
+            for term in expand_term(piece):
+                if term and term not in like_terms:
+                    like_terms.append(term)
+    if like_terms:
+        subs: List[str] = []
+        for term in like_terms:
+            pattern = f"%{term}%"
+            subs.append("EXISTS(SELECT 1 FROM movie_genre mx JOIN genres my ON my.id = mx.genre_id"
+                        " WHERE mx.movie_id = m.id AND my.name LIKE ?)")
+            args.append(pattern)
+            subs.append("EXISTS(SELECT 1 FROM movie_tag tx JOIN tags ty ON ty.id = tx.tag_id"
+                        " WHERE tx.movie_id = m.id AND ty.name LIKE ?)")
+            args.append(pattern)
+        clauses.append("(" + " OR ".join(subs) + ")")
 
     for flag in _split_multi(params.get("flags")):
         clause = FLAG_CLAUSES.get(flag)
@@ -485,6 +559,22 @@ def _multi_clause(kind: str, value: Any, op: str, args: List[Any]) -> Optional[s
         )
         args.append(n)
     return "(" + op.join(subs) + ")"
+
+
+def _int_or_zero(value: Any) -> int:
+    """把查询参数里的数字宽松地转成 int：空串、None、脏数据一律 0。"""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
+def has_birthdays(conn: sqlite3.Connection) -> bool:
+    """库里是否有任何女优生日：没有的话年龄筛选必然 0 条，应当提前放弃这个条件。"""
+    try:
+        return int(scalar(conn, "SELECT COUNT(*) FROM actresses WHERE COALESCE(birthday,'')<>''")) > 0
+    except Exception:  # noqa: BLE001 查询失败时按「没有」处理，宁可不筛年龄
+        return False
 
 
 def _split_multi(value: Any) -> List[str]:

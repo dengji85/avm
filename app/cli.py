@@ -221,9 +221,95 @@ def cmd_serve(args) -> int:
         ) or "127.0.0.1,::1"
     except Exception:
         _trusted = "127.0.0.1,::1"
-    uvicorn.run(app, host=args.host, port=args.port, reload=args.reload, log_level="info",
-                proxy_headers=True, forwarded_allow_ips=_trusted)
+    # 注意：uvicorn 的自动重载只在传入「导入字符串」时生效，传 app 对象会静默退化为
+    # 不重载（只在 stderr 留一条 WARNING）。所以 --reload 走 "app.main:app"，
+    # reloader 会在子进程里重新导入模块，模块级初始化照样执行。
+    if args.reload:
+        uvicorn.run("app.main:app", host=args.host, port=args.port, reload=True,
+                    log_level="info", proxy_headers=True, forwarded_allow_ips=_trusted)
+    else:
+        uvicorn.run(app, host=args.host, port=args.port, log_level="info",
+                    proxy_headers=True, forwarded_allow_ips=_trusted)
     return 0
+
+
+def cmd_ai_check(args) -> int:
+    """诊断助手链路：模型配置 / 库字典 / 这句话实际被解析成什么、命中几条。
+
+    「为什么查不出」通常只有三种原因：没配模型、库里写法对不上、模型没吐结构化参数。
+    这条命令把三者一次打印出来，不用猜。
+    """
+    init_db()
+    from . import agent as agent_mod, vocab as vocab_mod
+
+    cfg = load_config(refresh=True)
+    ai = cfg.get("ai") or {}
+    print("AI 启用 :", "是" if ai.get("enabled") else "否")
+    print("端点    :", ai.get("base_url") or "(未填)")
+    print("模型    :", ai.get("model") or "(未填)")
+
+    conn = connect()
+    try:
+        block = vocab_mod.block(conn)
+    finally:
+        conn.close()
+    print("\n库字典（前 600 字）:")
+    print(block[:600] + ("…" if len(block) > 600 else ""))
+
+    if not ai.get("enabled"):
+        print("\n→ 模型未启用：助手只能用本地规则，跨语言对应（丝袜 → パンスト）不会生效。")
+        return 1
+
+    print("\n问句:", args.question)
+    print("调模型中…")
+    try:
+        res = agent_mod.run_agent(args.question, cfg, max_steps=max(1, int(args.steps or 2)))
+    except Exception as e:                                   # noqa: BLE001 诊断命令要打印而不是抛栈
+        print("调用失败:", e)
+        return 2
+
+    if res.get("fallback"):
+        print("注意: 端点不支持 tools，已回退到单步规划")
+    for i, s in enumerate(res.get("steps") or [], 1):
+        print("  第%d步 %-14s %s  (%s ms)"
+              % (i, s.get("name"), s.get("summary"), s.get("ms")))
+    items = res.get("items") or []
+    print("命中:", len(items), "条")
+    for m in items[:5]:
+        print("   -", m.get("code") or "", m.get("title") or "")
+    if res.get("rows"):
+        for r in res["rows"]:
+            print("   ·", r.get("key"), "=", r.get("value"))
+    if res.get("note"):
+        print("理解成:", res["note"])
+    if res.get("answer"):
+        print("模型结论:", res["answer"])
+    if res.get("stopped") == "max_steps":
+        print("（达到步数上限，未给出结论）")
+    return 0 if (items or res.get("rows")) else 1
+
+
+def cmd_web_check(args) -> int:
+    """联网搜索自检：验证搜索后端配置，并真实搜索一次给示例。"""
+    from . import websearch
+
+    cfg = load_config(refresh=True)
+    kind, value = websearch.backend(cfg)
+    if not kind:
+        print(value)
+        return 1
+    print("后端 :", ("SearXNG (%s)" % value) if kind == "searxng" else "Tavily")
+    print("搜索 :", args.query)
+    res = websearch.check(cfg, args.query)
+    print("结果 :", "OK" if res.get("ok") else "失败")
+    print("     ", res.get("message"))
+    if res.get("ok"):
+        try:
+            for r in websearch.search(cfg, args.query, limit=3):
+                print("   ·", (r.get("title") or "")[:60], "|", (r.get("url") or "")[:70])
+        except Exception as e:                       # noqa: BLE001 自检命令要打印而不是抛栈
+            print("   列举失败:", e)
+    return 0 if res.get("ok") else 2
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -241,6 +327,12 @@ def build_parser() -> argparse.ArgumentParser:
     po.add_argument("--root", required=True, help="整理目标根目录")
     po.add_argument("--template", default="{studio}/{code} {title}", help="目录模板，支持 {studio}/{code}/{title}/{prefix}")
     po.add_argument("--apply", action="store_true", help="真正移动文件（默认仅预览）")
+    sub.add_parser("mcp", help="以 MCP 服务器（stdio）运行，供外部 AI 客户端连接（需 pip install mcp）")
+    pa = sub.add_parser("ai-check", help="诊断 AI 助手：模型配置 / 库字典 / 这句话会被解析成什么")
+    pa.add_argument("question", nargs="?", default="找一下穿丝袜的、年纪大一点的", help="要诊断的问句")
+    pa.add_argument("--steps", type=int, default=4, help="最多让 agent 走几轮（每轮可能调多个工具）")
+    pw = sub.add_parser("web-check", help="联网搜索自检：验证搜索后端并真实搜索一次")
+    pw.add_argument("query", nargs="?", default="test", help="测试搜索词")
     pv = sub.add_parser("serve", help="启动 Web 服务（控制台模式）")
     # 默认值支持环境变量：容器 / NAS 下用 AVM_HOST=0.0.0.0 直接对外监听
     pv.add_argument("--host", default=os.environ.get("AVM_HOST", "127.0.0.1"))
@@ -277,6 +369,13 @@ def main(argv=None) -> int:
         return cmd_export(args)
     if args.cmd == "organize":
         return cmd_organize(args)
+    if args.cmd == "mcp":
+        from .mcp_server import run as run_mcp
+        return run_mcp()
+    if args.cmd == "ai-check":
+        return cmd_ai_check(args)
+    if args.cmd == "web-check":
+        return cmd_web_check(args)
     if args.cmd == "serve":
         return cmd_serve(args)
     # 默认行为：启动 Web 服务

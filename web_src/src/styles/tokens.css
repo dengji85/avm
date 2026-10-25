@@ -92,13 +92,19 @@
   --w-drawer: min(1080px, 94vw);
   --z-sticky: 20;
   --z-drawer: 60;
-  --z-modal: 80;
-  /* 全屏播放层：片单连播打开时会盖住整个界面，需要高于普通抽屉与弹窗 */
+  /* 全屏播放层：片单连播打开时会盖住整个界面，需要高于普通抽屉 */
   --z-player: 200;
   /* 播放层之上的抽屉：连播途中打开影片详情时，抽屉要盖在播放层上面 */
   --z-drawer-over: 260;
-  /* AI 助手浮窗：独立于任何页面，需要盖住抽屉与播放层，但仍低于 toast */
+  /* AI 助手浮窗：独立于任何页面，需要盖住抽屉与播放层，但仍低于确认框与 toast */
   --z-ai: 270;
+  /* 模态与确认框：必须高于 AI 助手浮窗（否则从助手面板里弹出的确认框会被面板盖住、
+     点不到按钮），但仍低于 toast（操作反馈不能被弹窗遮住） */
+  --z-modal: 280;
+  /* 确认框单独一层：可能从任意弹窗里弹出（AI 助手 270、投屏 / 标签管理 / 演员详情等
+     历史组件仍用 1000~1200 的硬编码层级），所以直接压到 1300 —— 高于所有应用弹窗，
+     但仍低于隐私锁定页（4000）与下拉浮层（9999，点击即关，不会与确认框同时存在） */
+  --z-confirm: 1300;
   /* toast 必须最高：否则在播放层/抽屉/设置弹窗之上弹出的操作反馈会被完全遮住 */
   --z-toast: 300;
 
@@ -109,6 +115,37 @@
 
   /* ---------- 卡片网格 ---------- */
   --card-min: 176px;
+
+  /* ---------- 旧变量名兼容 ----------
+     若干历史组件（DetailDrawer / MovieCard / TopNav / StatsView / SettingsView …）
+     仍在引用这批已经改名的变量。变量不存在时 var() 会让**整条声明失效**：
+     背景变透明、边框退回 currentColor、文字颜色丢失。浅色主题下最容易看出来
+     （例如详情页「更多站点」弹层直接没有底板）。
+     这里统一映射到现用令牌，值里引用的是变量，浅色主题覆盖后会自动跟着变。
+     新代码请直接用上面那套名字，不要再引用左边这些。 */
+  --c-border:        var(--c-line);
+  --c-bg-pop:        var(--c-surface-2);
+  --c-bg-hover:      var(--c-surface-3);
+  --c-bg-soft:       var(--c-surface-2);
+  --c-bg-input:      var(--c-surface-2);
+  --c-bg-2:          var(--c-surface-2);
+  --c-bg-3:          var(--c-surface-3);
+  --c-text-1:        var(--c-text);
+  --c-text-dim:      var(--c-text-3);
+  --c-text-4:        var(--c-text-3);
+  --c-danger:        var(--c-err);
+  --c-warning:       var(--c-warn);
+  --c-success:       var(--c-ok);
+  --c-warn-line:     var(--c-warn);
+  --c-ok-line:       var(--c-ok);
+  --c-err-line:      var(--c-err);
+  --c-accent-2:      var(--c-accent);
+  --c-primary-2:     var(--c-primary-h);
+  --c-primary-text:  var(--c-primary);
+  --r-pill:          var(--r-full);
+  --sh-card:         var(--sh-2);
+  --shadow-pop:      var(--sh-3);
+  --font-mono:       ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
 
 /* 浅色主题（通过 <html data-theme="light"> 切换） */

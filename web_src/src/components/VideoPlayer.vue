@@ -64,6 +64,7 @@ const subBgOpts = computed(() => [
 ])
 function setSubStyle(key, val) {
   subStyle.value[key] = val
+  applySubStyle()   // 立即生效，不必关掉播放器再打开
   savePrefs()
 }
 /** 在控制条里插一个空位（全屏按钮左边），CC 用 Teleport 渲染进去 */
@@ -118,6 +119,8 @@ function applySubStyle() {
   if (!el) return
   el.style.setProperty('--vp-sub-size', sizes[subStyle.value.size] || sizes.m)
   el.style.setProperty('--vp-sub-bg', bgs[subStyle.value.bg] || bgs['1'])
+  // 无背景时给白字补描边（否则压在亮画面上基本看不清）
+  el.classList.toggle('vp-sub-plain', String(subStyle.value.bg) === '0')
 }
 /** 恢复上次的播放偏好（音量 / 倍速 / 字幕），没有则给保守默认 */
 function restorePrefs() {
@@ -785,6 +788,8 @@ function initPlayer() {
     // 桌面：鼠标滚轮调音量 + 按下拖动调音量
     overlayEl.addEventListener('wheel', onWheel, { passive: false })
     overlayEl.addEventListener('mousedown', onMouseDown)
+    // 先应用字号/背景（轨道接口失败时也要生效），再拉轨道列表
+    applySubStyle()
     loadSubtitleTracks()
     // 移动端：画面横滑快进/快退 + 垂直滑动调音量（passive:false 以便阻止默认/页面滚动）
     overlayEl.addEventListener('touchstart', onTouchStart, { passive: true })
@@ -1061,6 +1066,9 @@ watch(() => props.movieId, () => {
   width: 100%;
   height: 70vh;
   background: #000;
+  /* 字幕样式的默认值（applySubStyle 会以行内变量覆盖这两项） */
+  --vp-sub-size: 22px;
+  --vp-sub-bg: rgba(0, 0, 0, .55);
 }
 .vjs-wrap :deep(.video-js) {
   width: 100% !important;
@@ -1233,11 +1241,11 @@ watch(() => props.movieId, () => {
   border: 0; border-radius: 999px; padding: 3px 10px; cursor: pointer;
   background: var(--c-primary); color: #fff; font-size: 12px;
 }
-/* 字幕显示样式（大小 / 背景由浮层控制） */
-.vjs-wrap :deep(.vjs-text-track-display) {
-  --vp-sub-size: 22px;
-  --vp-sub-bg: rgba(0,0,0,.55);
-}
+/* 字幕显示样式（字号 / 背景由浮层控制）
+   注意：默认值必须声明在 .vjs-wrap 自己身上。之前写在 .vjs-text-track-display
+   （子元素）上，子元素的自有声明会覆盖从容器继承下来的行内变量，
+   导致「无背景」永远被强制成半透明黑；字号选项同样失效。
+   容器上的行内变量（applySubStyle）优先级高于这里的样式表默认值。 */
 .vjs-wrap :deep(.vjs-text-track-cue) {
   font-size: var(--vp-sub-size, 22px) !important;
   background: var(--vp-sub-bg, rgba(0,0,0,.55)) !important;
@@ -1245,6 +1253,10 @@ watch(() => props.movieId, () => {
 }
 .vjs-wrap :deep(.vjs-text-track-cue > div) {
   background: var(--vp-sub-bg, rgba(0,0,0,.55)) !important;
+}
+/* 无背景模式：白字在亮画面上会糊，补一层细描边（描边不算底色块） */
+.vjs-wrap.vp-sub-plain :deep(.vjs-text-track-cue) {
+  text-shadow: 0 0 3px rgba(0, 0, 0, .9), 0 1px 2px rgba(0, 0, 0, .9);
 }
 /* 手机/平板：视频铺满可用高度；控制条（含进度条）常驻可见，便于拖动定位 */
 @media (max-width: 768px) {

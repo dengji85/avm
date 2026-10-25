@@ -297,6 +297,44 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "avatar_download": False,
         "fanart_download": True,
     },
+    # 把刮削结果落盘到影片目录，供 Emby / Jellyfin / Kodi 等外部媒体服务器识别。
+    # 定位：**导出能力（兼容层）**，默认关闭；片匣自己的库与播放不依赖它。
+    "nfo_export": {
+        "enabled": False,
+        "write_nfo": True,
+        "write_cover": True,
+        "write_fanart": True,
+        # numbered = <视频名>-poster.jpg（默认；同目录多部影片不会互相覆盖）
+        # plain    = poster.jpg（文件夹型媒体库更贴近 Kodi 推荐）
+        "image_naming": "numbered",
+        # match-video = <视频名>.nfo（默认）；movie = movie.nfo
+        "nfo_naming": "match-video",
+        # skip = 已有 NFO 不动（默认，最安全）
+        # merge = 只补空字段，保留 <streamdetails> 等本程序不产出的节点
+        # overwrite = 整份重写（备份为 .nfo.bak）
+        "on_conflict": "skip",
+        "backup": True,
+        # 5 星评分写到哪个标签：userrating（默认）/ rating / both
+        "rating_field": "userrating",
+        # 路径映射（宿主机 ↔ 容器/网盘）：[{"from": "D:/AV", "to": "/media"}]
+        "path_map": [],
+        # 落盘后是否顺手让 Emby 刷新媒体库（需 emby.enabled）
+        "notify_emby": True,
+    },
+    # Emby 联动：目前只用于「刮削后通知刷新媒体库」，不参与播放与刮削本身。
+    "emby": {
+        "enabled": False,
+        "base_url": "",
+        # API Key 是凭据：GET /config 已剥除，前端只显示是否已设置
+        "api_key": "",
+        # 进度同步用（P1），留空不影响刷新
+        "user_id": "",
+        # library = POST /Library/Refresh（一次刷全库）
+        # item    = 逐条刷新（需片匣 ↔ Emby 条目映射，暂未实现，等同 library）
+        "refresh_mode": "library",
+        # 批量刮削会生成上千次落盘，合并成一次刷新，避免把 Emby 打爆
+        "refresh_debounce_sec": 30,
+    },
     "plugins": {
         # 女优资料插件开关：{插件id: true/false}。
         # 留空 = 全部启用（详见 plugins/base.enabled_plugins），这样新增插件也开箱可用。
@@ -327,6 +365,10 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "models": [],
         # 默认使用哪个模型（models 里的 name）
         "default_model": "",
+        # 批量任务：并发线程数（1-8）与单批 prompt 字符预算（0 = 不限）。
+        # 两者都能在 AI 中心按批次临时覆盖，这里是全局默认值。
+        "job_concurrency": 2,
+        "budget_chars_per_run": 0,
         # 用户自定义的 system 提示词：{prompt_id: text}，缺省用内置默认值
         "prompts": {},
         # 问库润色：允许把「问库」的聚合统计摘要（类型 / 数量等，不含文件路径、
@@ -689,3 +731,26 @@ def video_exts(cfg: Dict[str, Any] | None = None) -> list:
     cfg = cfg or load_config()
     exts = cfg.get("library", {}).get("video_extensions") or cfg.get("library", {}).get("video_exts") or []
     return list(exts)
+
+
+def nfo_export_cfg(cfg: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    """NFO/封面落盘配置（与 DEFAULT_CONFIG["nfo_export"] 合并，容错缺字段）。
+
+    老版本 config.json 没有这一节，直接读默认值即可，无需迁移。
+    """
+    cfg = cfg or load_config()
+    merged = copy.deepcopy(DEFAULT_CONFIG.get("nfo_export") or {})
+    got = cfg.get("nfo_export")
+    if isinstance(got, dict):
+        merged.update({k: v for k, v in got.items() if v is not None})
+    return merged
+
+
+def emby_cfg(cfg: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    """Emby 联动配置（与默认值合并）。"""
+    cfg = cfg or load_config()
+    merged = copy.deepcopy(DEFAULT_CONFIG.get("emby") or {})
+    got = cfg.get("emby")
+    if isinstance(got, dict):
+        merged.update({k: v for k, v in got.items() if v is not None})
+    return merged

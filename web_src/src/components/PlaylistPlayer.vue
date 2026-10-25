@@ -1,5 +1,5 @@
 <script setup>
-import { ref, computed, watch, nextTick } from 'vue'
+import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
 import VideoPlayer from './VideoPlayer.vue'
 import { coverThumbUrl as thumbUrl, setCollectionPlayhead } from '../api.js'
 import { state, closePlayQueue } from '../state.js'
@@ -154,6 +154,21 @@ function openDetail(id) {
   state.currentId = id
 }
 
+/** 详情快捷键：播放中按 I 直接看当前这部（连播层没有别处能点进详情）。 */
+function onKeydown(e) {
+  if (e.key !== 'i' && e.key !== 'I') return
+  if (e.ctrlKey || e.metaKey || e.altKey) return
+  const el = e.target
+  const tag = (el && el.tagName) || ''
+  // 正在队列搜索框里输入时不要抢键
+  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || (el && el.isContentEditable)) return
+  if (!currentId.value) return
+  e.preventDefault()
+  openDetail(currentId.value)
+}
+onMounted(() => window.addEventListener('keydown', onKeydown))
+onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
+
 function close() {
   syncGlobalIdx()
   closePlayQueue()
@@ -182,6 +197,14 @@ watch(() => state.playQueue.open, (open) => {
           <div class="pl-nav">
             <button class="btn tiny" :disabled="!hasPrev" @click="prev" :data-tip="$t('playlist.prev')">‹</button>
             <button class="btn tiny" :disabled="!hasNext" @click="nextManual" :data-tip="$t('playlist.next')">›</button>
+            <!-- 播放中直接看当前这部的详情（快捷键 I），不用去右侧列表里翻 -->
+            <button
+              class="btn tiny ghost"
+              :disabled="!currentId"
+              :data-tip="$t('playlist.detail') + ' (I)'"
+              :aria-label="$t('playlist.detail')"
+              @click="openDetail(currentId)"
+            >ⓘ</button>
           </div>
           <div class="spacer"></div>
           <button class="btn tiny ghost" :class="{ on: order === 'shuffle' }" @click="toggleOrder">

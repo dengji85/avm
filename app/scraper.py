@@ -20,8 +20,8 @@ try:
 except Exception:  # requests 不可用（极少见）时退化为宽松判断
     _HAS_REQ = False
 
-from . import images, store
-from .config import load_config, avatar_dir
+from . import images, nfo_writer, store
+from .config import load_config, avatar_dir, nfo_export_cfg
 from .db import connect, query_all
 from .jobs import SCRAPE
 from .providers import build_providers
@@ -150,6 +150,16 @@ def apply_metadata(conn, movie_id: int, meta: Dict[str, Any], cfg: Dict[str, Any
             (str(meta.get("source", ""))[:120], movie_id),
         )
     changed = sorted(payload.keys()) + (["cover"] if cover_changed else []) + (["fanart"] if fanart_changed else [])
+
+    # 刮削结果落盘到影片目录（给 Emby / Jellyfin / Kodi 用）。默认关闭，开启后
+    # 单部刮削、批量刮削、扫描后导入本地 NFO 三条路径都会自动写回。
+    # 写盘失败只记录、不外抛：落盘是附加能力，不能反过来拖垮刮削。
+    if changed and nfo_export_cfg(cfg).get("enabled"):
+        try:
+            nfo_writer.export_movie(conn, movie_id, cfg=cfg)
+        except Exception:
+            pass
+
     return {"changed": changed, "source": meta.get("source", "")}
 
 

@@ -166,7 +166,15 @@ export const startSession = (id, body = {}) => post(`/movies/${id}/session/start
 export const updateSession = (id, sid, body = {}) => post(`/movies/${id}/session/${sid}/update`, body)
 export const endSession = (id, sid, body = {}) => post(`/movies/${id}/session/${sid}/end`, body)
 export const scrapeOne = (id, body = {}) => post(`/movies/${id}/scrape`, body)
-export const exportNfo = (id) => post(`/movies/${id}/nfo`, {})
+export const exportNfo = (id, body = {}) => post(`/movies/${id}/nfo`, body)
+/* 批量导出 NFO/封面到影片目录（给 Emby / Jellyfin 用），后台任务 + 轮询 */
+export const exportNfoBatch = (body = {}) => post('/nfo/export', body)
+export const exportNfoStatus = () => get('/nfo/export/status')
+export const exportNfoCancel = () => post('/nfo/export/cancel', {})
+/* Emby 联动（只做「刮削后刷新媒体库」，不参与播放） */
+export const embyStatus = () => get('/emby/status')
+export const embyTest = (body = {}) => post('/emby/test', body)
+export const embyRefresh = () => post('/emby/refresh', {})
 export const getPreviews = (id, generate = false) => get(`/movies/${id}/previews`, { generate: generate || undefined })
 export const genPreviews = (id, force = false) => post(`/movies/${id}/previews/generate`, { force: force || undefined })
 export const regenAllPreviews = () => post('/previews/regenerate-all', {})
@@ -329,14 +337,83 @@ export const dlnaCast = (id, usn) => post('/dlna/cast', { movie_id: id, usn })
 export const dlnaStop = (usn) => post('/dlna/stop', { usn })
 export const subtitleFileUrl = (id, subId) => `${API}/movies/${id}/subtitles/${subId}/file`
 /* AI 批量任务 */
-export const aiJobs = () => get('/ai/jobs')
+/* AI 批量任务：批次为单位的预览 / 提交 / 明细 / 重试 / 取消 / 删除 */
+export const aiJobs = (params = {}) => get('/ai/jobs', params)
 export const aiJobsCreate = (body) => post('/ai/jobs', body)
+export const aiJobsPreview = (body = {}) => post('/ai/jobs/preview', body)
+export const aiJobsDetail = (batchId, params = {}) => get(`/ai/jobs/${encodeURIComponent(batchId)}`, params)
+export const aiJobsRetry = (batchId, body = {}) => post(`/ai/jobs/${encodeURIComponent(batchId)}/retry`, body)
+export const aiJobsCancelBatch = (batchId) => post(`/ai/jobs/${encodeURIComponent(batchId)}/cancel`, {})
+export const aiJobsDelete = (batchId) => del(`/ai/jobs/${encodeURIComponent(batchId)}`)
 export const aiJobsCancel = () => post('/ai/jobs/cancel', {})
 /* 术语表 */
 export const aiGlossary = () => get('/ai/glossary')
 export const aiGlossarySave = (items) => put('/ai/glossary', { items })
+/* 从库里的女优 / 系列生成术语候选（只返回建议，不落库） */
+export const aiGlossarySuggest = (params = {}) => get('/ai/glossary/suggest', params)
 export const aiSearchIntent = (query) => post('/ai/search-intent', { query })
 export const aiLibraryQa = (question) => post('/ai/library-qa', { question })
+/* 内置 agent：多步工具调用（查库字典 → 检索 → 换词重试 → 结论），返回 items/rows/steps */
+export const aiAgent = (question) => post('/ai/agent', { question })
+export const aiWebsearchStatus = () => get('/ai/websearch/status')
+export const aiWebsearchCheck = (query) => post('/ai/websearch/check', { query })
+
+/**
+ * 内置 agent 的流式版本：每完成一次工具调用回调一条 step，结论逐字回调 delta。
+ *
+ * 用 fetch + ReadableStream 而不是 EventSource——EventSource 只能 GET，发不了问题。
+ * 返回 done 事件的载荷；onEvent 会收到所有事件（step / delta / answer / done）。
+ */
+export async function aiAgentStream(question, onEvent, movie = null) {
+  const res = await fetch(API + '/ai/agent/stream', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(movie ? { question, movie } : { question }),
+  })
+  if (!res.ok) {
+    let msg = `HTTP ${res.status}`
+    try {
+      const d = await res.json()
+      if (d && d.detail) msg = d.detail
+    } catch (e) { /* 非 JSON 错误体，保留状态码 */ }
+    const err = new Error(msg)
+    err.code = res.status === 401 ? 'NO_TOKEN' : 'HTTP'
+    throw err
+  }
+  if (!res.body) throw new Error('当前浏览器不支持流式响应')
+
+  const reader = res.body.getReader()
+  const dec = new TextDecoder()
+  let buf = ''
+  let final = null
+  let failure = ''
+
+  const handle = (raw) => {
+    let ev
+    try { ev = JSON.parse(raw) } catch (e) { return }
+    if (ev.type === 'done') final = ev
+    else if (ev.type === 'error') failure = ev.message || 'AI 调用失败'
+    if (onEvent) onEvent(ev)
+  }
+
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    buf += dec.decode(value, { stream: true })
+    let idx
+    while ((idx = buf.indexOf('\n\n')) >= 0) {
+      const chunk = buf.slice(0, idx)
+      buf = buf.slice(idx + 2)
+      for (const line of chunk.split('\n')) {
+        if (line.startsWith('data:')) handle(line.slice(5).trim())
+      }
+    }
+  }
+  if (failure) throw new Error(failure)
+  return final
+}
+/* 按结构化规格执行问库查询（快捷提问用）：不走模型，AI 关闭时也能用 */
+export const aiLibraryRun = (body) => post('/ai/library-run', body)
 
 /* ---------------- 配置 ---------------- */
 export const getConfig = () => get('/config')

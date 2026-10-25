@@ -20,7 +20,7 @@ import sqlite3
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
-from . import ai_prompts, subtext
+from . import ai_core, ai_prompts, subtext
 from .ai_core import AIConfig, AiError, chat, register_prompt
 from .config import DATA_DIR
 from .db import connect
@@ -46,6 +46,7 @@ register_prompt("subtitle.translate", "v1")
 TARGETS = ("zh-Hans", "zh-Hant", "en")
 MAX_CUES = 4000            # 单部片最多处理的字幕条数（防止异常字幕爆预算）
 BATCH_CHARS = 1400         # 每个请求打包的原文长度
+MAX_GLOSSARY = 200         # 单批最多注入的术语条数：术语表再大也不至于把 prompt 撑爆
 
 _SRT_TIME = re.compile(
     r"(\d{1,2}):(\d{2}):(\d{2})[,.](\d{1,3})\s*-->\s*(\d{1,2}):(\d{2}):(\d{2})[,.](\d{1,3})")
@@ -128,30 +129,72 @@ def srt_from_cues(cues: List[Cue], texts: List[str], bilingual: bool) -> str:
     return "\n".join(out)
 
 
-def list_glossary() -> List[Dict[str, str]]:
-    with connect() as conn:
-        rows = conn.execute("SELECT term, translation, kind FROM ai_glossary ORDER BY id").fetchall()
-    return [{"term": r[0], "translation": r[1], "kind": r[2] or ""} for r in rows]
+def list_glossary(target: str = "") -> List[Dict[str, str]]:
+    """术语表。target 非空时只返回「通用」+「该目标语言」的条目。
+
+    lang 为空或 'any' 表示通用；指定语言（如 zh-Hant）只在该目标下注入，
+    避免翻英文时把中文译名当噪声塞给模型。
+    """
+    sql = "SELECT term, translation, kind, COALESCE(lang, '') AS lang FROM ai_glossary"
+    args: Tuple[Any, ...] = ()
+    if target:
+        sql += " WHERE COALESCE(lang, '') IN ('', 'any', ?)"
+        args = (target,)
+    sql += " ORDER BY id"
+    conn = connect()
+    try:
+        rows = conn.execute(sql, args).fetchall()
+    finally:
+        conn.close()
+    return [{"term": r[0], "translation": r[1], "kind": r[2] or "", "lang": r[3] or ""}
+            for r in rows]
 
 
 def replace_glossary(items: List[Dict[str, str]]) -> Dict[str, int]:
     rows = []
+    langs = set()
     for it in items:
         term = str(it.get("term") or "").strip()
         trans = str(it.get("translation") or "").strip()
         if term and trans:
-            rows.append((term, trans, str(it.get("kind") or "term")))
-    with connect() as conn:
+            lang = str(it.get("lang") or "").strip()
+            rows.append((term, trans, str(it.get("kind") or "term"), lang))
+            langs.add(lang or "any")
+    conn = connect()
+    try:
         conn.execute("DELETE FROM ai_glossary")
-        conn.executemany("INSERT INTO ai_glossary(term, translation, kind) VALUES(?,?,?)", rows)
-    return {"count": len(rows)}
+        conn.executemany(
+            "INSERT INTO ai_glossary(term, translation, kind, lang) VALUES(?,?,?,?)", rows)
+        conn.commit()
+    finally:
+        conn.close()
+    return {"count": len(rows), "langs": sorted(langs)}
 
 
-def _glossary_text() -> str:
-    items = list_glossary()
-    if not items:
+def glossary_hits(text: str, target: str = "") -> List[Dict[str, str]]:
+    """挑出「本段字幕里真的出现过」的术语（按 term 做子串匹配）。
+
+    只注入命中项：术语表几百条时，全量塞给每一批会让 prompt 线性膨胀，
+    而且大量无关条目会稀释「必须照译」这条指令。
+    """
+    src = str(text or "")
+    if not src:
+        return []
+    out = []
+    for item in list_glossary(target):
+        term = item["term"]
+        if term and term in src:
+            out.append(item)
+            if len(out) >= MAX_GLOSSARY:
+                break
+    return out
+
+
+def _glossary_block(hits: List[Dict[str, str]]) -> str:
+    if not hits:
         return ""
-    return "\n".join("%s = %s" % (i["term"], i["translation"]) for i in items)
+    return "术语表（必须照译）：\n%s\n\n" % "\n".join(
+        "%s = %s" % (h["term"], h["translation"]) for h in hits)
 
 
 def collect_cues(files: List[Dict[str, Any]], sidecar: List[Dict[str, Any]],
@@ -220,14 +263,14 @@ def translate_cues(cues: List[Cue], cfg: Dict[str, Any], target: str) -> Tuple[L
     """逐批翻译，返回（译文列表, 实际送出的原文字符数）。"""
     c = AIConfig.from_config(cfg)
     out: List[str] = [""] * len(cues)
-    glossary = _glossary_text()
     sent = 0
     sys_msg = ai_prompts.render("subtitle.translate", cfg, target=target)
 
     for batch in _batches(cues):
         payload = [{"i": i, "t": cues[i].text} for i in batch]
-        user = ("术语表（必须照译）：\n%s\n\n字幕 JSON：\n%s"
-                % (glossary or "（无）", json.dumps(payload, ensure_ascii=False)))
+        # 只带本批字幕里真出现过的术语：术语表再大，prompt 也不会随批次数膨胀
+        block = _glossary_block(glossary_hits("\n".join(cues[i].text for i in batch), target))
+        user = block + "字幕 JSON：\n" + json.dumps(payload, ensure_ascii=False)
         ok = False
         try:
             data = _chat_json_list(c, [{"role": "system", "content": sys_msg},
@@ -246,13 +289,14 @@ def translate_cues(cues: List[Cue], cfg: Dict[str, Any], target: str) -> Tuple[L
         except AiError:
             ok = False
         if not ok:
-            # 整批失败：降级为逐条，单条再失败就保留原文
+            # 整批失败：降级为逐条，单条再失败就保留原文。
+            # 降级同样带术语表——模型不听话时更需要译名约束。
             for i in batch:
                 sent += len(cues[i].text)
                 try:
                     data = _chat_json_list(
                         c, [{"role": "system", "content": sys_msg},
-                            {"role": "user", "content": json.dumps(
+                            {"role": "user", "content": block + json.dumps(
                                 [{"i": 0, "t": cues[i].text}], ensure_ascii=False)}],
                         max_tokens=200, purpose="subtitle.translate.one")
                     out[i] = (str(data[0].get("t") or "").strip() or cues[i].text
@@ -304,7 +348,12 @@ def translate_movie(movie_id: int, cfg: Dict[str, Any], target: str = "zh-Hans",
         got = collect_cues(m["files"], m["subtitles"], cfg)
         if not got["cues"]:
             raise ValueError("没有可用字幕：请先让扫描识别内嵌字幕，或放置 .srt/.ass 外挂字幕")
+        # 用「实际送出的 prompt 字符数」计费：包含 system 提示词与术语表，
+        # 这样任务明细里的 chars、批次预算和真实消耗是同一个口径。
+        # （并发跑多部时会把别人的用量一并算进来，属于偏保守的高估。）
+        before = int(ai_core.stats().get("prompt_chars", 0))
         texts, sent = translate_cues(got["cues"], cfg, target)
+        used = max(0, int(ai_core.stats().get("prompt_chars", 0)) - before)
         if not any(texts):
             raise ValueError("翻译结果为空，请检查模型配置或稍后重试")
         # 没译到的条目回填原文，保证时间码与条数不错位
@@ -317,8 +366,9 @@ def translate_movie(movie_id: int, cfg: Dict[str, Any], target: str = "zh-Hans",
         conn.commit()
     return {
         "ok": True, "subtitle_id": sub_id, "path": path,
-        "cues": len(got["cues"]), "chars": sent, "target": target,
-        "bilingual": bilingual, "source": got["source"], "track": got["track"],
+        "cues": len(got["cues"]), "chars": used or sent, "cue_chars": sent,
+        "target": target, "bilingual": bilingual,
+        "source": got["source"], "track": got["track"],
     }
 
 

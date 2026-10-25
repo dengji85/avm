@@ -3,7 +3,7 @@ import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
 import { state, openPlayQueue } from '../state.js'
 import {
   listCollections, createCollection, updateCollection, deleteCollection,
-  getCollection, removeFromCollection, getProfile,
+  getCollection, removeFromCollection, reorderCollection, getProfile,
 } from '../api.js'
 import { coverThumbUrl as thumbUrl } from '../api.js'
 import MultiSelect from '../components/MultiSelect.vue'

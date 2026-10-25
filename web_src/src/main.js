@@ -6,6 +6,7 @@ import './styles/tokens.css'
 import './styles/base.css'
 import './styles/ui.css'
 import './styles/layout.css'
+import './styles/assistant.css'
 import './styles.css'
 
 const app = createApp(App)

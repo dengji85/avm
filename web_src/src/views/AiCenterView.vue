@@ -80,6 +80,26 @@
             </label>
             <p class="hint">{{ privNote }}</p>
           </div>
+
+          <!-- 联网搜索：给 agent 的「查资料」技能配后端。默认关闭，配了才联网 -->
+          <div class="aic-card">
+            <div class="aic-card-head">
+              <strong>{{ $t('aiCenter.webTitle') }}</strong>
+              <span class="aic-tag" :class="{ ok: web.ok }">{{ web.statusText }}</span>
+            </div>
+            <input v-model="web.url" :placeholder="$t('aiCenter.webUrlPh')"
+                   style="width: 100%; margin-bottom: 8px" />
+            <input v-model="web.key" type="password" autocomplete="new-password"
+                   :placeholder="$t('aiCenter.webKeyPh')" style="width: 100%; margin-bottom: 8px" />
+            <p class="hint">{{ $t('aiCenter.webHint') }}</p>
+            <div class="aic-bar" style="margin-top: 8px">
+              <button class="btn tiny" :disabled="web.busy" @click="saveWeb">{{ $t('common.save') }}</button>
+              <button class="btn tiny ghost" :disabled="web.busy" @click="checkWeb">
+                {{ web.busy ? $t('ai.working') : $t('aiCenter.webTest') }}
+              </button>
+            </div>
+            <p v-if="web.message" class="hint" style="margin-top: 6px">{{ web.message }}</p>
+          </div>
         </template>
 
         <template v-else-if="section === 'prompts'">
@@ -106,35 +126,193 @@
         </template>
 
         <template v-else-if="section === 'jobs'">
+          <!-- 新建批次：范围 + 参数 + 预估，先看清命中多少再提交 -->
           <div class="aic-card">
-            <div class="aic-bar">
-              <div class="field-row">
+            <div class="aic-card-head">
+              <strong>{{ $t('aiCenter.jobNew') }}</strong>
+              <span class="spacer"></span>
+              <span class="hint">{{ $t('aiCenter.jobHint') }}</span>
+            </div>
+            <div class="aic-grid">
+              <div class="field">
                 <label>{{ $t('settings.aiJobsKind') }}</label>
-                <select v-model="job.kind" class="aic-sel">
+                <select v-model="job.kind" class="aic-sel" @change="onKindChange">
                   <option value="translate">{{ $t('settings.aiJobsTranslate') }}</option>
                   <option value="plot">{{ $t('settings.aiJobsPlot') }}</option>
                 </select>
-                <label>{{ $t('settings.aiJobsCount') }}</label>
-                <input v-model.number="job.count" type="number" min="1" max="200" class="aic-num" />
               </div>
-              <div>
-                <button class="btn primary" :disabled="job.busy || jobs.running" @click="startJob">
-                  {{ $t('settings.aiJobsStart') }}
-                </button>
-                <button class="btn ghost" :disabled="!jobs.running" @click="cancelJob">
-                  {{ $t('settings.aiJobsCancel') }}
-                </button>
+              <div class="field">
+                <label>{{ $t('aiCenter.jobScope') }}</label>
+                <select v-model="job.scope" class="aic-sel" @change="refreshPreview">
+                  <option v-for="s in scopeOptions" :key="s.value" :value="s.value">{{ s.label }}</option>
+                </select>
+              </div>
+              <div class="field">
+                <label>{{ $t('aiCenter.jobLimit') }}</label>
+                <input v-model.number="job.limit" type="number" min="1" max="500" @change="refreshPreview" />
+              </div>
+              <template v-if="job.kind === 'translate'">
+                <div class="field">
+                  <label>{{ $t('aiCenter.jobTarget') }}</label>
+                  <select v-model="job.target" class="aic-sel" @change="refreshPreview">
+                    <option v-for="tg in targets" :key="tg" :value="tg">{{ targetLabel(tg) }}</option>
+                  </select>
+                </div>
+                <div class="field">
+                  <label>{{ $t('aiCenter.jobBilingual') }}</label>
+                  <label class="aic-chk">
+                    <input type="checkbox" v-model="job.bilingual" />
+                    <span>{{ $t('aiCenter.jobBilingualHint') }}</span>
+                  </label>
+                </div>
+              </template>
+            </div>
+            <details class="aic-adv">
+              <summary>{{ $t('aiCenter.jobFilters') }}</summary>
+              <div class="aic-grid">
+                <div class="field">
+                  <label>{{ $t('aiCenter.jobGenre') }}</label>
+                  <input v-model="job.filters.genre" @change="refreshPreview" />
+                </div>
+                <div class="field">
+                  <label>{{ $t('aiCenter.jobActress') }}</label>
+                  <input v-model="job.filters.actress" @change="refreshPreview" />
+                </div>
+                <div class="field">
+                  <label>{{ $t('aiCenter.jobStudio') }}</label>
+                  <input v-model="job.filters.studio" @change="refreshPreview" />
+                </div>
+                <div class="field">
+                  <label>{{ $t('aiCenter.jobYear') }}</label>
+                  <input v-model.number="job.filters.year" type="number" @change="refreshPreview" />
+                </div>
+              </div>
+            </details>
+            <details class="aic-adv">
+              <summary>{{ $t('aiCenter.jobAdvanced') }}</summary>
+              <div class="aic-grid">
+                <div class="field">
+                  <label>{{ $t('aiCenter.jobConcurrency', { n: jobs.job_concurrency }) }}</label>
+                  <input v-model.number="job.concurrency" type="number" min="1" max="8" :placeholder="String(jobs.job_concurrency)" />
+                </div>
+                <div class="field">
+                  <label>{{ $t('aiCenter.jobBudget', { n: jobs.budget_chars_per_run || '∞' }) }}</label>
+                  <input v-model.number="job.budget" type="number" min="0" placeholder="0" />
+                </div>
+              </div>
+            </details>
+            <div class="aic-actions">
+              <span v-if="preview.count >= 0" class="hint">
+                {{ $t('aiCenter.jobEstimate', { n: preview.count, chars: fmtChars(preview.estimate_chars) }) }}
+              </span>
+              <button class="btn tiny ghost" :disabled="preview.loading" @click="refreshPreview">
+                {{ preview.loading ? $t('aiCenter.jobChecking') : $t('aiCenter.jobRecheck') }}
+              </button>
+              <button class="btn primary" :disabled="job.busy || preview.count <= 0" @click="startJob">
+                {{ job.busy ? $t('aiCenter.jobStarting') : $t('settings.aiJobsStart') }}
+              </button>
+            </div>
+          </div>
+
+          <!-- 进行中 -->
+          <div v-if="active" class="aic-card">
+            <div class="aic-card-head">
+              <strong>{{ kindLabel(active.kind) }}</strong>
+              <span class="aic-tag">{{ scopeLabel(active.params && active.params.scope) }}</span>
+              <span class="spacer"></span>
+              <button class="btn tiny ghost" @click="cancelBatch(active)">{{ $t('settings.aiJobsCancel') }}</button>
+            </div>
+            <div class="aic-prog"><i :style="{ width: (active.percent || 0) + '%' }"></i></div>
+            <p class="hint">
+              {{ $t('aiCenter.jobProgress', {
+                done: active.done + active.failed + active.skipped, total: active.total,
+                ok: active.done, fail: active.failed, skip: active.skipped }) }}
+            </p>
+          </div>
+
+          <!-- 批次历史 -->
+          <div class="aic-bar">
+            <span class="hint">{{ $t('aiCenter.jobHistoryHint') }}</span>
+            <button class="btn tiny ghost" @click="loadJobs">{{ $t('common.refresh') }}</button>
+          </div>
+          <table v-if="batches.length" class="aic-tbl">
+            <thead>
+              <tr>
+                <th>{{ $t('aiCenter.jobColTime') }}</th>
+                <th>{{ $t('aiCenter.jobColKind') }}</th>
+                <th>{{ $t('aiCenter.jobColScope') }}</th>
+                <th>{{ $t('aiCenter.jobColResult') }}</th>
+                <th>{{ $t('aiCenter.jobColStatus') }}</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="b in batches" :key="b.id">
+                <td class="sm">{{ b.created_at }}</td>
+                <td>{{ kindLabel(b.kind) }}</td>
+                <td class="sm">{{ scopeLabel(b.params && b.params.scope) }}</td>
+                <td class="sm">
+                  {{ b.done }} / {{ b.total }}
+                  <span v-if="b.failed" class="aic-badge">{{ $t('aiCenter.jobFailBadge', { n: b.failed }) }}</span>
+                </td>
+                <td><span class="aic-tag">{{ statusLabel(b.status) }}</span></td>
+                <td class="aic-ops">
+                  <button class="btn tiny ghost" @click="toggleDetail(b)">
+                    {{ detailBatch && detailBatch.id === b.id ? $t('aiCenter.jobHide') : $t('aiCenter.jobView') }}
+                  </button>
+                  <button v-if="b.failed + b.skipped" class="btn tiny ghost" @click="retryBatch(b)">
+                    {{ $t('aiCenter.jobRetry') }}
+                  </button>
+                  <button v-if="b.status === 'running' || b.status === 'queued'" class="btn tiny ghost" @click="cancelBatch(b)">
+                    {{ $t('settings.aiJobsCancel') }}
+                  </button>
+                  <button v-else class="btn tiny ghost" @click="removeBatch(b)">{{ $t('common.delete') }}</button>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+          <p v-else class="aic-empty">{{ $t('aiCenter.jobNoHistory') }}</p>
+
+          <!-- 批次明细 -->
+          <div v-if="detailBatch" class="aic-card">
+            <div class="aic-card-head">
+              <strong>{{ $t('aiCenter.jobDetail', { id: detailBatch.id }) }}</strong>
+              <span class="spacer"></span>
+              <div class="aic-bar-ops">
+                <button
+                  v-for="f in detailFilters" :key="f.value" class="btn tiny"
+                  :class="{ ghost: detail.status !== f.value }"
+                  @click="setDetailFilter(f.value)"
+                >{{ f.label }}</button>
               </div>
             </div>
-            <p class="hint">{{ $t('settings.aiJobsHint', { n: job.count, budget: jobs.budget_chars_per_run || '∞' }) }}</p>
-            <div v-if="jobs.items.length" class="aic-list">
-              <div v-for="j in jobs.items" :key="j.id" class="aic-row">
-                <span class="aic-tag">
-                  {{ j.kind === 'translate' ? $t('settings.aiJobsTranslate') : $t('settings.aiJobsPlot') }}
-                </span>
-                <span class="hint">{{ j.done }}/{{ j.total }} · {{ $t('aiCenter.failedShort', { n: j.fail }) }}</span>
-                <span class="hint">{{ j.running ? $t('aiCenter.running') : (j.error || $t('aiCenter.finished')) }}</span>
-              </div>
+            <table v-if="detail.items.length" class="aic-tbl">
+              <thead>
+                <tr>
+                  <th>{{ $t('aiCenter.jobColCode') }}</th>
+                  <th>{{ $t('aiCenter.jobColTitle') }}</th>
+                  <th>{{ $t('aiCenter.jobColStatus') }}</th>
+                  <th>{{ $t('aiCenter.jobColDur') }}</th>
+                  <th>{{ $t('aiCenter.jobColChars') }}</th>
+                  <th>{{ $t('aiCenter.jobColError') }}</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="it in detail.items" :key="it.id">
+                  <td class="mono">{{ it.code || ('#' + it.movie_id) }}</td>
+                  <td class="sm ellipsis">{{ it.title }}</td>
+                  <td><span class="aic-tag">{{ statusLabel(it.status) }}</span></td>
+                  <td class="sm">{{ it.duration_ms ? (it.duration_ms / 1000).toFixed(1) + 's' : '—' }}</td>
+                  <td class="sm">{{ it.chars || 0 }}</td>
+                  <td class="sm">{{ it.error || '—' }}</td>
+                </tr>
+              </tbody>
+            </table>
+            <p v-else class="aic-empty">{{ $t('aiCenter.jobDetailEmpty') }}</p>
+            <div v-if="detail.pages > 1" class="aic-actions">
+              <button class="btn tiny ghost" :disabled="detail.page <= 1" @click="loadDetail(detail.page - 1)">‹</button>
+              <span class="hint">{{ detail.page }} / {{ detail.pages }}</span>
+              <button class="btn tiny ghost" :disabled="detail.page >= detail.pages" @click="loadDetail(detail.page + 1)">›</button>
             </div>
           </div>
         </template>
@@ -187,6 +365,12 @@
                       spellcheck="false" :placeholder="$t('settings.aiGlossaryPh')"></textarea>
             <div class="aic-actions">
               <span v-if="glossary.ok" class="hint">{{ $t('settings.aiGlossarySaved') }}</span>
+              <span v-else-if="glossary.total" class="hint">
+                {{ $t('settings.aiGlossaryCount', { n: glossary.total }) }}
+              </span>
+              <button class="btn ghost" :disabled="suggesting" @click="suggestGlossary">
+                {{ suggesting ? $t('settings.aiGlossarySuggesting') : $t('settings.aiGlossarySuggest') }}
+              </button>
               <button class="btn" :disabled="glossary.busy" @click="saveGlossary">
                 {{ $t('settings.aiGlossarySave') }}
               </button>
@@ -258,12 +442,15 @@
 </template>
 
 <script setup>
-import { onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 
 import {
-  aiGlossary, aiGlossarySave, aiJobs, aiJobsCancel, aiJobsCreate, aiModelDelete, aiModels,
+  aiGlossary, aiGlossarySave, aiGlossarySuggest,
+  aiJobs, aiJobsCancelBatch, aiJobsCreate, aiJobsDelete,
+  aiJobsDetail, aiJobsPreview, aiJobsRetry,
+  aiModelDelete, aiModels,
   aiModelSave, aiModelSetDefault, aiModelTest, aiPrompts, aiResetPrompt, aiSavePrompt,
-  aiTraces, aiTracesClear, getConfig, putConfig,
+  aiTraces, aiTracesClear, aiWebsearchCheck, aiWebsearchStatus, getConfig, putConfig,
 } from '../api.js'
 import { t } from '../i18n/index.js'
 import { state } from '../state.js'
@@ -288,7 +475,9 @@ const TRACE_GROUPS = [
   { value: 'models', label: 'aiCenter.tracePurpose.models' },
 ]
 
-const section = ref('models')
+// 助手面板里的「改提示词」会带分区深链过来（state.aiSection）；消费一次即清空
+const section = ref(state.aiSection || 'models')
+state.aiSection = ''
 const models = ref([])
 const testing = ref('')
 const testResult = ref('')
@@ -300,6 +489,8 @@ const form = reactive({
 })
 
 const priv = reactive({ insights: false, insights_actress: false })
+// 联网搜索配置：SearXNG 地址 / Tavily Key，二选一；配了才联网，默认不联网
+const web = reactive({ url: '', key: '', busy: false, ok: null, message: '', statusText: '' })
 const localModel = computed(() => (models.value.find((m) => m.is_default) || {}).kind === 'local')
 const privNote = computed(() => (localModel.value
   ? t('aiCenter.privLocal')
@@ -310,7 +501,44 @@ async function loadPriv() {
     const c = await getConfig()
     priv.insights = !!((c.ai || {}).insights)
     priv.insights_actress = !!((c.ai || {}).insights_actress)
+    web.url = (c.ai || {}).websearch_url || ''
+    web.key = (c.ai || {}).websearch_key || ''
+    const st = await aiWebsearchStatus()
+    web.ok = st.enabled
+    web.statusText = st.enabled ? t('aiCenter.webOn') : t('aiCenter.webOff')
   } catch (e) { /* 读取失败保持默认关闭 */ }
+}
+
+async function saveWeb() {
+  web.busy = true
+  try {
+    await putConfig({
+      ai: { websearch_url: web.url.trim(), websearch_key: web.key.trim() },
+    })
+    toast(t('aiCenter.saved'), 'ok')
+    await checkWeb()
+  } catch (e) {
+    toast(e.message, 'err')
+  } finally {
+    web.busy = false
+  }
+}
+
+/** 连通性自检：把「没开 JSON」「限流」「Key 无效」翻译成人话 */
+async function checkWeb() {
+  web.busy = true
+  web.message = t('ai.working')
+  try {
+    const r = await aiWebsearchCheck()
+    web.ok = !!r.ok
+    web.statusText = r.ok ? t('aiCenter.webOn') : t('aiCenter.webOff')
+    web.message = r.message || ''
+  } catch (e) {
+    web.ok = false
+    web.message = e.message
+  } finally {
+    web.busy = false
+  }
 }
 
 async function savePriv() {
@@ -462,28 +690,162 @@ async function resetPrompt(id) {
   }
 }
 
-/* ---------- 批量任务 ---------- */
-const job = reactive({ kind: 'translate', count: 20, busy: false })
-const jobs = reactive({ running: false, total: 0, done: 0, fail: 0, items: [], budget_chars_per_run: 0 })
+/* ---------- 批量任务（批次） ---------- */
+const job = reactive({
+  kind: 'translate', scope: 'untranslated', target: 'zh-Hans', bilingual: false,
+  limit: 200, concurrency: 0, budget: 0,
+  filters: { genre: '', actress: '', studio: '', year: '' },
+  busy: false,
+})
+const preview = reactive({ count: -1, estimate_chars: 0, loading: false })
+const jobs = reactive({ budget_chars_per_run: 0, job_concurrency: 2 })
+const batches = ref([])
+const active = ref(null)
+const scopes = ref({ translate: [], plot: [] })
+const targets = ref(['zh-Hans', 'zh-Hant', 'en'])
+const detailBatch = ref(null)
+const detail = reactive({ items: [], page: 1, pages: 1, total: 0, status: '' })
 let jobTimer = null
 
-async function refreshJobs() {
+const SCOPE_LABEL = {
+  untranslated: 'aiCenter.scopeUntranslated',
+  all_subtitled: 'aiCenter.scopeAllSub',
+  no_plot: 'aiCenter.scopeNoPlot',
+  from_meta: 'aiCenter.scopeFromMeta',
+  failed: 'aiCenter.scopeFailed',
+}
+const STATUS_LABEL = {
+  queued: 'aiCenter.statusQueued',
+  running: 'aiCenter.statusRunning',
+  done: 'aiCenter.statusDone',
+  failed: 'aiCenter.statusFailed',
+  skipped: 'aiCenter.statusSkipped',
+  cancelled: 'aiCenter.statusCancelled',
+}
+const TARGET_LABEL = {
+  'zh-Hans': 'aiCenter.targetZhHans',
+  'zh-Hant': 'aiCenter.targetZhHant',
+  en: 'aiCenter.targetEn',
+}
+
+function kindLabel(kind) {
+  return kind === 'plot' ? t('settings.aiJobsPlot') : t('settings.aiJobsTranslate')
+}
+function scopeLabel(scope) {
+  const key = SCOPE_LABEL[scope]
+  return key ? t(key) : (scope || '—')
+}
+function statusLabel(s) {
+  const key = STATUS_LABEL[s]
+  return key ? t(key) : (s || '—')
+}
+function targetLabel(tg) {
+  const key = TARGET_LABEL[tg]
+  return key ? t(key) : tg
+}
+function fmtChars(n) {
+  const v = Number(n) || 0
+  if (v >= 1e8) return (v / 1e8).toFixed(1) + ' 亿'
+  if (v >= 1e4) return (v / 1e4).toFixed(1) + ' 万'
+  return String(v)
+}
+
+const scopeOptions = computed(() => (scopes.value[job.kind] || [])
+  .filter((s) => s !== 'ids' && s !== 'latest')
+  .map((s) => ({ value: s, label: scopeLabel(s) })))
+
+const detailFilters = computed(() => [
+  { value: '', label: t('aiCenter.jobAll') },
+  { value: 'failed', label: t('aiCenter.jobFailed') },
+  { value: 'skipped', label: t('aiCenter.jobSkipped') },
+  { value: 'done', label: t('aiCenter.jobDone') },
+])
+
+/** 组装请求体：空筛选字段不传，避免把「没填」当成过滤条件 */
+function jobBody() {
+  const filters = {}
+  Object.entries(job.filters || {}).forEach(([k, v]) => {
+    if (v !== '' && v !== null && v !== undefined) filters[k] = v
+  })
+  const body = {
+    kind: job.kind,
+    scope: job.scope,
+    limit: Math.max(1, Math.min(500, Number(job.limit) || 1)),
+    filters,
+    concurrency: Number(job.concurrency) || 0,
+    budget: Number(job.budget) || 0,
+  }
+  if (job.kind === 'translate') {
+    body.target = job.target
+    body.bilingual = !!job.bilingual
+  }
+  return body
+}
+
+async function refreshPreview() {
+  preview.loading = true
   try {
-    Object.assign(jobs, { items: [] }, await aiJobs())
+    const r = await aiJobsPreview(jobBody())
+    preview.count = Number(r.count) || 0
+    preview.estimate_chars = Number(r.estimate_chars) || 0
+  } catch (e) {
+    preview.count = -1
+    preview.estimate_chars = 0
+  } finally {
+    preview.loading = false
+  }
+}
+
+function onKindChange() {
+  const list = scopes.value[job.kind] || []
+  if (!list.includes(job.scope)) job.scope = list[0] || ''
+  refreshPreview()
+}
+
+async function loadJobs() {
+  try {
+    const r = await aiJobs({ limit: 20 })
+    batches.value = r.batches || []
+    active.value = r.active || null
+    jobs.job_concurrency = Number(r.job_concurrency) || 2
+    jobs.budget_chars_per_run = Number(r.budget_chars_per_run) || 0
+    if (r.scopes && typeof r.scopes === 'object') scopes.value = r.scopes
+    if (Array.isArray(r.targets) && r.targets.length) targets.value = r.targets
+    const list = scopes.value[job.kind] || []
+    if (!list.includes(job.scope)) job.scope = list[0] || job.scope
+    if (preview.count < 0) refreshPreview()
+    if (detailBatch.value) {
+      const fresh = batches.value.find((x) => x.id === detailBatch.value.id)
+      if (fresh) detailBatch.value = fresh
+    }
   } catch (e) {
     // 轮询失败不打扰用户
   }
 }
+// 兼容旧调用点（watch / 定时器）
+const refreshJobs = loadJobs
 
 async function startJob() {
+  if (preview.count <= 0) {
+    toast(t('aiCenter.jobNothing'), 'err')
+    return
+  }
   job.busy = true
   try {
-    const r = await aiJobsCreate({
-      kind: job.kind,
-      latest: Math.max(1, Math.min(200, Number(job.count) || 1)),
-    })
+    const r = await aiJobsCreate(jobBody())
+    if (!r.count) {
+      toast(r.message || t('aiCenter.jobNothing'), 'err')
+      return
+    }
     toast(t('settings.aiJobsStarted', { n: r.count }), 'ok')
-    await refreshJobs()
+    await loadJobs()
+    const b = batches.value.find((x) => x.id === r.batch_id)
+    if (b) {
+      detailBatch.value = b
+      detail.status = ''
+      loadDetail(1)
+    }
+    refreshPreview()
   } catch (e) {
     toast(e.message, 'err')
   } finally {
@@ -491,12 +853,127 @@ async function startJob() {
   }
 }
 
-async function cancelJob() {
+async function cancelBatch(b) {
+  if (!b) return
   try {
-    await aiJobsCancel()
-    await refreshJobs()
+    await aiJobsCancelBatch(b.id)
+    toast(t('aiCenter.jobCancelled'), 'ok')
+    await loadJobs()
   } catch (e) {
     toast(e.message, 'err')
+  }
+}
+
+async function retryBatch(b) {
+  try {
+    const r = await aiJobsRetry(b.id)
+    if (!r.retried) {
+      toast(t('aiCenter.jobNoRetry'), 'ok')
+      return
+    }
+    toast(t('aiCenter.jobRetried', { n: r.retried }), 'ok')
+    await loadJobs()
+  } catch (e) {
+    toast(e.message, 'err')
+  }
+}
+
+async function removeBatch(b) {
+  const ok = await confirmDialog(t('common.delete'), t('aiCenter.jobDeleteConfirm', { id: b.id }), { danger: true })
+  if (!ok) return
+  try {
+    await aiJobsDelete(b.id)
+    if (detailBatch.value && detailBatch.value.id === b.id) detailBatch.value = null
+    await loadJobs()
+  } catch (e) {
+    toast(e.message, 'err')
+  }
+}
+
+function toggleDetail(b) {
+  if (detailBatch.value && detailBatch.value.id === b.id) {
+    detailBatch.value = null
+    return
+  }
+  detailBatch.value = b
+  detail.status = ''
+  loadDetail(1)
+}
+
+async function loadDetail(page = 1) {
+  if (!detailBatch.value) return
+  try {
+    const r = await aiJobsDetail(detailBatch.value.id, { status: detail.status, page, size: 50 })
+    detail.items = r.items || []
+    detail.page = r.page || 1
+    detail.pages = r.pages || 1
+    detail.total = r.total || 0
+    if (r.batch) detailBatch.value = r.batch
+  } catch (e) {
+    // 忽略
+  }
+}
+
+function setDetailFilter(v) {
+  detail.status = v
+  loadDetail(1)
+}
+
+/* 从库里的女优 / 系列一键生成候选（只追加到编辑框，保存后才生效） */
+const suggesting = ref(false)
+
+async function suggestGlossary() {
+  suggesting.value = true
+  try {
+    const r = await aiGlossarySuggest({ limit: 200 })
+    const items = r.items || []
+    const c = r.counts || {}
+    if (!items.length) {
+      toast(t('settings.aiGlossarySuggestEmpty'), 'ok')
+      return
+    }
+    const ok = await confirmDialog(
+      t('settings.aiGlossarySuggestTitle'),
+      t('settings.aiGlossarySuggestDesc', {
+        n: c.total || items.length, alias: c.alias || 0, kana: c.kana || 0, series: c.series || 0,
+      }),
+      { danger: false },
+    )
+    if (!ok) return
+    // 编辑框里已有的 term 不重复追加（可能是用户手写的同名词）
+    const existing = new Set()
+    for (const line of glossary.text.split('\n')) {
+      const it = parseGlossaryLine(line)
+      if (it) existing.add(it.term)
+    }
+    const groups = [
+      ['alias', 'settings.aiGlossarySrcAlias'],
+      ['kana', 'settings.aiGlossarySrcKana'],
+      ['series', 'settings.aiGlossarySrcSeries'],
+    ]
+    const lines = []
+    let added = 0
+    for (const [src, labelKey] of groups) {
+      const list = items.filter((i) => i.source === src && !existing.has(i.term))
+      if (!list.length) continue
+      lines.push(`# ${t(labelKey)}`)
+      for (const it of list) {
+        lines.push(`${it.term} = ${it.translation}`)
+        existing.add(it.term)
+        added += 1
+      }
+    }
+    if (!added) {
+      toast(t('settings.aiGlossarySuggestDup'), 'ok')
+      return
+    }
+    const base = glossary.text.trimEnd()
+    glossary.text = (base ? base + '\n' : '') + lines.join('\n')
+    toast(t('settings.aiGlossarySuggestDone', { n: added }), 'ok')
+  } catch (e) {
+    toast(e.message, 'err')
+  } finally {
+    suggesting.value = false
   }
 }
 
@@ -529,12 +1006,38 @@ async function clearTraces() {
 }
 
 /* ---------- 翻译术语表 ---------- */
-const glossary = reactive({ text: '', busy: false, ok: false })
+const glossary = reactive({ text: '', busy: false, ok: false, total: 0 })
+
+/** 解析一行术语：支持 [lang] 前缀，分隔符支持 = / => / Tab / 中英文冒号。 */
+function parseGlossaryLine(line) {
+  let s = String(line || '').trim()
+  if (!s || s.startsWith('#')) return null
+  let lang = ''
+  const tag = s.match(/^\[([A-Za-z][\w-]*)\]\s*/)
+  if (tag) {
+    lang = tag[1]
+    s = s.slice(tag[0].length)
+  }
+  // 非贪婪左值 + 最先出现的分隔符；右侧允许再出现分隔符（译名里带 = 也不影响）
+  const m = s.match(/^(.+?)\s*(?:=>|：|:|\t|=)\s*(.+)$/)
+  if (!m) return null
+  const term = m[1].trim()
+  const translation = m[2].trim()
+  if (!term || !translation) return null
+  return lang ? { term, translation, lang } : { term, translation }
+}
+
+function glossaryLine(item) {
+  const prefix = item.lang && item.lang !== 'any' ? `[${item.lang}] ` : ''
+  return `${prefix}${item.term} = ${item.translation}`
+}
 
 async function loadGlossary() {
   try {
     const g = await aiGlossary()
-    glossary.text = (g.items || []).map((i) => `${i.term} = ${i.translation}`).join('\n')
+    const items = g.items || []
+    glossary.text = items.map(glossaryLine).join('\n')
+    glossary.total = items.length
   } catch (e) {
     // 忽略：术语表为空也能用
   }
@@ -544,14 +1047,19 @@ async function saveGlossary() {
   glossary.busy = true
   glossary.ok = false
   try {
-    const items = glossary.text.split('\n').map((line) => {
-      const i = line.indexOf('=')
-      if (i <= 0) return null
-      return { term: line.slice(0, i).trim(), translation: line.slice(i + 1).trim() }
-    }).filter((x) => x && x.term && x.translation)
-    await aiGlossarySave(items)
+    const items = []
+    let bad = 0
+    for (const line of glossary.text.split('\n')) {
+      if (!line.trim() || line.trim().startsWith('#')) continue
+      const it = parseGlossaryLine(line)
+      if (it) items.push(it)
+      else bad += 1
+    }
+    const r = await aiGlossarySave(items)
     glossary.ok = true
-    toast(t('settings.aiGlossarySaved'), 'ok')
+    glossary.total = Number(r.count) || items.length
+    if (bad) toast(t('settings.aiGlossaryInvalid', { n: bad }), 'err')
+    else toast(t('settings.aiGlossarySaved'), 'ok')
   } catch (e) {
     toast(e.message, 'err')
   } finally {
@@ -568,8 +1076,11 @@ watch(section, (v) => {
 
 onMounted(() => {
   load()
+  // 有批次在跑时刷新列表与已展开的明细，跑完自动停
   jobTimer = setInterval(() => {
-    if (jobs.running) refreshJobs()
+    if (!active.value) return
+    loadJobs()
+    if (detailBatch.value) loadDetail(detail.page)
   }, 3000)
 })
 
@@ -723,6 +1234,25 @@ function goBack() {
 .aic-chk { display: flex; align-items: center; gap: 8px; margin: 8px 0; font-size: 13px; color: var(--c-text-2); }
 .aic-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; margin-top: 16px; }
 .aic-actions .hint { margin-right: auto; }
+
+/* 批量任务：进度条 / 折叠区 / 表格小字 */
+.aic-prog {
+  height: 6px; border-radius: 999px; overflow: hidden; margin: 6px 0 8px;
+  background: var(--c-surface-3);
+}
+.aic-prog > i {
+  display: block; height: 100%; background: var(--c-primary);
+  transition: width .3s ease;
+}
+.aic-adv { margin-top: 10px; }
+.aic-adv > summary {
+  cursor: pointer; font-size: 12px; color: var(--c-text-3);
+  padding: 4px 0; border-top: 1px dashed var(--c-line);
+}
+.aic-adv > summary:hover { color: var(--c-text-2); }
+.aic-adv .aic-grid { margin-top: 8px; }
+.aic-tbl .sm { font-size: 12px; color: var(--c-text-3); }
+.aic-tbl td.ellipsis { max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* 模型编辑弹窗 */
 .aic-mask {

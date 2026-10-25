@@ -12,12 +12,13 @@
     python run.py stats                   # 库规模与磁盘占用
     python run.py export --out lib.csv    # 导出 CSV
     python run.py organize --root D:/AV --dry-run
+    python run.py mcp                     # 以 MCP 服务器运行，供外部 AI 客户端连接
 """
 import sys
 
 from app.cli import main as cli_main
 
-SUBCOMMANDS = {"scan", "dedupe", "stats", "export", "organize", "serve"}
+SUBCOMMANDS = {"scan", "dedupe", "stats", "export", "organize", "serve", "mcp", "ai-check", "web-check"}
 
 
 def main() -> int:

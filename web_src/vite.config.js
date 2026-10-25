@@ -2,8 +2,10 @@ import { defineConfig } from 'vite'
 import vue from '@vitejs/plugin-vue'
 
 // 构建为纯静态前端，相对路径部署，由后端 / 静态托管。
-export default defineConfig({
-  base: './',
+// dev（serve）用 /：base 为 './' 时 Vite 开发服务器访问根路径会 404，必须显式打开 /index.html；
+// 打包（build）仍保留相对路径 './'，产物可放在任意子路径下。
+export default defineConfig(({ command }) => ({
+  base: command === 'serve' ? '/' : './',
   plugins: [vue()],
   build: {
     outDir: '../web_dist',
@@ -18,4 +20,4 @@ export default defineConfig({
       '/covers': 'http://127.0.0.1:8770',
     },
   },
-})
+}))

@@ -128,3 +128,5 @@ class Job:
 SCAN = Job("scan")
 SCRAPE = Job("scrape")
 ACTRESS_FETCH = Job("actress_fetch")
+# NFO/封面落盘到影片目录（批量导出）——导出给 Emby/Jellyfin 用，可选能力
+NFO_EXPORT = Job("nfo_export")

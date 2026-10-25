@@ -324,11 +324,22 @@ def _migrate(conn: sqlite3.Connection) -> None:
         "created_at TEXT DEFAULT (datetime('now','localtime')), "
         "updated_at TEXT DEFAULT (datetime('now','localtime')))")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_aijobs_status ON ai_jobs(status, id)")
+    # AI 批量任务批次：一次提交 = 一个批次，逐片任务挂在它下面（见 app/ai_jobs.py）
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS ai_batches ("
+        "id TEXT PRIMARY KEY, kind TEXT NOT NULL DEFAULT '', params TEXT DEFAULT '{}', "
+        "total INTEGER DEFAULT 0, done INTEGER DEFAULT 0, "
+        "failed INTEGER DEFAULT 0, skipped INTEGER DEFAULT 0, chars INTEGER DEFAULT 0, "
+        "status TEXT DEFAULT 'queued', message TEXT DEFAULT '', "
+        "created_at TEXT DEFAULT (datetime('now','localtime')), "
+        "started_at TEXT DEFAULT '', ended_at TEXT DEFAULT '')")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_aibatch_created ON ai_batches(created_at)")
     # 翻译术语表：女优名 / 系列名 / 番号固定译法，避免每部片译法漂移
     conn.execute(
         "CREATE TABLE IF NOT EXISTS ai_glossary ("
         "id INTEGER PRIMARY KEY AUTOINCREMENT, "
-        "term TEXT NOT NULL, translation TEXT NOT NULL, kind TEXT DEFAULT 'term')")
+        "term TEXT NOT NULL, translation TEXT NOT NULL, kind TEXT DEFAULT 'term', "
+        "lang TEXT DEFAULT '')")
     # 观看历史 / 分段记录（A+B 档）
     conn.execute(
         "CREATE TABLE IF NOT EXISTS watch_sessions ("
@@ -388,6 +399,28 @@ def _migrate(conn: sqlite3.Connection) -> None:
     log_cols = {r[1] for r in conn.execute("PRAGMA table_info(scrape_logs)").fetchall()}
     if "detail" not in log_cols:
         conn.execute("ALTER TABLE scrape_logs ADD COLUMN detail TEXT DEFAULT ''")
+    # AI 批量任务改造成「批次」模型：老库补列 + 补建批次表
+    job_cols = {r[1] for r in conn.execute("PRAGMA table_info(ai_jobs)").fetchall()}
+    for col, ddl in (("batch_id", "TEXT DEFAULT ''"),
+                     ("started_at", "TEXT DEFAULT ''"),
+                     ("ended_at", "TEXT DEFAULT ''"),
+                     ("duration_ms", "INTEGER DEFAULT 0")):
+        if col not in job_cols:
+            conn.execute("ALTER TABLE ai_jobs ADD COLUMN %s %s" % (col, ddl))
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_aijobs_batch ON ai_jobs(batch_id, status)")
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS ai_batches ("
+        "id TEXT PRIMARY KEY, kind TEXT NOT NULL DEFAULT '', params TEXT DEFAULT '{}', "
+        "total INTEGER DEFAULT 0, done INTEGER DEFAULT 0, "
+        "failed INTEGER DEFAULT 0, skipped INTEGER DEFAULT 0, chars INTEGER DEFAULT 0, "
+        "status TEXT DEFAULT 'queued', message TEXT DEFAULT '', "
+        "created_at TEXT DEFAULT (datetime('now','localtime')), "
+        "started_at TEXT DEFAULT '', ended_at TEXT DEFAULT '')")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_aibatch_created ON ai_batches(created_at)")
+    # 术语表按目标语言隔离：lang='' / 'any' 为通用，其他值为指定语言（如 zh-Hant）
+    gl_cols = {r[1] for r in conn.execute("PRAGMA table_info(ai_glossary)").fetchall()}
+    if "lang" not in gl_cols:
+        conn.execute("ALTER TABLE ai_glossary ADD COLUMN lang TEXT DEFAULT ''")
     conn.commit()
 
 

@@ -180,25 +180,92 @@ def find_sidecar(video_path: str | Path, code: str = "") -> Optional[Path]:
     return None
 
 
-def build_nfo(movie: Dict[str, Any]) -> str:
+_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def rating_to_10(value: Any) -> float:
+    """把片匣的 5 星评分换算为 Kodi/Emby 的 0-10 分制。
+
+    片匣的 ``movies.rating`` 是用户自己的 5 星打分（见 store 里的评分分档），
+    直接写进 NFO 会被媒体服务器按 10 分制显示，等于把评分砍半。
+    """
+    try:
+        v = float(value or 0)
+    except (TypeError, ValueError):
+        return 0.0
+    if v <= 0:
+        return 0.0
+    return round(min(10.0, v * 2), 1)
+
+
+def _valid_date(value: Any) -> str:
+    """只输出 YYYY-MM-DD，其余（空 / 只有年份 / 非法串）一律不写。
+
+    媒体服务器对 ``<premiered>`` 格式很敏感，写错会导致条目识别失败。
+    """
+    s = str(value or "").strip()
+    if _DATE_RE.match(s):
+        return s
+    m = re.match(r"^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})$", s)
+    if m:
+        y, mo, d = m.groups()
+        return "%s-%02d-%02d" % (y, int(mo), int(d))
+    return ""
+
+
+def _year_of(movie: Dict[str, Any]) -> str:
+    year = str(movie.get("year") or "").strip()
+    if re.fullmatch(r"\d{4}", year):
+        return year
+    return _valid_date(movie.get("release_date"))[:4]
+
+
+def build_nfo_root(movie: Dict[str, Any], poster: str = "", fanart: str = "",
+                   rating_field: str = "userrating") -> ET.Element:
+    """把影片记录构造成 Kodi/Emby 风格 ``<movie>`` 元素。
+
+    poster / fanart 传**相对文件名**（如 ``ABC-123-poster.jpg``），不要传绝对路径
+    或远程 URL：NFO 会跟视频一起被搬来搬去，绝对路径换机器即失效。
+
+    rating_field 决定片匣的 5 星评分写到哪个标签：
+      - ``userrating``（默认）：片匣评分本质是用户个人评分，语义正确；
+      - ``rating``：写进站点评分位，各端都显示，但会与"官方评分"语义混淆；
+      - ``both``：两处都写。
+    """
     root = ET.Element("movie")
 
     def add(tag: str, value: Any) -> None:
-        if value in (None, "", 0):
+        if value in (None, "", 0, 0.0):
             return
         ET.SubElement(root, tag).text = str(value)
 
     add("title", movie.get("title") or movie.get("code"))
     add("originaltitle", movie.get("original_title"))
+    # num：AV 刮削圈的番号约定，Kodi/Emby 忽略但无害。
+    # 注意绝不把番号写进 <id> —— 那是 Kodi 的库内主键，写错会造成条目错乱。
     add("num", movie.get("code"))
     add("plot", movie.get("plot"))
-    add("premiered", movie.get("release_date"))
-    add("year", movie.get("year"))
+    add("premiered", _valid_date(movie.get("release_date")))
+    add("year", _year_of(movie))
     add("runtime", movie.get("runtime"))
     add("studio", movie.get("studio"))
+    add("maker", movie.get("studio"))
     add("label", movie.get("publisher"))
     add("director", movie.get("director"))
-    add("rating", movie.get("rating"))
+
+    score = rating_to_10(movie.get("rating"))
+    if score:
+        field = (rating_field or "userrating").lower()
+        if field in ("rating", "both"):
+            add("rating", score)
+        if field in ("userrating", "both"):
+            add("userrating", score)
+
+    code = str(movie.get("code") or "").strip()
+    if code:
+        uid = ET.SubElement(root, "uniqueid")
+        uid.set("type", "avm")
+        uid.text = code
 
     if movie.get("series"):
         st = ET.SubElement(root, "set")
@@ -213,11 +280,91 @@ def build_nfo(movie: Dict[str, Any]) -> str:
         ET.SubElement(actor, "name").text = str(a)
         ET.SubElement(actor, "type").text = "Actor"
 
-    art = ET.SubElement(root, "art")
-    if movie.get("cover_url"):
-        ET.SubElement(art, "poster").text = movie["cover_url"]
-    if movie.get("fanart_url"):
-        ET.SubElement(art, "fanart").text = movie["fanart_url"]
+    if poster or fanart:
+        art = ET.SubElement(root, "art")
+        if poster:
+            ET.SubElement(art, "poster").text = str(poster)
+        if fanart:
+            ET.SubElement(art, "fanart").text = str(fanart)
 
+    return root
+
+
+def pretty(root: ET.Element) -> str:
+    """格式化输出 XML 字符串（UTF-8 声明 + 两空格缩进）。"""
     xml = ET.tostring(root, encoding="unicode")
     return minidom.parseString(xml).toprettyxml(indent="  ", encoding="utf-8").decode("utf-8")
+
+
+def build_nfo(movie: Dict[str, Any], poster: str = "", fanart: str = "",
+              rating_field: str = "userrating") -> str:
+    """生成 NFO 文本（兼容旧调用：不传图片时与历史行为一致）。"""
+    return pretty(build_nfo_root(movie, poster=poster, fanart=fanart,
+                                 rating_field=rating_field))
+
+
+def read_nfo_root(path: str | Path) -> Optional[ET.Element]:
+    """读取已有 NFO 的根元素；解析失败返回 None（调用方自行降级）。"""
+    try:
+        raw = Path(path).read_text(encoding="utf-8", errors="ignore")
+    except Exception:
+        return None
+    if not raw.strip():
+        return None
+    raw = raw[raw.find("<"):] if "<" in raw else raw
+    try:
+        return ET.fromstring(raw)
+    except ET.ParseError:
+        return None
+
+
+def _child_key(node: ET.Element) -> tuple:
+    """同一父节点下判断「是不是同一个子节点」的键。
+
+    actor 按名字、genre/tag 按文本、uniqueid 按 type 合并，其余按标签名。
+    这样重复刮削时不会把同一个女优/类型写成两条。
+    """
+    tag = node.tag
+    if tag == "uniqueid":
+        return (tag, node.get("type") or "")
+    if tag == "actor":
+        return (tag, (_text(node.find("name")) or "").lower())
+    if tag in ("genre", "tag"):
+        return (tag, (node.text or "").strip().lower())
+    return (tag,)
+
+
+def merge_into(existing: ET.Element, fresh: ET.Element) -> ET.Element:
+    """以已有 NFO 为骨架，只用新数据**补空 + 补缺节点**，保留未知节点。
+
+    这是"通用"的关键：Emby/Kodi 会在 NFO 里写 ``<streamdetails>``、``<fileinfo>``、
+    ``<banner>`` 等本程序不产出的节点，纯重写会把这些技术信息全部抹掉。
+    本函数只做叶子级合并，不动已有值（覆盖是另一个策略，由 writer 负责）。
+    """
+    index = {}
+    for child in list(existing):
+        index.setdefault(_child_key(child), child)
+
+    for new_child in list(fresh):
+        key = _child_key(new_child)
+        old = index.get(key)
+        if old is None:
+            existing.append(new_child)
+            index[key] = new_child
+            continue
+        # art 是容器节点：逐个图片槽位合并
+        if new_child.tag == "art":
+            have = {c.tag for c in list(old)}
+            for slot in list(new_child):
+                if slot.tag not in have and (slot.text or "").strip():
+                    old.append(slot)
+            continue
+        # 已有值为空才补，非空一律不动（尊重用户的既有整理）
+        if not (old.text or "").strip() and (new_child.text or "").strip():
+            old.text = new_child.text
+        # 子节点递归补齐（如 <set><name>）
+        if len(new_child):
+            for sub in list(new_child):
+                if not len(old.findall(sub.tag)):
+                    old.append(sub)
+    return existing

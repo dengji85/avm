@@ -76,6 +76,8 @@ export const state = reactive({
   theme: saved.theme === 'light' ? 'light' : 'dark',
   // 跨页面请求设置页的某个标签（如解锁码提示 → 设置 → 隐私）；消费后置空
   settingsTab: '',
+  // 跨页面请求 AI 中心的某个分区（如面板里的「改提示词」→ AI 中心 → 提示词）；消费后置空
+  aiSection: '',
   density: saved.density || 'cozy',
   cardSize: saved.cardSize || 'normal',   // dense | normal | large
   sidebarCollapsed: !!saved.sidebarCollapsed,

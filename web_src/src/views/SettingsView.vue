@@ -12,6 +12,7 @@ import {
   setPin, privacyState, privacyLock, trustedDevices, revokeTrusted,
   totpStatus, totpSetup, totpEnable, totpDisable,
   listApiKeys, createApiKey, revokeApiKey,
+  embyStatus, embyTest, embyRefresh,
 } from '../api.js'
 import { toast, confirmDialog, fmtAgo, fmtDateTime, prettyHostPath, setSiteTitle } from '../utils.js'
 import { useTasks } from '../composables/useTasks.js'
@@ -44,6 +45,11 @@ const cfg = reactive({
   library: { paths: [], min_size_mb: 0, ignore_keywords: [], video_extensions: [], missing_grace_days: 30, delete_to_recycle_bin: true },
   cover: { auto_local: false, download: false },
   media: { avatar_dir: 'avatars', fanart_dir: 'fanarts', avatar_download: false, fanart_download: true },
+  // 导出到媒体目录的工具整体搬到了 维护页 → 导出（含其配置），这里只留 Emby 联动
+  emby: {
+    enabled: false, base_url: '', api_key: '', user_id: '',
+    refresh_mode: 'library', refresh_debounce_sec: 30,
+  },
   scraper: {
     order: [], timeout: 20, delay_ms: 0, workers: 4, proxy: '', overwrite: false,
     chrome_debug_port: 9222,
@@ -106,6 +112,12 @@ async function load() {
       { avatar_dir: 'avatars', fanart_dir: 'fanarts', avatar_download: false, fanart_download: true },
       c.media,
     )
+    cfg.emby = Object.assign(
+      { enabled: false, base_url: '', api_key: '', user_id: '', refresh_mode: 'library', refresh_debounce_sec: 30 },
+      c.emby,
+    )
+    // 后端不下发 api_key，只能问「有没有设过」
+    loadEmby()
     cfg.scraper = Object.assign(
       { order: [], timeout: 20, delay_ms: 0, workers: 4, proxy: '', overwrite: false, chrome_debug_port: 9222, avwiki: {}, javbus: {}, javdb: {}, http_json: {}, http_html: {} },
       c.scraper,
@@ -201,6 +213,71 @@ async function saveLibrary() {
     toast(t('settings.libSaved'), 'ok')
     await load()
   } catch (e) { toast(e.message, 'err') } finally { saving.value = false }
+}
+
+/* ---------------- Emby 联动（导出工具整体搬到了维护页 → 导出） ---------------- */
+const savingEmby = ref(false)
+
+const embyHasKey = ref(false)
+const embyMsg = ref('')
+const testingEmby = ref(false)
+const refreshingEmby = ref(false)
+
+async function loadEmby() {
+  try {
+    const r = await embyStatus()
+    embyHasKey.value = !!r.has_key
+  } catch (e) { /* 非致命 */ }
+}
+
+async function saveEmby() {
+  savingEmby.value = true
+  try {
+    const patch = {
+      emby: {
+        enabled: !!cfg.emby.enabled,
+        base_url: (cfg.emby.base_url || '').toString().trim(),
+        user_id: (cfg.emby.user_id || '').toString().trim(),
+        refresh_mode: cfg.emby.refresh_mode || 'library',
+        refresh_debounce_sec: Math.max(1, Number(cfg.emby.refresh_debounce_sec) || 30),
+      },
+    }
+    // 留空 = 不修改已保存的 Key（后端也会剔除空串）
+    const key = (cfg.emby.api_key || '').toString().trim()
+    if (key) patch.emby.api_key = key
+    await putConfig(patch)
+    toast(t('settings.exportSaved'), 'ok')
+    cfg.emby.api_key = ''
+    await load()
+  } catch (e) { toast(e.message, 'err') } finally { savingEmby.value = false }
+}
+
+async function doTestEmby() {
+  testingEmby.value = true
+  embyMsg.value = ''
+  try {
+    const r = await embyTest({ base_url: cfg.emby.base_url, api_key: cfg.emby.api_key })
+    if (r.ok) {
+      embyMsg.value = t('settings.embyOk', { v: [r.server_name, r.version].filter(Boolean).join(' ') })
+      toast(embyMsg.value, 'ok')
+    } else {
+      embyMsg.value = r.error || t('settings.embyFail')
+      toast(embyMsg.value, 'err')
+    }
+  } catch (e) {
+    embyMsg.value = e.message
+    toast(e.message, 'err')
+  } finally {
+    testingEmby.value = false
+  }
+}
+
+async function doEmbyRefresh() {
+  refreshingEmby.value = true
+  try {
+    const r = await embyRefresh()
+    toast(r.ok ? t('settings.embyRefreshed') : (r.error || t('settings.embyFail')), r.ok ? 'ok' : 'err')
+  } catch (e) { toast(e.message, 'err') } finally { refreshingEmby.value = false }
 }
 
 /* ---------------- 网页播放兼容（浏览器不认的容器 → 快速重封装） ---------------- */
@@ -1285,6 +1362,44 @@ onMounted(async () => {
             </button>
             <button class="btn" :disabled="rescanningCovers" @click="doRescanLocalCovers">
               {{ rescanningCovers ? $t('settings.sniffing') : $t('settings.rescanCoverBtn') }}
+            </button>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-head">{{ $t('settings.embyTitle') }} <span class="sub">{{ $t('settings.embySub') }}</span></div>
+          <div class="panel-body">
+            <div class="field-row checkbox">
+              <label>{{ $t('settings.embyEnable') }}</label>
+              <label class="toggle">
+                <input type="checkbox" v-model="cfg.emby.enabled" /><span class="track"></span>
+              </label>
+            </div>
+            <div class="field">
+              <label>{{ $t('settings.embyUrl') }}</label>
+              <input v-model="cfg.emby.base_url" :placeholder="$t('settings.embyUrlPh')" />
+            </div>
+            <div class="field">
+              <label>{{ $t('settings.embyKey') }}</label>
+              <input
+                v-model="cfg.emby.api_key" type="password" autocomplete="new-password"
+                :placeholder="embyHasKey ? $t('settings.embyKeySet') : $t('settings.embyKeyPh')"
+              />
+            </div>
+            <div class="field">
+              <label>{{ $t('settings.refreshDebounce') }}</label>
+              <input type="number" v-model.number="cfg.emby.refresh_debounce_sec" min="1" style="width:120px" />
+            </div>
+            <p class="muted">{{ $t('settings.embyHint') }}</p>
+            <p v-if="embyMsg" class="hint">{{ embyMsg }}</p>
+          </div>
+          <div class="panel-foot">
+            <button class="btn primary" :disabled="savingEmby" @click="saveEmby">{{ $t('common.save') }}</button>
+            <button class="btn" :disabled="testingEmby" @click="doTestEmby">
+              {{ testingEmby ? $t('settings.testing') : $t('settings.testBtn') }}
+            </button>
+            <button class="btn" :disabled="refreshingEmby" @click="doEmbyRefresh">
+              {{ refreshingEmby ? $t('settings.refreshing') : $t('settings.refreshBtn') }}
             </button>
           </div>
         </div>

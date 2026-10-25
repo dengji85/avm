@@ -1,0 +1,323 @@
+/* AI 助手面板：会话流 + 结果卡。
+ *
+ * 为什么单独一份全局样式：结果卡被拆成多个小组件（剧情 / 标签 / 字幕 / 问答 /
+ * 相似 / 问库），每张卡都要用同一套排版（正文、对比栏、列表、时间点）。
+ * 写成各自 scoped 会复制六份，改一处漏五处。
+ *
+ * 约定：本文件所有类以 asst- 开头，避免与页面里既有的 aiw- / 详情页样式打架。
+ */
+
+/* ===== 悬浮球 ===== */
+.asst-fab {
+  position: fixed; right: 20px; bottom: 20px;
+  z-index: calc(var(--z-ai) - 1);
+  width: 48px; height: 48px; border-radius: 999px;
+  border: 1px solid var(--c-primary-line, transparent);
+  background: linear-gradient(135deg, var(--c-primary-d, var(--c-primary)), var(--c-primary));
+  color: #fff; font-size: 20px; line-height: 1;
+  box-shadow: var(--sh-4);
+  cursor: pointer;
+  transition: transform .15s, box-shadow .15s;
+}
+.asst-fab:hover { transform: translateY(-2px) scale(1.04); }
+
+/* ===== 窗口本体 ===== */
+.asst-win {
+  position: fixed;
+  z-index: var(--z-ai);
+  display: flex; flex-direction: column;
+  min-width: 340px; min-height: 420px;
+  max-width: calc(100vw - 16px); max-height: calc(100vh - 16px);
+  background: var(--c-surface);
+  border: 1px solid var(--c-line-strong);
+  border-radius: var(--r-lg);
+  box-shadow: 0 24px 60px rgba(0, 0, 0, .5);
+  overflow: hidden;
+  resize: both;
+}
+.asst-win.narrow { resize: none; }
+.asst-win.dragging { user-select: none; }
+@media (max-width: 720px) {
+  .asst-win {
+    left: 0 !important; top: 0 !important;
+    width: 100% !important; height: 100% !important;
+    max-width: none; max-height: none;
+    border-radius: 0; border: 0;
+  }
+}
+
+.asst-head {
+  flex: none;
+  display: flex; align-items: center; gap: 8px;
+  padding: 9px 10px 9px 12px;
+  border-bottom: 1px solid var(--c-line);
+  background: var(--c-surface-2);
+  cursor: grab;
+  touch-action: none;
+}
+.asst-win.dragging .asst-head { cursor: grabbing; }
+@media (max-width: 720px) { .asst-head { cursor: default; } }
+.asst-head-ic { font-size: 14px; }
+.asst-head-title { font-size: var(--fs-md); }
+/* 上下文芯片：一眼知道这一句是问「这部片」还是「整个库」 */
+.asst-ctx {
+  max-width: 42%; font-size: var(--fs-xs); line-height: 1.6;
+  padding: 1px 8px; border-radius: 999px;
+  background: var(--c-primary-soft); color: var(--c-primary-text);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.asst-ctx.lib { background: var(--c-surface-3); color: var(--c-text-2); }
+.asst-icon {
+  flex: none;
+  width: 26px; height: 26px; padding: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+  border: 0; border-radius: var(--r-sm); background: transparent;
+  color: var(--c-text-3); font: inherit; font-size: var(--fs-md);
+  cursor: pointer;
+}
+.asst-icon:hover { background: var(--c-surface-3); color: var(--c-text); }
+
+/* ===== 会话流 ===== */
+/* 历史记录与答案都允许手动划选复制（面板是弹窗，别继承任何禁选规则） */
+.asst-stream {
+  user-select: text;
+  flex: 1; min-height: 0; overflow-y: auto;
+  display: flex; flex-direction: column; gap: 14px;
+  padding: 14px 14px 10px;
+  overscroll-behavior: contain;
+}
+.asst-welcome { display: flex; flex-direction: column; gap: 8px; padding: 4px 2px; }
+.asst-welcome-title { margin: 0; font-size: var(--fs-lg); font-weight: 600; color: var(--c-text); }
+.asst-facts { display: flex; gap: 6px; flex-wrap: wrap; margin: 2px 0 0; }
+.asst-fact {
+  font-size: var(--fs-xs); padding: 2px 8px; border-radius: 999px;
+  border: 1px solid var(--c-line); color: var(--c-text-3);
+}
+.asst-fact.on { color: var(--c-ok); border-color: currentColor; }
+.asst-note {
+  margin: 0; padding: 7px 10px; border-radius: var(--r-sm);
+  background: var(--c-warn-soft); color: var(--c-warn);
+  font-size: var(--fs-xs); line-height: 1.6;
+}
+
+.asst-row-user { display: flex; justify-content: flex-end; align-items: flex-end; gap: 6px; }
+/* 历史输入词的复制按钮：悬停浮现；触屏设备（narrow）常显 */
+.asst-copy {
+  flex: none; width: 22px; height: 22px; border-radius: var(--r-sm);
+  border: 1px solid var(--c-line); background: var(--c-surface-2); color: var(--c-text-3);
+  font-size: 12px; line-height: 1; cursor: pointer; opacity: 0;
+  transition: opacity var(--t-fast), color var(--t-fast), border-color var(--t-fast);
+}
+.asst-row-user:hover .asst-copy { opacity: 1; }
+.narrow .asst-copy { opacity: .7; }
+.asst-copy:hover { color: var(--c-primary); border-color: var(--c-primary); }
+.asst-bubble {
+  max-width: 84%; padding: 8px 12px;
+  border-radius: 14px 14px 4px 14px;
+  background: var(--c-primary); color: #fff;
+  font-size: var(--fs-sm); line-height: 1.6;
+  white-space: pre-wrap; word-break: break-word;
+}
+.asst-row-bot { display: flex; flex-direction: column; gap: 8px; }
+.asst-say { margin: 0; font-size: var(--fs-sm); line-height: 1.75; color: var(--c-text-2); }
+.asst-archived { margin: 0; font-size: var(--fs-xs); color: var(--c-text-3); font-style: italic; }
+.asst-card-wrap { min-width: 0; }
+.asst-setup {
+  display: flex; align-items: center; gap: 10px;
+  padding: 10px 12px; border-radius: var(--r-md);
+  border: 1px dashed var(--c-line-strong); background: var(--c-surface-2);
+}
+
+/* 打字指示器：模型没流式返回，用这个代替「白屏等待」 */
+.asst-typing {
+  display: flex; align-items: center; gap: 6px;
+  font-size: var(--fs-xs); color: var(--c-text-3);
+}
+.asst-typing i {
+  width: 5px; height: 5px; border-radius: 50%;
+  background: var(--c-text-3); animation: asst-blink 1.2s infinite;
+}
+.asst-typing i:nth-child(2) { animation-delay: .2s; }
+.asst-typing i:nth-child(3) { animation-delay: .4s; }
+@keyframes asst-blink {
+  0%, 60%, 100% { opacity: .25; }
+  30% { opacity: 1; }
+}
+
+/* ===== 输入区 ===== */
+.asst-composer {
+  flex: none;
+  display: flex; flex-direction: column; gap: 8px;
+  padding: 8px 10px 10px;
+  border-top: 1px solid var(--c-line);
+  background: var(--c-surface-2);
+}
+.asst-chips { display: flex; gap: 6px; flex-wrap: wrap; }
+.asst-chip {
+  padding: 3px 10px; border-radius: 999px;
+  font-size: var(--fs-xs); line-height: 1.6;
+  background: var(--c-surface); border: 1px solid var(--c-line);
+  color: var(--c-text-2); cursor: pointer;
+}
+.asst-chip:hover:not(:disabled) { border-color: var(--c-primary); color: var(--c-primary-h); }
+.asst-chip:disabled { opacity: .5; cursor: default; }
+/* 被勾选的标签建议：实心一点，和「只读 chip」区分开 */
+.asst-chip.on { background: var(--c-primary-soft); border-color: var(--c-primary); color: var(--c-primary-text); }
+.asst-chip.existing { opacity: .72; }
+.asst-chip em { font-style: normal; font-size: 10px; opacity: .6; margin-left: 3px; }
+.asst-model { max-width: 26%; font-size: var(--fs-xs); }
+.asst-input-row { display: flex; align-items: center; gap: 8px; }
+.asst-input {
+  flex: 1; min-width: 0; height: 34px; padding: 0 12px;
+  border-radius: 999px; font: inherit; font-size: var(--fs-sm);
+  border: 1px solid var(--c-line-strong);
+  background: var(--c-surface); color: var(--c-text);
+}
+.asst-input:focus { outline: none; border-color: var(--c-primary); box-shadow: var(--sh-glow); }
+.asst-input::placeholder { color: var(--c-text-3); }
+
+/* ===== 结果卡的通用排版 ===== */
+.asst-text {
+  margin: 0; font-size: var(--fs-sm); line-height: 1.75; color: var(--c-text-2);
+  white-space: pre-wrap; word-break: break-word;
+  max-height: 240px; overflow: auto;
+}
+.asst-hint { margin: 0; font-size: var(--fs-xs); line-height: 1.7; color: var(--c-text-3); }
+.asst-err { margin: 0; font-size: var(--fs-sm); color: var(--c-err); }
+.asst-sm { font-size: var(--fs-xs); color: var(--c-text-3); }
+.asst-mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: var(--fs-xs); }
+.asst-link {
+  padding: 0; border: 0; background: transparent;
+  color: var(--c-primary-text); font: inherit; font-size: var(--fs-xs);
+  cursor: pointer;
+}
+.asst-link:hover { text-decoration: underline; }
+.asst-actions { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.asst-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.asst-row .inp { flex: 1; min-width: 130px; }
+.asst-check {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-size: var(--fs-sm); color: var(--c-text-2);
+}
+
+/* 新旧简介对照：左旧右新，新的一侧高亮边框 */
+.asst-compare { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+@media (max-width: 560px) { .asst-compare { grid-template-columns: 1fr; } }
+.asst-col {
+  min-width: 0; padding: 8px; border-radius: var(--r-sm);
+  border: 1px solid var(--c-line); background: var(--c-surface);
+}
+.asst-col.new { border-color: var(--c-primary); }
+.asst-col-head {
+  display: flex; align-items: center; gap: 6px;
+  margin-bottom: 4px; font-size: var(--fs-xs); color: var(--c-text-3);
+}
+
+/* 字幕产物列表 */
+.asst-list { display: flex; flex-direction: column; gap: 4px; }
+.asst-list-row { display: flex; align-items: center; gap: 8px; font-size: var(--fs-sm); }
+.asst-list-row .ellipsis { flex: 1; min-width: 0; }
+
+/* 问答：答案块 + 可点击时间点 */
+.asst-answer {
+  padding: 10px 12px; border-radius: 10px;
+  background: var(--c-primary-soft); color: var(--c-text);
+  font-size: var(--fs-sm); line-height: 1.75; white-space: pre-wrap;
+}
+.asst-refs { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.asst-ref {
+  padding: 2px 7px; border-radius: 999px; cursor: pointer;
+  font-size: var(--fs-xs); font-variant-numeric: tabular-nums;
+  border: 1px solid var(--c-line); background: var(--c-surface); color: var(--c-primary-text);
+}
+.asst-ref:hover { border-color: var(--c-primary); }
+
+/* 统计行（口味 / 观看 / 库健康）：左标签右数值 */
+.asst-rows { display: flex; flex-direction: column; }
+.asst-row-line {
+  display: flex; align-items: baseline; gap: 8px;
+  padding: 5px 0; border-bottom: 1px dashed var(--c-line);
+}
+.asst-row-line:last-child { border-bottom: 0; }
+.asst-row-val { font-weight: 600; color: var(--c-text); }
+
+/* 影片卡网格 */
+.asst-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+@media (max-width: 460px) { .asst-grid { grid-template-columns: 1fr; } }
+/* 全屏时影片卡不要跟着窗口一起膨胀：固定按海报宽度铺成多列，
+   卡片始终保持在主库页面相近的尺寸，多余空间交给「列数」而不是「卡片」 */
+.asst-win.maxed .asst-grid { grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 12px; }
+/* 同理：长文本（结论、步骤、统计表）在全屏下也不该拉满整行，限宽保持可读 */
+.asst-win.maxed .asst-answer,
+.asst-win.maxed .asst-rows,
+.asst-win.maxed .asst-steps { max-width: 110ch; }
+.asst-sim { display: grid; grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); gap: 8px; }
+.asst-sim-card { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.asst-sim-open {
+  display: flex; flex-direction: column; gap: 4px; padding: 4px;
+  cursor: pointer; text-align: left;
+  border: 1px solid var(--c-line); border-radius: var(--r-md);
+  background: var(--c-surface); color: var(--c-text-2); font-size: var(--fs-xs);
+}
+.asst-sim-open:hover { border-color: var(--c-primary); }
+.asst-sim-open img { width: 100%; aspect-ratio: 3/4; object-fit: cover; border-radius: var(--r-sm); }
+.asst-reasons { display: flex; gap: 3px; flex-wrap: wrap; }
+.asst-reason {
+  padding: 1px 5px; border-radius: 999px; font-size: 10px;
+  background: var(--c-surface-2); border: 1px solid var(--c-line); color: var(--c-text-3);
+}
+
+/* agent 执行步骤：默认收起的一行，展开后是「调了什么工具、拿到几条」 */
+.asst-steps { display: flex; flex-direction: column; gap: 4px; }
+.asst-steps > summary { cursor: pointer; }
+.asst-step {
+  display: flex; align-items: center; gap: 8px;
+  padding: 3px 6px; border-radius: var(--r-sm);
+  background: var(--c-surface-2);
+  font-size: var(--fs-xs); color: var(--c-text-2);
+}
+.asst-step .ellipsis { flex: 1; min-width: 0; }
+/* 正在执行的那一步：描边高亮，一眼看到「现在在干什么」 */
+.asst-step.live { border-color: var(--c-primary); color: var(--c-text-1); }
+
+/* 流式结论的打字光标 */
+.asst-caret {
+  display: inline-block;
+  width: 1ch;
+  color: var(--c-primary);
+  animation: asst-blink 1s steps(2, start) infinite;
+}
+@keyframes asst-blink {
+  0%, 49% { opacity: 1; }
+  50%, 100% { opacity: 0; }
+}
+
+/* 全屏模式：铺满视口，去掉圆角与阴影 */
+.asst-win.maxed { border-radius: 0; box-shadow: none; }
+
+/* 调用详情：核对这次到底发了什么 */
+.asst-trace { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.asst-trace-box {
+  display: flex; flex-direction: column; gap: 6px;
+  border-top: 1px dashed var(--c-line); padding-top: 8px;
+}
+.asst-trace-item {
+  display: flex; flex-direction: column; gap: 4px;
+  padding: 8px; border-radius: var(--r-sm);
+  border: 1px solid var(--c-line); background: var(--c-surface);
+}
+.asst-trace-meta {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  font-size: var(--fs-xs); color: var(--c-text-2);
+}
+.asst-pre {
+  margin: 0; padding: 6px 8px; border-radius: var(--r-sm);
+  max-height: 180px; overflow: auto;
+  background: var(--c-surface-2); color: var(--c-text-2);
+  font-size: 11px; line-height: 1.6; white-space: pre-wrap; word-break: break-word;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.asst-pre.err { color: var(--c-err); }
+
+.asst-fade-enter-active, .asst-fade-leave-active { transition: opacity .16s ease, transform .16s ease; }
+.asst-fade-enter-from, .asst-fade-leave-to { opacity: 0; transform: translateY(8px) scale(.985); }

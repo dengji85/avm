@@ -4,7 +4,7 @@
 只回答「怎么和模型说话」，**不含任何业务提示词**（那些在 app/ai.py 应用层）：
 
   * 配置解析：端点 / Key / 模型 / 温度 / 超时 / 重试次数 / 附加头
-  * 统一入口：``chat`` 与 ``chat_json``
+  * 统一入口：``chat`` / ``chat_json`` / ``chat_tools``（function calling）
   * 健壮性：重试退避、超时隔离、错误归一为 ``AiError``
   * 可观测：调用 / 失败 / 缓存命中 / 输出长度统计（见 ``stats()``）
   * 省钱：同一请求（模型 + 消息 + 参数完全一致）10 分钟内复用上一次结果
@@ -27,7 +27,7 @@ import threading
 import time
 from collections import OrderedDict, deque
 from dataclasses import dataclass, field
-from typing import Any, Deque, Dict, List, Optional
+from typing import Any, Deque, Dict, Iterator, List, Optional
 
 import requests
 
@@ -421,6 +421,186 @@ def chat(cfg: AIConfig, messages: List[Dict[str, str]], *,
     _record_trace(purpose, cfg, messages, error=last,
                   ms=(time.time() - t0) * 1000)
     raise AiError("AI 调用失败：%s" % (last or "未知错误"))
+
+
+def chat_tools(cfg: AIConfig, messages: List[Dict[str, Any]], *,
+               tools: List[Dict[str, Any]], tool_choice: str = "auto",
+               max_tokens: int = 600, temperature: Optional[float] = None,
+               purpose: str = "tools") -> Dict[str, Any]:
+    """带 ``tools`` 的一次调用：返回 ``{"content": str, "tool_calls": [...]}``。
+
+    与 ``chat`` 的差别只在返回值——tool_calls 在 content 之外，只要字符串就拿不到，
+    所以单独实现；重试、超时、统计、轨迹的口径与 ``chat`` 保持一致。
+
+    **端点不支持 tools 时**（多数自建小模型、部分代理）会抛
+    ``retryable=False`` 的 ``AiError``，调用方据此回退到 JSON 模式，不要重试浪费额度。
+    """
+    if not cfg.enabled:
+        raise AiError("AI 未启用：请在 设置 → AI 中开启并填写接口与模型")
+
+    temp = cfg.temperature if temperature is None else float(temperature)
+    headers = {"Content-Type": "application/json"}
+    if cfg.api_key:
+        headers["Authorization"] = "Bearer %s" % cfg.api_key
+    for k, v in (cfg.extra_headers or {}).items():
+        headers[str(k)] = str(v)
+
+    payload: Dict[str, Any] = {
+        "model": cfg.model,
+        "messages": messages,
+        "temperature": temp,
+        "max_tokens": max_tokens,
+        "tools": tools,
+        "tool_choice": tool_choice,
+    }
+
+    base = (cfg.base_url or "").rstrip("/")
+    url = base if base.endswith("/chat/completions") else base + "/chat/completions"
+    t0 = time.time()
+    last = ""
+    last_retryable = True
+    attempts = 1 + max(0, cfg.max_retries)
+    for attempt in range(attempts):
+        try:
+            resp = requests.post(url, headers=headers, json=payload,
+                                 timeout=(CONNECT_TIMEOUT, cfg.timeout))
+            if resp.status_code in (429, 500, 502, 503, 504) and attempt < cfg.max_retries:
+                raise AiError("HTTP %d" % resp.status_code)
+            if resp.status_code >= 400:
+                raise AiError("HTTP %d：%s（该端点可能不支持 tools）"
+                              % (resp.status_code, resp.text[:200]), retryable=False)
+            data = resp.json()
+            choices = data.get("choices") or []
+            if not choices:
+                raise AiError("接口返回里没有 choices：%s" % str(data)[:200])
+            msg = choices[0].get("message") or {}
+            content = str(msg.get("content") or "").strip()
+            calls: List[Dict[str, Any]] = []
+            for c in msg.get("tool_calls") or []:
+                fn = c.get("function") or {}
+                calls.append({
+                    "id": str(c.get("id") or ""),
+                    "name": str(fn.get("name") or ""),
+                    "arguments": fn.get("arguments") or "",
+                })
+            with _STATS_LOCK:
+                _STATS["calls"] += 1
+                _STATS["prompt_chars"] += sum(len(str(m.get("content") or "")) for m in messages)
+                _STATS["reply_chars"] += len(content)
+                _STATS["last_model"] = cfg.model
+                _STATS["last_error"] = ""
+                _STATS["last_call_at"] = int(time.time())
+            reply = content or json.dumps([c["name"] for c in calls], ensure_ascii=False)
+            _record_trace(purpose, cfg, messages, reply=reply,
+                          ms=(time.time() - t0) * 1000)
+            return {"content": content, "tool_calls": calls}
+        except AiError as e:
+            last = str(e)
+            retryable = bool(getattr(e, "retryable", True))
+            last_retryable = retryable
+        except (requests.RequestException, ValueError, KeyError, IndexError) as e:
+            last = "%s: %s" % (type(e).__name__, e)
+            retryable = True
+            last_retryable = True
+        if attempt >= cfg.max_retries or not retryable:
+            break
+        time.sleep(min(2 ** attempt, 4) * (1 + random.random() * 0.3))
+        log.info("AI 工具调用重试（%s 第 %d 次）：%s", purpose or "tools", attempt + 1, last)
+
+    with _STATS_LOCK:
+        _STATS["failures"] += 1
+        _STATS["last_error"] = last[:200]
+    log.warning("AI 工具调用失败（%s）：%s", purpose or "tools", last)
+    _record_trace(purpose, cfg, messages, error=last,
+                  ms=(time.time() - t0) * 1000)
+    # 一定要保留 retryable：上层靠它判断「是不是端点不支持 tools」，决定要不要回退
+    raise AiError("AI 调用失败：%s" % (last or "未知错误"), retryable=last_retryable)
+
+
+def chat_stream(cfg: AIConfig, messages: List[Dict[str, Any]], *,
+                max_tokens: int = 800, temperature: Optional[float] = None,
+                purpose: str = "stream") -> Iterator[str]:
+    """逐块产出回答文本（OpenAI 兼容 SSE），让界面「边生成边显示」。
+
+    与 ``chat`` 的差别：
+      * **不重试**——已经吐出半句再重发，界面会出现重复内容；
+      * 端点忽略 ``stream`` 参数、直接返回整段 JSON 时，这里同样能产出一块文本；
+      * 统计与轨迹在结束时记一次，口径与 ``chat`` 一致。
+    """
+    if not cfg.enabled:
+        raise AiError("AI 未启用：请在 设置 → AI 中开启并填写接口与模型")
+
+    temp = cfg.temperature if temperature is None else float(temperature)
+    headers = {"Content-Type": "application/json"}
+    if cfg.api_key:
+        headers["Authorization"] = "Bearer %s" % cfg.api_key
+    for k, v in (cfg.extra_headers or {}).items():
+        headers[str(k)] = str(v)
+
+    payload: Dict[str, Any] = {
+        "model": cfg.model,
+        "messages": messages,
+        "temperature": temp,
+        "max_tokens": max_tokens,
+        "stream": True,
+    }
+    base = (cfg.base_url or "").rstrip("/")
+    url = base if base.endswith("/chat/completions") else base + "/chat/completions"
+
+    t0 = time.time()
+    try:
+        resp = requests.post(url, headers=headers, json=payload,
+                             timeout=(CONNECT_TIMEOUT, cfg.timeout), stream=True)
+    except requests.RequestException as e:
+        raise AiError("AI 调用失败：%s" % e)
+
+    pieces: List[str] = []
+    try:
+        if resp.status_code >= 400:
+            raise AiError("HTTP %d：%s" % (resp.status_code, resp.text[:200]), retryable=False)
+
+        ctype = str(resp.headers.get("content-type") or "")
+        if "event-stream" not in ctype:
+            # 有的代理会忽略 stream 参数，直接返回整段 JSON
+            data = resp.json()
+            text = ((data.get("choices") or [{}])[0].get("message") or {}).get("content") or ""
+            if text:
+                pieces.append(str(text))
+                yield str(text)
+        else:
+            for raw in resp.iter_lines():
+                if not raw:
+                    continue
+                line = raw.decode("utf-8", "ignore") if isinstance(raw, (bytes, bytearray)) else str(raw)
+                if not line.startswith("data:"):
+                    continue
+                data = line[5:].strip()
+                if not data or data == "[DONE]":
+                    continue
+                try:
+                    obj = json.loads(data)
+                except ValueError:
+                    continue
+                choice = (obj.get("choices") or [{}])[0]
+                piece = (choice.get("delta") or {}).get("content") or ""
+                if piece:
+                    pieces.append(str(piece))
+                    yield str(piece)
+
+        with _STATS_LOCK:
+            _STATS["calls"] += 1
+            _STATS["prompt_chars"] += sum(len(str(m.get("content") or "")) for m in messages)
+            _STATS["reply_chars"] += sum(len(p) for p in pieces)
+            _STATS["last_model"] = cfg.model
+            _STATS["last_error"] = ""
+            _STATS["last_call_at"] = int(time.time())
+        _record_trace(purpose, cfg, messages, reply="".join(pieces),
+                      ms=(time.time() - t0) * 1000)
+    finally:
+        try:
+            resp.close()
+        except Exception:                                # noqa: BLE001 关闭失败不影响已产出的内容
+            pass
 
 
 def chat_json(cfg: AIConfig, messages: List[Dict[str, str]], *,

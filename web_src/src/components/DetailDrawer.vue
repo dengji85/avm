@@ -1,5 +1,5 @@
 <script setup>
-import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
+import { ref, reactive, computed, watch, onMounted, onBeforeUnmount } from 'vue'
 import { state } from '../state.js'
 import {
   getMovie, updateMovie, deleteMovie, toggleFlag, playMovie,
@@ -7,7 +7,7 @@ import {
   extractCover,
   listTags, renameTag, deleteTag,
   dlnaDevices, dlnaAddDevice, dlnaCast, dlnaStop,
-  getActress, avatarUrl, getConfig, scanMovieSubtitles,
+  getActress, avatarUrl, getConfig, scanMovieSubtitles, extStatus,
 } from '../api.js'
 import AddToCollectionBtn from './AddToCollectionBtn.vue'
 import {
@@ -65,17 +65,13 @@ const aiSubs = computed(() => (mv.value?.subtitles || []).filter((s) => s.source
 function openAi() {
   ws.openWorkspace(mv.value)
 }
-/** 简介旁的「AI 重写」：打开浮窗并直接开始，少点一次 */
+/** 简介旁的「AI 重写」：打开对话面板并直接跑简介，少点一次 */
 function openAiWithPlot() {
-  ws.cards.plot = true
-  ws.openWorkspace(mv.value)
-  if (!ai.plot.draft) ai.generatePlot()
+  ws.openWorkspace(mv.value, { skill: 'plot' })
 }
 /** 标签旁的「AI 建议」 */
 function openAiWithTags() {
-  ws.cards.tags = true
-  ws.openWorkspace(mv.value)
-  if (!ai.tags.items.length) ai.suggestTags()
+  ws.openWorkspace(mv.value, { skill: 'tags' })
 }
 /**
  * 详情页的轻量 AI：写简介 / 问剧情都直接在页面上完成。
@@ -143,11 +139,21 @@ watch(() => state.aiSeek, (req) => {
   window.dispatchEvent(new CustomEvent('avm-seek', { detail: { seconds: req.seconds } }))
 })
 
-/* 常用在线站点：详情页一键打开影片在各站点的页面 */
+/* 常用在线站点：前 3 个平铺，其余收进「更多」——站点行永远只占一行 */
 const sites = ref([])
 const topSites = computed(() => sites.value.slice(0, 3))
 const moreSites = computed(() => sites.value.slice(3))
 const sitesMoreOpen = ref(false)
+
+/* ffmpeg 是否已配置：配置了就不再显示「需要 ffmpeg」的提示 */
+const extSt = reactive({ ffmpeg: false })
+async function loadExt() {
+  try {
+    const r = await extStatus()
+    const ff = (r.components || []).find((c) => c.id === 'ffmpeg')
+    extSt.ffmpeg = !!ff && ff.state === 'ready'
+  } catch { extSt.ffmpeg = false }
+}
 async function loadSites() {
   try {
     const cfg = await getConfig()
@@ -257,7 +263,7 @@ watch(
   ([inPlayer, isOpen]) => { if (inPlayer && isOpen) pausePlayer() },
 )
 // 打开详情时加载常用站点配置（只取启用的）
-watch(open, (v) => { if (v) loadSites() })
+watch(open, (v) => { if (v) { loadSites(); loadExt() } })
 
 const progressPos = computed(() => Number(mv.value?.progress?.position) || 0)
 const progressPct = computed(() => {
@@ -362,8 +368,13 @@ watch(
 )
 
 async function doNfo() {
-  try { const r = await exportNfo(id.value); toast(t('detail.nfoExported', { path: r.path || 'NFO' }), 'ok') }
-  catch (e) { toast(e.message, 'err') }
+  try {
+    const r = await exportNfo(id.value)
+    // 导出可能只写了一半（例如目录里已有 NFO 被跳过、只复制了封面），
+    // 所以用 skipped/message 把「为什么没写全」直接告诉用户。
+    if (r.ok) toast(t('detail.nfoExported', { path: r.nfo || r.path || 'NFO' }), 'ok')
+    else toast(r.message || t('detail.nfoExportSkipped'), 'err')
+  } catch (e) { toast(e.message, 'err') }
 }
 
 // mode: 'db' 仅移出库（保留文件） / 'trash' 删除到系统回收站（可恢复） / 'permanent' 永久删除
@@ -755,7 +766,7 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', onKey) })
         </header>
 
         <div class="drawer-body">
-          <!-- 展开「更多站点」时，半透明遮罩盖住详情页其余内容，只露出站点面板 -->
+          <!-- 「站点·更多」展开时，透明遮罩负责点空白处关闭（不压暗整页） -->
           <div v-if="sitesMoreOpen" class="sites-shade" @click="sitesMoreOpen = false"></div>
           <!-- 左侧主内容 -->
           <div class="dd-content">
@@ -782,31 +793,64 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', onKey) })
               </div>
 
               <div class="dd-main">
-                <!-- 主操作 -->
+                <!-- 主操作：按「播放 / 标记 / 站点 / 维护」四组平铺，全部一级可见，不藏菜单 -->
                 <div class="dd-actions">
-                  <button
-                    class="btn primary"
-                    :disabled="!hasPlayable"
-                    :title="hasPlayable ? '' : $t('detail.noSource')"
-                    @click="playing = !playing"
-                  >
-                    {{ playing ? $t('detail.collapsePlayer') : (progressPct > 0 ? $t('detail.continue', { p: progressPct }) : $t('detail.onlinePlay')) }}
-                  </button>
-                  <button v-if="canExternal" class="btn" :disabled="!hasPlayable" @click="play">{{ $t('player.external') }}</button>
-                  <button class="btn" :disabled="!hasPlayable" :title="$t('detail.castHint')" @click="openCast">
-                    📺 <span v-if="!castTo">{{ $t('detail.cast') }}</span>
-                    <span v-else class="cast-on">{{ castTo }}</span>
-                  </button>
-                  <button v-if="castTo" class="btn" @click="stopCast">{{ $t('detail.castStop') }}</button>
-                  <button class="btn" :class="{ 'ai-entry-on': ai.ready }" :title="$t('ai.entryTip')" @click="openAi">
-                    ✨ {{ $t('ai.title') }}
-                  </button>
-                  <button v-if="canReveal" class="btn" @click="openFolder" :data-tip="$t('detail.revealFolderTip')">{{ $t('detail.revealFolder') }}</button>
-                  <button class="btn icon" :class="{ active: mv.favorite }" @click="flip('favorite')" :data-tip="$t('flag.favorite')">{{ mv.favorite ? '♥' : '♡' }}</button>
-                  <button class="btn icon" :class="{ active: mv.watchlist }" @click="flip('watchlist')" :data-tip="$t('flag.watchlist')">⌚</button>
-                  <button class="btn icon" :class="{ active: mv.watched }" @click="flip('watched')" :data-tip="$t('flag.watched')">{{ mv.watched ? '●' : '○' }}</button>
+                  <div class="dd-g">
+                    <span class="dd-g-lbl">{{ $t('detail.grpPlay') }}</span>
+                    <button
+                      class="btn primary"
+                      :disabled="!hasPlayable"
+                      :title="hasPlayable ? '' : $t('detail.noSource')"
+                      @click="playing = !playing"
+                    >
+                      {{ playing ? $t('detail.collapsePlayer') : (progressPct > 0 ? $t('detail.continue', { p: progressPct }) : $t('detail.onlinePlay')) }}
+                    </button>
+                    <button v-if="canExternal" class="btn" :disabled="!hasPlayable" @click="play">↗ {{ $t('player.external') }}</button>
+                    <button class="btn" :disabled="!hasPlayable" :title="$t('detail.castHint')" @click="openCast">
+                      📺 <span v-if="!castTo">{{ $t('detail.cast') }}</span>
+                      <span v-else class="cast-on">{{ castTo }}</span>
+                    </button>
+                    <button v-if="castTo" class="btn ghost" @click="stopCast">{{ $t('detail.castStop') }}</button>
+                  </div>
 
-                  <AddToCollectionBtn :movie-id="id" variant="detail" />
+                  <div class="dd-g">
+                    <span class="dd-g-lbl">{{ $t('detail.grpMark') }}</span>
+                    <button class="btn icon" :class="{ active: mv.favorite }" @click="flip('favorite')" :data-tip="$t('flag.favorite')">{{ mv.favorite ? '♥' : '♡' }}</button>
+                    <button class="btn icon" :class="{ active: mv.watchlist }" @click="flip('watchlist')" :data-tip="$t('flag.watchlist')">⌚</button>
+                    <button class="btn icon" :class="{ active: mv.watched }" @click="flip('watched')" :data-tip="$t('flag.watched')">{{ mv.watched ? '●' : '○' }}</button>
+                    <AddToCollectionBtn :movie-id="id" variant="detail" />
+                    <button v-if="canReveal" class="btn" @click="openFolder" :data-tip="$t('detail.revealFolderTip')">📁 {{ $t('detail.revealFolder') }}</button>
+                    <button class="btn" :class="{ 'ai-entry-on': ai.ready }" :title="$t('ai.entryTip')" @click="openAi">✨ {{ $t('ai.title') }}</button>
+                  </div>
+
+                  <div v-if="sites.length" class="dd-g">
+                    <span class="dd-g-lbl">{{ $t('detail.grpSites') }}</span>
+                    <!-- 前 3 个平铺，其余进「更多」：站点行只占一行 -->
+                    <button v-for="s in topSites" :key="s.id" class="btn site-flat"
+                            :title="renderSiteUrl(s, (mv && mv.code) || '')" @click="openSite(s)">
+                      <span class="i">🔗</span> {{ s.name || s.url }}
+                    </button>
+                    <div v-if="moreSites.length" class="dd-sites-more" :class="{ open: sitesMoreOpen }">
+                      <button class="btn site-flat" :aria-expanded="sitesMoreOpen"
+                              @click.stop="sitesMoreOpen = !sitesMoreOpen">
+                        {{ $t('detail.openSitesMore', { n: moreSites.length }) }} <span class="caret">▾</span>
+                      </button>
+                      <div class="sites-pop">
+                        <div class="sites-pop-tip">{{ $t('detail.openSitesTip') }}</div>
+                        <button v-for="s in moreSites" :key="s.id" class="sites-pop-item"
+                                :title="renderSiteUrl(s, (mv && mv.code) || '')" @click="openSite(s)">
+                          <span class="i">↗</span> {{ s.name || s.url }}
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div class="dd-g">
+                    <span class="dd-g-lbl">{{ $t('detail.grpMaint') }}</span>
+                    <button class="btn tiny ghost" @click="doScrape" :disabled="loading">⟳ {{ $t('detail.rescrape') }}</button>
+                    <button class="btn tiny ghost" @click="doNfo">⤓ {{ $t('detail.exportNfo') }}</button>
+                    <button class="btn tiny ghost" @click="removeCover">🖼 {{ $t('detail.clearCover') }}</button>
+                  </div>
 
                   <!-- 投屏：选同网段的 DLNA 设备；扫不到就手动填电视 IP -->
                   <div v-if="castOpen" class="cast-mask" @click.self="castOpen = false">
@@ -835,39 +879,6 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', onKey) })
                       </div>
                     </div>
                   </div>
-
-                  <!-- 打开在线页面：前 3 个平铺，更多 hover 展开 -->
-                  <template v-if="sites.length">
-                    <button
-                      v-for="s in topSites"
-                      :key="s.id"
-                      class="btn site-flat"
-                      :title="s.url"
-                      @click="openSite(s)"
-                    >
-                      <span class="i">🔗</span> {{ s.name || s.url }}
-                    </button>
-                    <div v-if="moreSites.length" class="dd-sites-more" :class="{ open: sitesMoreOpen }">
-                      <button class="btn site-flat" :aria-expanded="sitesMoreOpen" @click.stop="sitesMoreOpen = !sitesMoreOpen">
-                        <span class="i">🔗</span> {{ $t('detail.openSitesMore', { n: moreSites.length }) }}
-                        <span class="caret">▾</span>
-                      </button>
-                      <div class="sites-pop">
-                        <div class="sites-pop-tip">{{ $t('detail.openSitesTip') }}</div>
-                        <button
-                          v-for="s in moreSites"
-                          :key="s.id"
-                          class="sites-pop-item"
-                          @click="openSite(s)"
-                        >
-                          <span class="i">↗</span> {{ s.name || s.url }}
-                        </button>
-                      </div>
-                    </div>
-                  </template>
-                  <button v-else class="btn" disabled :title="$t('detail.openSitesTip')">
-                    <span class="i">🔗</span> {{ $t('detail.openSitesEmpty') }}
-                  </button>
                 </div>
 
                 <!-- 评分 -->
@@ -891,15 +902,12 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', onKey) })
                   <span v-for="s in manualSubs" :key="s.id" class="badge sub" :title="s.path">
                     {{ $t('detail.subFile', { lang: s.lang || '字幕' }) }}
                   </span>
-                </div>
-
-                <!-- 同目录外挂字幕：OCR / 下载来的字幕放进去，点一下登记 -->
-                <div class="ai-sub">
+                  <!-- 同目录外挂字幕登记：收进徽章行末尾，不再单独占一行 -->
+                  <span class="spacer"></span>
                   <button class="btn tiny ghost" :disabled="scanningSubs"
                           :title="$t('detail.scanSubsHint')" @click="scanSidecars">
                     {{ scanningSubs ? $t('detail.scanningSubs') : $t('detail.scanSubs') }}
                   </button>
-                  <span v-if="manualSubs.length" class="dim">{{ $t('detail.subsCount', { n: manualSubs.length }) }}</span>
                 </div>
 
                 <!-- 已生成的 AI 字幕译文：下载 / 删除（生成入口统一在 AI 工作台） -->
@@ -1028,9 +1036,7 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', onKey) })
               <button class="tab" :class="{ on: tab === 'preview' }" @click="tab = 'preview'">{{ $t('detail.tabPreview') }}</button>
               <button class="tab" :class="{ on: tab === 'info' }" @click="tab = 'info'">{{ $t('detail.tabInfo') }}</button>
               <button class="tab" :class="{ on: tab === 'files' }" @click="tab = 'files'">{{ $t('detail.tabFiles') }}</button>
-              <div class="spacer"></div>
-              <button class="btn tiny ghost" @click="doScrape" :disabled="loading">{{ $t('detail.rescrape') }}</button>
-              <button class="btn tiny ghost" @click="doNfo">{{ $t('detail.exportNfo') }}</button>
+              <!-- 重刮削 / 导出 NFO 收进主区「⋯更多」，这里只留标签页 -->
             </div>
 
             <div class="dd-pane">
@@ -1181,7 +1187,7 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', onKey) })
                   <button class="btn tiny" :disabled="pvLoading" @click="loadPreviews(true)">
                     {{ pvLoading ? $t('detail.generating') : $t('detail.genPreview') }}
                   </button>
-                  <span class="muted">{{ $t('detail.needFfmpeg') }}</span>
+                  <span v-if="!extSt.ffmpeg" class="muted">{{ $t('detail.needFfmpeg') }}</span>
                 </div>
                 <div v-if="previews.length" class="pv-grid">
                   <img v-for="(u, i) in previews" :key="i" :src="u" alt="" @click="openLightbox(previews, i)" />
@@ -1339,24 +1345,32 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', onKey) })
   box-shadow: 0 1px 4px rgba(0,0,0,.35);
   pointer-events: none;
 }
-.cov-acts { display: flex; gap: var(--sp-2); margin-top: var(--sp-2); }
+/* 封面上的操作：一直可见（都是实在功能），紧凑排列即可 */
+.cov-acts { display: flex; gap: var(--sp-2); margin-top: var(--sp-2); flex-wrap: wrap; }
 
 .dd-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: var(--sp-2); }
-.dd-actions { display: flex; flex-wrap: wrap; gap: var(--sp-2); }
+/* 主操作按组平铺：每行一个组，左侧小标签对齐——所有功能一级可见，不搞层级 */
+.dd-actions { display: flex; flex-direction: column; gap: 7px; }
+.dd-g { display: flex; align-items: center; gap: var(--sp-1); flex-wrap: wrap; }
+.dd-g-lbl { flex: none; min-width: 36px; font-size: 11px; color: var(--c-text-3); letter-spacing: .05em; }
 .site-flat { white-space: nowrap; font-size: 12px; padding: 5px 9px; }
+/* 站点「更多」：点击展开其余站点的面板；遮罩只负责点空白关闭，不压暗整页 */
 .dd-sites-more { position: relative; z-index: 41; }
 .dd-sites-more .caret { font-size: 10px; opacity: .7; margin-left: 2px; }
-/* 更多：点击展开，半透明遮罩（.sites-shade）盖住详情页其余内容，只露出站点面板 */
 .dd-sites-more .sites-pop { display: none; }
 .dd-sites-more.open .sites-pop { display: flex; }
-.sites-shade { position: absolute; inset: 0; z-index: 40; background: rgba(0,0,0,.34); }
+.sites-shade { position: absolute; inset: 0; z-index: 40; background: transparent; }
 .sites-pop { position: absolute; top: 100%; left: 0; z-index: 60; min-width: 220px;
-  background: var(--c-bg-pop); border: 1px solid var(--c-border); border-radius: 10px;
-  box-shadow: 0 10px 30px rgba(0,0,0,.28); padding: 6px var(--sp-2) var(--sp-2); flex-direction: column; gap: 2px; }
+  background: var(--c-surface-2); border: 1px solid var(--c-line-strong); border-radius: var(--r-md);
+  box-shadow: var(--sh-3); padding: 6px var(--sp-2) var(--sp-2); flex-direction: column; gap: 2px; }
 .sites-pop-tip { font-size: 11px; color: var(--c-text-3); padding: 2px 6px 6px; }
 .sites-pop-item { display: flex; align-items: center; gap: 6px; text-align: left; width: 100%;
-  border: 0; background: transparent; color: var(--c-text-1); padding: 7px 8px; border-radius: 7px; cursor: pointer; font-size: 13px; }
-.sites-pop-item:hover { background: var(--c-bg-hover); color: var(--c-primary); }
+  border: 0; background: transparent; color: var(--c-text); padding: 7px 8px; border-radius: var(--r-sm);
+  cursor: pointer; font-size: 13px; }
+.sites-pop-item:hover { background: var(--c-surface-3); color: var(--c-primary); }
+
+/* 徽章行的尾部 spacer：把「登记字幕」按钮推到行尾 */
+.chip-list .spacer { flex: 1 1 12px; }
 .dd-rate { display: flex; align-items: center; gap: var(--sp-3); }
 
 .coll-wrap { position: relative; }
@@ -1604,7 +1618,8 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', onKey) })
   .dd-top { gap: var(--sp-3); }
   .dd-cover { width: 120px; }
   .dd-content { padding: var(--sp-3) var(--sp-3) var(--sp-10); }
-  .dd-actions { gap: var(--sp-1); }
+  .dd-actions { gap: 5px; }
+.dd-g-lbl { min-width: 30px; }
   .dd-actions .act { flex: 1 1 auto; }
 }
 

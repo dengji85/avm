@@ -6,6 +6,7 @@ import StorageHealthTab from './maintenance/StorageHealthTab.vue'
 import ScrapeLogsTab from './maintenance/ScrapeLogsTab.vue'
 import SubtitleTab from './maintenance/SubtitleTab.vue'
 import ScrapeFailuresTab from './maintenance/ScrapeFailuresTab.vue'
+import NfoExportTab from './maintenance/NfoExportTab.vue'
 
 // 维护中心子标签：直接绑定全局 state.maintTab，便于跨视图/重渲染保持位置
 const TABS = [
@@ -14,6 +15,7 @@ const TABS = [
   { id: 'subtitle', label: 'maint.subtitle', icon: '💬' },
   { id: 'failures', label: 'maint.failTitle', icon: '🔎' },
   { id: 'logs', label: 'maint.logs', icon: '📜' },
+  { id: 'export', label: 'maint.export', icon: '⤓' },
 ]
 const setTab = (id) => { state.maintTab = id }
 </script>
@@ -39,6 +41,7 @@ const setTab = (id) => { state.maintTab = id }
       <SubtitleTab v-show="state.maintTab === 'subtitle'" />
       <ScrapeFailuresTab v-show="state.maintTab === 'failures'" />
       <ScrapeLogsTab v-show="state.maintTab === 'logs'" />
+      <NfoExportTab v-show="state.maintTab === 'export'" />
     </div>
   </section>
 </template>

@@ -21,6 +21,8 @@ export function useAiAssistant({ movieId, movie, toast, confirm, onChange }) {
   const model = ref('')
   const checking = ref(false)
   const probing = ref(false)
+  // 后端是否已经加载了 agent 能力：老进程不会返回这个字段，据此提示「重启」
+  const agentOk = ref(true)
 
   /* ---------------- 剧情 ---------------- */
   const plot = reactive({
@@ -70,6 +72,7 @@ export function useAiAssistant({ movieId, movie, toast, confirm, onChange }) {
       const r = await aiStatus()
       ready.value = !!r.enabled
       model.value = r.model || ''
+      agentOk.value = !!r.agent
     } catch (e) {
       ready.value = false
     } finally {
@@ -539,7 +542,7 @@ export function useAiAssistant({ movieId, movie, toast, confirm, onChange }) {
 
   // 用 reactive 包裹：模板里直接写 ai.ready / ai.hasDraft 就能拿到值（嵌套 ref 不会自动解包）
   return reactive({
-    ready, model, checking, probing,
+    ready, model, checking, probing, agentOk,
     plot, plotSource, hasDraft,
     tags, pickedTags,
     subs, aiSubs, hasSubtitles,

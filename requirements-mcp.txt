@@ -1,0 +1,7 @@
+# 可选组件：MCP 服务器（把片匣的库能力暴露给外部 AI 客户端）
+#
+# 安装：pip install -r requirements-mcp.txt
+# 运行：python run.py mcp
+#
+# 不装也能正常用片匣，只是 `avm mcp` 会提示缺少依赖。
+mcp>=1.2

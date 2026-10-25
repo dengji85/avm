@@ -29,12 +29,13 @@ from fastapi.responses import (FileResponse, PlainTextResponse, RedirectResponse
                                StreamingResponse)
 
 from . import ai as ai_mod
-from . import (ai_core, ai_extra, ai_jobs, asr, dedupe, dlna, images, nfo as nfo_mod, plugins, providers,
+from . import (ai_core, ai_extra, ai_jobs, asr, dedupe, dlna, emby as emby_mod, images,
+               nfo_writer, plugins, providers,
                scanner, scraper, scrape_diag, store, subprobe, subtext, subtitles, translate, vtt)
 from .config import (COVER_DIR, DATA_DIR, IN_CONTAINER, avatar_dir, _deep_merge,
-                     current_access_token, load_config, public_base_url, update_config)
+                     current_access_token, emby_cfg, load_config, public_base_url, update_config)
 from .db import connect, db, query_all, query_one
-from .jobs import SCAN, SCRAPE, ACTRESS_FETCH
+from .jobs import SCAN, SCRAPE, ACTRESS_FETCH, NFO_EXPORT
 
 router = APIRouter(prefix="/api")
 
@@ -1498,12 +1499,22 @@ def reparse_codes(payload: Dict[str, Any] = Body(default={})) -> Dict[str, Any]:
 # ------------------------------------------------------------------ AI 增强
 @router.get("/ai/status")
 def ai_status() -> Dict[str, Any]:
-    """返回 AI 是否可用（基于当前配置），并附调用统计与提示词版本。"""
+    """返回 AI 是否可用（基于当前配置），并附调用统计与提示词版本。
+
+    model 取「当前实际会用的模型」——池化之后 ai.model 只是遗留字段，不再参与调用，
+    直接回它会让前端徽标显示错模型。
+    """
     cfg = load_config(refresh=True)
     from . import ai_core
+    current = ai_core.AIConfig.from_config(cfg)
     return {
-        "enabled": ai_mod.is_available(cfg),
-        "model": (cfg.get("ai") or {}).get("model", ""),
+        "enabled": current.enabled,
+        "model": current.model,
+        "model_name": current.name,
+        "kind": current.kind,
+        # 能力握手：前端据此判断「后端是不是旧进程」。缺这个字段的老后端会被
+        # 明确提示「请重启」，而不是让用户以为「AI 就是查不出」。
+        "agent": True,
         "stats": ai_core.stats(),
         "prompts": ai_core.prompt_versions(),
     }
@@ -1759,42 +1770,186 @@ def ai_generate_synopsis(movie_id: int,
 def _ai_translate_handler(movie_id: int, payload: Dict[str, Any]) -> Dict[str, Any]:
     cfg = load_config(refresh=True)
     if not ai_mod.is_available(cfg):
-        raise ValueError("AI 未启用：请先在 设置 → AI 中配置接口与模型")
+        raise ValueError("AI 未启用：请先在 AI 中心配置模型并启用")
     target = str(payload.get("target") or "zh-Hans")
     bilingual = bool(payload.get("bilingual"))
     r = translate.translate_movie(movie_id, cfg, target, bilingual)
-    return {"path": r["path"], "chars": r["chars"],
-            "cues": r["cues"], "model": (load_config().get("ai") or {}).get("model", "")}
+    return {"path": r["path"], "chars": r["chars"], "cues": r["cues"],
+            "model": ai_core.AIConfig.from_config(cfg).model}
 
 
 def _ai_plot_handler(movie_id: int, payload: Dict[str, Any]) -> Dict[str, Any]:
     r = _ai_plot_for_movie(movie_id)
-    return {"chars": r["chars"], "model": (load_config().get("ai") or {}).get("model", "")}
+    return {"chars": r["chars"],
+            "model": ai_core.AIConfig.from_config(load_config(refresh=True)).model}
 
 
 ai_jobs.register_handler("translate", _ai_translate_handler)
 ai_jobs.register_handler("plot", _ai_plot_handler)
 
+# 每种任务支持的范围预设：前端据此渲染下拉，后端只做白名单校验
+_AI_SCOPES: Dict[str, List[str]] = {
+    "translate": ["untranslated", "all_subtitled", "failed", "ids", "latest", "filters"],
+    "plot": ["no_plot", "from_meta", "failed", "ids", "latest", "filters"],
+}
 
-def _ai_job_targets(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """把请求体翻译成任务列表：显式 ids 优先，其次「最近 N 部」。"""
-    ids = payload.get("ids") or []
-    if isinstance(ids, str):
-        ids = [s for s in ids.replace("，", ",").split(",") if s.strip()]
+# 翻译目标语言（与 translate.TARGETS 同源，前端下拉直接用它）
+_AI_TARGETS = list(translate.TARGETS)
+
+
+def _parse_ids(raw: Any) -> List[int]:
+    if isinstance(raw, str):
+        raw = [s for s in raw.replace("，", ",").split(",") if s.strip()]
+    out: List[int] = []
+    for i in raw or []:
+        s = str(i).strip()
+        if s.isdigit():
+            out.append(int(s))
+    return out
+
+
+def _filter_clauses(filters: Dict[str, Any]) -> tuple:
+    """把前端筛选条件翻成 SQL 片段（只支持媒体库常用的那几项）。"""
+    clauses: List[str] = []
+    args: List[Any] = []
+    f = filters or {}
+    if f.get("genre"):
+        clauses.append("EXISTS(SELECT 1 FROM movie_genre mg JOIN genres g ON g.id=mg.genre_id "
+                       "WHERE mg.movie_id=m.id AND g.name=?)")
+        args.append(str(f["genre"]))
+    if f.get("actress"):
+        clauses.append("EXISTS(SELECT 1 FROM movie_actress ma JOIN actresses a "
+                       "ON a.id=ma.actress_id WHERE ma.movie_id=m.id AND a.name=?)")
+        args.append(str(f["actress"]))
+    if f.get("studio"):
+        clauses.append("EXISTS(SELECT 1 FROM studios st WHERE st.id=m.studio_id AND st.name=?)")
+        args.append(str(f["studio"]))
+    if f.get("series"):
+        clauses.append("EXISTS(SELECT 1 FROM series se WHERE se.id=m.series_id AND se.name=?)")
+        args.append(str(f["series"]))
+    if f.get("year"):
+        clauses.append("m.year = ?")
+        args.append(int(f["year"]))
+    if f.get("q"):
+        clauses.append("(m.code LIKE ? OR m.title LIKE ?)")
+        like = "%" + str(f["q"]) + "%"
+        args.extend([like, like])
+    return clauses, args
+
+
+def _ai_scope_ids(kind: str, payload: Dict[str, Any]) -> List[int]:
+    """按范围预设解析出影片 id 列表（新的批量任务入口）。"""
+    scope = str(payload.get("scope") or "").strip()
+    if not scope:
+        # 兼容老请求体：{ids} 或 {latest}
+        scope = "ids" if (payload.get("ids") or payload.get("latest")) else ""
+    if scope not in _AI_SCOPES.get(kind, []):
+        raise ValueError("不支持的范围：%s（可用：%s）"
+                         % (scope or "空", "/".join(_AI_SCOPES.get(kind, []))))
+
+    ids = _parse_ids(payload.get("ids"))
     if ids:
-        return [{"movie_id": int(i)} for i in ids if str(i).strip().isdigit()]
-    latest = int(payload.get("latest") or 0)
-    if latest <= 0:
-        raise ValueError("请提供影片 id 列表或 latest 数量")
+        return ids[:500]
+
+    target = str(payload.get("target") or "zh-Hans")
+    clauses: List[str] = []
+    args: List[Any] = []
+
+    if scope == "failed":
+        from_batch = str(payload.get("from_batch") or "").strip()
+        with db() as conn:
+            if not from_batch:
+                last = query_one(
+                    conn,
+                    "SELECT id FROM ai_batches WHERE kind=? ORDER BY created_at DESC, "
+                    "rowid DESC LIMIT 1", (kind,))
+                if not last:
+                    return []
+                from_batch = last["id"]
+            rows = query_all(
+                conn,
+                "SELECT DISTINCT movie_id FROM ai_jobs WHERE batch_id=? AND status IN "
+                "('failed','skipped','cancelled')", (from_batch,))
+        return [int(r["movie_id"]) for r in rows][:500]
+
+    if kind == "translate" and scope in ("untranslated", "all_subtitled"):
+        clauses.append("(m.embed_sub=1 OR EXISTS(SELECT 1 FROM movie_subtitles s "
+                       "WHERE s.movie_id=m.id))")
+        if scope == "untranslated":
+            clauses.append("NOT EXISTS(SELECT 1 FROM movie_subtitles s2 "
+                           "WHERE s2.movie_id=m.id AND s2.lang=?)")
+            args.append(target)
+    elif kind == "plot":
+        if scope == "no_plot":
+            clauses.append("COALESCE(TRIM(m.plot), '') = ''")
+        elif scope == "from_meta":
+            clauses.append("m.plot_source = 'ai-meta'")
+
+    f_clauses, f_args = _filter_clauses(payload.get("filters") or {})
+    clauses.extend(f_clauses)
+    args.extend(f_args)
+
+    limit = payload.get("limit")
+    try:
+        n = int(limit or 200)
+    except (TypeError, ValueError):
+        n = 200
+    n = max(1, min(500, n))
+
+    sql = "SELECT m.id FROM movies m"
+    if clauses:
+        sql += " WHERE " + " AND ".join(clauses)
+    sql += " ORDER BY m.id DESC LIMIT ?"
     with db() as conn:
-        rows = conn.execute(
-            "SELECT id FROM movies ORDER BY id DESC LIMIT ?", (min(200, latest),)).fetchall()
-    return [{"movie_id": int(r["id"])} for r in rows]
+        rows = query_all(conn, sql, tuple(args) + (n,))
+    return [int(r["id"]) for r in rows]
+
+
+@router.post("/ai/jobs/preview")
+def ai_jobs_preview(payload: Dict[str, Any] = Body(default={})) -> Dict[str, Any]:
+    """只估算命中数量与样例，不提交任务（用于新建任务面板的「预估」）。"""
+    kind = str(payload.get("kind") or "").strip()
+    if kind not in ai_jobs.handlers():
+        raise HTTPException(status_code=400, detail="未知任务类型：%s" % kind)
+    try:
+        ids = _ai_scope_ids(kind, payload)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    sample: List[Dict[str, Any]] = []
+    if ids:
+        ph = ",".join("?" for _ in ids[:10])
+        with db() as conn:
+            sample = query_all(
+                conn,
+                "SELECT id, code, title, plot, embed_sub FROM movies WHERE id IN (%s) "
+                "ORDER BY id DESC" % ph, tuple(ids[:10]))
+    # 粗估：翻译按每部约 8k 字、简介按每次约 6k 字（真实值取决于字幕长度）
+    per = 8000 if kind == "translate" else 6000
+    return {"ok": True, "kind": kind, "count": len(ids),
+            "sample": sample, "estimate_chars": len(ids) * per, "ids": ids}
 
 
 @router.get("/ai/jobs")
-def ai_jobs_status() -> Dict[str, Any]:
-    return ai_jobs.status()
+def ai_jobs_list(limit: int = 20, offset: int = 0) -> Dict[str, Any]:
+    """批次列表（当前 + 历史）+ 全局配置回显。"""
+    active = ai_jobs.active_batch()
+    out = ai_jobs.status()
+    out.update({
+        "batches": ai_jobs.batches(limit=limit, offset=offset),
+        "active": active,
+        "targets": _AI_TARGETS,
+        "scopes": _AI_SCOPES,
+    })
+    return out
+
+
+@router.get("/ai/jobs/{batch_id}")
+def ai_jobs_detail(batch_id: str, status: str = "", page: int = 1,
+                   size: int = 50) -> Dict[str, Any]:
+    try:
+        return ai_jobs.batch_detail(batch_id, status=status, page=page, size=size)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
 
 
 @router.post("/ai/jobs")
@@ -1805,17 +1960,56 @@ def ai_jobs_create(payload: Dict[str, Any] = Body(default={})) -> Dict[str, Any]
                             detail="未知任务类型：%s（可用：%s）"
                                    % (kind, "/".join(ai_jobs.handlers())))
     try:
-        items = _ai_job_targets(payload)
-        return ai_jobs.submit(kind, items,
-                              payload={"target": str(payload.get("target") or "zh-Hans"),
-                                       "bilingual": bool(payload.get("bilingual"))})
+        ids = _ai_scope_ids(kind, payload)
+        if not ids:
+            return {"ok": True, "batch_id": "", "count": 0,
+                    "message": "按当前条件没有命中任何影片"}
+        items = [{"movie_id": i} for i in ids]
+        batch_id, job_ids = ai_jobs.submit(
+            kind, items,
+            payload={"target": str(payload.get("target") or "zh-Hans"),
+                     "bilingual": bool(payload.get("bilingual"))},
+            meta={"scope": str(payload.get("scope") or ""),
+                  "filters": payload.get("filters") or {},
+                  "limit": len(ids),
+                  "concurrency": payload.get("concurrency"),
+                  "budget": payload.get("budget")})
+        return {"ok": True, "batch_id": batch_id, "count": len(job_ids)}
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
 
+@router.post("/ai/jobs/{batch_id}/cancel")
+def ai_jobs_cancel(batch_id: str) -> Dict[str, Any]:
+    try:
+        return ai_jobs.cancel_batch(batch_id)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+@router.post("/ai/jobs/{batch_id}/retry")
+def ai_jobs_retry(batch_id: str, payload: Dict[str, Any] = Body(default={})) -> Dict[str, Any]:
+    try:
+        return ai_jobs.retry_batch(batch_id, overrides=payload)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.delete("/ai/jobs/{batch_id}")
+def ai_jobs_delete(batch_id: str) -> Dict[str, Any]:
+    return ai_jobs.delete_batch(batch_id)
+
+
 @router.post("/ai/jobs/cancel")
-def ai_jobs_cancel() -> Dict[str, Any]:
-    return ai_jobs.cancel_all()
+def ai_jobs_cancel_active() -> Dict[str, Any]:
+    """兼容旧接口：取消当前正在跑的批次。"""
+    active = ai_jobs.active_batch()
+    if not active:
+        return {"ok": True, "cancelled": 0}
+    try:
+        return ai_jobs.cancel_batch(active["id"])
+    except ValueError:
+        return {"ok": True, "cancelled": 0}
 
 
 # ------------------------------------------------------------------ AI 字幕翻译
@@ -1899,7 +2093,16 @@ def ai_similar(movie_id: int, limit: int = 5) -> Dict[str, Any]:
 
 @router.get("/ai/glossary")
 def ai_glossary_list() -> Dict[str, Any]:
-    return {"items": translate.list_glossary(), "targets": list(translate.TARGETS)}
+    items = translate.list_glossary()
+    return {
+        "items": items,
+        "targets": list(translate.TARGETS),
+        # 供前端提示「通用 N 条 / 指定语言 M 条」
+        "counts": {
+            "total": len(items),
+            "shared": sum(1 for i in items if not i.get("lang") or i.get("lang") == "any"),
+        },
+    }
 
 
 @router.put("/ai/glossary")
@@ -1907,7 +2110,73 @@ def ai_glossary_save(payload: Dict[str, Any] = Body(default={})) -> Dict[str, An
     items = payload.get("items") or []
     if not isinstance(items, list):
         raise HTTPException(status_code=400, detail="items 应为数组")
-    return {"ok": True, **translate.replace_glossary(items)}
+    res = translate.replace_glossary(items)
+    return {"ok": True, **res}
+
+
+# 假名（平假名 / 片假名 / 半角片假名）：只有这类名字才需要「保持原名」兜底，
+# 纯汉字名模型一般不会乱改，硬加条目反而会挤占术语表额度。
+_KANA_RE = re.compile(r"[\u3040-\u30ff\u31f0-\u31ff\uff66-\uff9f]")
+
+
+@router.get("/ai/glossary/suggest")
+def ai_glossary_suggest(limit: int = 200) -> Dict[str, Any]:
+    """从库里的女优 / 系列生成术语候选（不落库，前端确认后写进编辑框）。
+
+    三类候选，都是「库里有依据」的，不做机器翻译猜测：
+      * alias  → name ：化名 / 别名映射到正式名（最有用）
+      * 假名name → 同名：防止音译在不同批次里写成不同结果
+      * 系列名（≥2 部）→ 同名：同一系列在不同影片里不被译成不同中文
+    """
+    limit = max(10, min(500, int(limit or 200)))
+    with db() as conn:
+        alias_rows = query_all(
+            conn,
+            "SELECT a.name AS name, a.alias AS alias, COUNT(ma.movie_id) AS n "
+            "FROM actresses a JOIN movie_actress ma ON ma.actress_id = a.id "
+            "WHERE TRIM(COALESCE(a.alias, '')) <> '' AND TRIM(a.alias) <> TRIM(a.name) "
+            "GROUP BY a.id ORDER BY n DESC LIMIT ?", (limit,))
+        kana_rows = query_all(
+            conn,
+            "SELECT a.name AS name, COUNT(ma.movie_id) AS n "
+            "FROM actresses a JOIN movie_actress ma ON ma.actress_id = a.id "
+            "GROUP BY a.id ORDER BY n DESC", ())
+        series_rows = query_all(
+            conn,
+            "SELECT s.name AS name, COUNT(m.id) AS n FROM series s "
+            "JOIN movies m ON m.series_id = s.id "
+            "GROUP BY s.id HAVING n >= 2 ORDER BY n DESC LIMIT ?", (limit,))
+        existing = {str(r["term"]).strip()
+                    for r in query_all(conn, "SELECT term FROM ai_glossary")}
+
+    items: List[Dict[str, Any]] = []
+    seen = set()
+
+    def add(term: Any, translation: Any, source: str) -> None:
+        t = str(term or "").strip()
+        tr = str(translation or "").strip()
+        if not t or not tr or t in seen or t in existing:
+            return
+        seen.add(t)
+        items.append({"term": t, "translation": tr, "source": source})
+
+    for r in alias_rows:
+        add(r["alias"], r["name"], "alias")
+    for r in kana_rows:
+        if len(items) >= limit:
+            break
+        if _KANA_RE.search(str(r["name"] or "")):
+            add(r["name"], r["name"], "kana")
+    for r in series_rows:
+        if len(items) >= limit:
+            break
+        add(r["name"], r["name"], "series")
+
+    items = items[:limit]
+    counts = {"alias": 0, "kana": 0, "series": 0}
+    for it in items:
+        counts[it["source"]] = counts.get(it["source"], 0) + 1
+    return {"ok": True, "items": items, "counts": {**counts, "total": len(items)}}
 
 
 @router.get("/movies/{movie_id}/subtitles/{sub_id}/file")
@@ -2426,6 +2695,29 @@ def ai_search_intent(payload: Dict[str, Any] = Body(default={})) -> Dict[str, An
     return {"ok": True, "conditions": cond}
 
 
+@router.post("/ai/library-run")
+def ai_library_run(payload: Dict[str, Any] = Body(default={})) -> Dict[str, Any]:
+    """按结构化规格执行问库查询：**不经过模型**，供「快捷提问」按钮使用。
+
+    快捷提问本身就是已知的查询（如「评分最高还没看」= search + unwatched + rating_desc），
+    再让模型解析一遍纯属浪费：既慢又花 token，AI 关掉时还会直接不可用。
+    polish=true 时才会在本地执行后调用模型做「AI 解读」（仍只发送聚合摘要）。
+    """
+    from . import ai_library
+    kind = str(payload.get("kind") or "search").strip()
+    params = payload.get("params") if isinstance(payload.get("params"), dict) else {}
+    with db() as conn:
+        res = ai_library.execute_spec(conn, {"kind": kind, "params": params})
+    res["privacy"] = "off"
+    if payload.get("polish") and res.get("kind") == "rows":
+        cfg = load_config(refresh=True)
+        c = ai_core.AIConfig.from_config(cfg)
+        mode = ai_library._polish_mode(cfg, c)
+        if mode != "off":
+            ai_library._polish(str(payload.get("question") or ""), res, cfg, c, mode)
+    return res
+
+
 @router.post("/ai/library-qa")
 def ai_library_qa(payload: Dict[str, Any] = Body(default={})) -> Dict[str, Any]:
     """问库：自然语言问题 → 查询意图 → 本地执行。
@@ -2445,6 +2737,68 @@ def ai_library_qa(payload: Dict[str, Any] = Body(default={})) -> Dict[str, Any]:
         raise HTTPException(status_code=502, detail=str(e))
 
 
+@router.post("/ai/agent")
+def ai_agent_run(payload: Dict[str, Any] = Body(default={})) -> Dict[str, Any]:
+    """内置 agent：多步工具调用（查字典 → 检索 → 换词重试 → 一句话结论）。
+
+    与 /ai/library-qa 的差别：那边是「一次规划 + 一次重规划」，这边允许模型真正
+    连续调工具；步数与调用次数有上限，全部只读本地库、不联网。
+    """
+    question = str(payload.get("question", "")).strip()
+    if not question:
+        raise HTTPException(status_code=400, detail="question 为空")
+    from . import agent as agent_mod
+    cfg = load_config(refresh=True)
+    movie = payload.get("movie") if isinstance(payload.get("movie"), dict) else None
+    try:
+        return agent_mod.run_agent(question, cfg, movie=movie)
+    except ai_core.AiError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    except Exception as e:                               # noqa: BLE001 接口层统一兜底
+        raise HTTPException(status_code=502, detail=str(e))
+
+
+@router.post("/ai/agent/stream")
+def ai_agent_stream(payload: Dict[str, Any] = Body(default={})) -> StreamingResponse:
+    """同 /ai/agent，但边跑边推：每完成一次工具调用推一条 ``step``，结论逐字推 ``delta``。
+
+    用 SSE 而不是 WebSocket：单向、纯文本、断开即结束，本地单用户场景够用，
+    也不用改现有的令牌校验与反向代理配置。
+    """
+    question = str(payload.get("question", "")).strip()
+    if not question:
+        raise HTTPException(status_code=400, detail="question 为空")
+    from . import agent as agent_mod
+    cfg = load_config(refresh=True)
+    movie = payload.get("movie") if isinstance(payload.get("movie"), dict) else None
+
+    def gen():
+        try:
+            for ev in agent_mod.iter_agent(question, cfg, movie=movie):
+                yield "data: %s\n\n" % json.dumps(ev, ensure_ascii=False)
+        except Exception as e:                       # noqa: BLE001 流里出错只能作为事件下发
+            yield "data: %s\n\n" % json.dumps(
+                {"type": "error", "message": str(e)[:300]}, ensure_ascii=False)
+
+    return StreamingResponse(gen(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache",
+                                      "X-Accel-Buffering": "no"})
+
+
+@router.get("/ai/websearch/status")
+def ai_websearch_status() -> Dict[str, Any]:
+    """联网搜索后端配置状态（不发起任何网络请求）。"""
+    from . import websearch as ws_mod
+    return ws_mod.status(load_config(refresh=True))
+
+
+@router.post("/ai/websearch/check")
+def ai_websearch_check(payload: Dict[str, Any] = Body(default={})) -> Dict[str, Any]:
+    """联网搜索连通性自检：把「没开 JSON 输出」「限流」「Key 无效」翻译成人话。"""
+    from . import websearch as ws_mod
+    return ws_mod.check(load_config(refresh=True), str(payload.get("query") or "test"))
+
+
 @router.post("/movies/{movie_id}/scrape")
 def scrape_single(movie_id: int, payload: Dict[str, Any] = Body(default={})) -> Dict[str, Any]:
     cfg = load_config(refresh=True)
@@ -2462,20 +2816,110 @@ def scrape_single(movie_id: int, payload: Dict[str, Any] = Body(default={})) -> 
 # ------------------------------------------------------------------ 导入导出
 
 
+_SKIP_REASONS = {
+    "disabled": "导出功能未开启（设置 → 媒体库 → 导出到媒体目录）",
+    "no_file": "该影片没有可用的视频文件",
+    "no_dir": "视频所在目录不存在",
+    "read_only": "目标目录不可写（Docker 常以只读方式挂载媒体库，需改为 rw）",
+    "exists_skip": "目录里已有 NFO，按当前策略跳过（可改为「合并」或「覆盖」）",
+    "no_cover": "本地暂无封面，只写了 NFO",
+}
+
+
 @router.post("/movies/{movie_id}/nfo")
-def export_nfo(movie_id: int) -> Dict[str, Any]:
+def export_nfo(movie_id: int, payload: Dict[str, Any] = Body(default={})) -> Dict[str, Any]:
+    """把单部影片的 NFO + 封面写到视频所在目录（手动导出始终有效，不受总开关限制）。"""
+    cfg = load_config(refresh=True)
     with db() as conn:
         movie = store.movie_detail(conn, movie_id)
-    if not movie:
-        raise HTTPException(404, "影片不存在")
-    if not movie["files"]:
-        raise HTTPException(400, "该影片没有关联文件")
-    target = Path(movie["files"][0]["path"]).with_suffix(".nfo")
-    try:
-        target.write_text(nfo_mod.build_nfo(movie), encoding="utf-8")
-    except Exception as exc:
-        raise HTTPException(500, f"写入失败：{exc}")
-    return {"ok": True, "path": str(target)}
+        if not movie:
+            raise HTTPException(404, "影片不存在")
+        if not movie["files"]:
+            raise HTTPException(400, "该影片没有关联文件")
+        res = nfo_writer.export_detail(movie, cfg=cfg, force=True)
+
+    if res.get("error") and not res.get("ok"):
+        raise HTTPException(500, f"写入失败：{res['error']}")
+    return {
+        "ok": bool(res.get("ok")),
+        # 兼容旧前端字段：优先给 NFO 路径，没有则退回目录
+        "path": res.get("nfo") or (res.get("dirs") or [""])[0],
+        "nfo": res.get("nfo", ""),
+        "poster": res.get("poster", ""),
+        "fanart": res.get("fanart", ""),
+        "skipped": res.get("skipped", ""),
+        "message": _SKIP_REASONS.get(res.get("skipped") or "", ""),
+    }
+
+
+@router.post("/nfo/export")
+def nfo_export_batch(payload: Dict[str, Any] = Body(default={})) -> Dict[str, Any]:
+    """批量导出：不传 ids 时导出全库已刮削的影片。后台任务，前端轮询 /nfo/export/status。"""
+    ids = payload.get("ids") or []
+    force = bool(payload.get("force", False))
+    only_scraped = bool(payload.get("only_scraped", True)) and not force
+    with db() as conn:
+        targets = nfo_writer.select_targets(conn, ids, only_scraped=only_scraped)
+    if not targets:
+        return {"ok": True, "total": 0, "message": "没有需要导出的影片"}
+    if not NFO_EXPORT.start():
+        raise HTTPException(409, "已有导出任务在执行中")
+    cfg = load_config(refresh=True)
+
+    def worker() -> None:
+        try:
+            nfo_writer.run_export(targets, cfg, force=force, job=NFO_EXPORT)
+        except Exception as exc:  # run_export 内部已兜底，这里再保一层
+            NFO_EXPORT.error(str(exc))
+            NFO_EXPORT.finish(f"导出失败：{exc}")
+
+    threading.Thread(target=worker, name="nfo-export", daemon=True).start()
+    return {"ok": True, "total": len(targets)}
+
+
+@router.get("/nfo/export/status")
+def nfo_export_status() -> Dict[str, Any]:
+    return NFO_EXPORT.snapshot()
+
+
+@router.post("/nfo/export/cancel")
+def nfo_export_cancel() -> Dict[str, Any]:
+    """停止批量导出：当前这部写完即停，不会留下半截文件；已导出的不受影响。"""
+    NFO_EXPORT.cancel()
+    return {"ok": True, "running": bool(getattr(NFO_EXPORT, "running", False))}
+
+
+# ------------------------------------------------------------------ Emby 联动
+
+
+@router.get("/emby/status")
+def emby_status() -> Dict[str, Any]:
+    """只回「是否已配置」+ 最近一次刷新结果，绝不下发 API Key。"""
+    c = emby_cfg(load_config(refresh=True))
+    return {
+        "configured": emby_mod.configured(c),
+        "base_url": c.get("base_url") or "",
+        "has_key": bool(str(c.get("api_key") or "").strip()),
+        "last": emby_mod.last_result(),
+    }
+
+
+@router.post("/emby/test")
+def emby_test(payload: Dict[str, Any] = Body(default={})) -> Dict[str, Any]:
+    """测试连接：允许带上未保存的地址/Key 先试，避免用户必须先保存。"""
+    c = emby_cfg(load_config(refresh=True))
+    if str(payload.get("base_url") or "").strip():
+        c["base_url"] = str(payload["base_url"]).strip()
+    if str(payload.get("api_key") or "").strip():
+        c["api_key"] = str(payload["api_key"]).strip()
+    return emby_mod.test_connection(c)
+
+
+@router.post("/emby/refresh")
+def emby_refresh() -> Dict[str, Any]:
+    res = emby_mod.refresh_library(load_config(refresh=True))
+    emby_mod.note_result(res)
+    return res
 
 
 def _gen_previews_sync(movie_id: int, target: str, quality: str = None):
@@ -3011,11 +3455,53 @@ def get_config() -> Dict[str, Any]:
     if isinstance(server, dict):
         for field in ("access_token", "totp_secret", "totp_recovery", "totp_last_step"):
             server.pop(field, None)
+    # emby.api_key —— 第三方媒体服务器的长期凭据，同样不随配置下发
+    emby_section = cfg.get("emby")
+    if isinstance(emby_section, dict):
+        emby_section.pop("api_key", None)
+    # AI 密钥：ai.api_key 与模型池里每条 models[].api_key 都不下发。
+    # 前端改模型走 /ai/models（密钥用掩码回填），AI 中心改隐私开关只写 insights 字段，
+    # 都不依赖这里返回明文。
+    ai_section = cfg.get("ai")
+    if isinstance(ai_section, dict):
+        ai_section.pop("api_key", None)
+        for m in (ai_section.get("models") or []):
+            if isinstance(m, dict):
+                m.pop("api_key", None)
     return cfg
 
 
 @router.put("/config")
 def put_config(payload: Dict[str, Any] = Body(default={})) -> Dict[str, Any]:
+    # emby.api_key 不下发前端，前端保存设置时带回来的是空串 = 「没有修改」，
+    # 直接落盘会把用户已填的 Key 抹掉，这里显式剔除。
+    emby_patch = payload.get("emby")
+    if isinstance(emby_patch, dict) and not str(emby_patch.get("api_key") or "").strip():
+        emby_patch.pop("api_key", None)
+    # 同理：ai.api_key 与模型条目里的 api_key 缺省 = 「没有修改」。
+    # 模型列表是整体替换的，若条目里没有 api_key，按 name 沿用已保存的密钥，
+    # 避免「把整份配置 PUT 回来」这种调用把密钥抹掉。
+    ai_patch = payload.get("ai")
+    if isinstance(ai_patch, dict):
+        if not str(ai_patch.get("api_key") or "").strip():
+            ai_patch.pop("api_key", None)
+        models = ai_patch.get("models")
+        if isinstance(models, list) and models:
+            saved = {
+                str(m.get("name") or ""): m.get("api_key")
+                for m in ((load_config().get("ai") or {}).get("models") or [])
+                if isinstance(m, dict)
+            }
+            for m in models:
+                if not isinstance(m, dict):
+                    continue
+                if str(m.get("api_key") or "").strip():
+                    continue
+                keep = saved.get(str(m.get("name") or ""))
+                if keep:
+                    m["api_key"] = keep
+                else:
+                    m.pop("api_key", None)
     return update_config(payload)
 
 
