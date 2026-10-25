@@ -21,7 +21,7 @@
   <a href="#why-do-you-need-filmbox">Why you need it</a> ·
   <a href="#core-features">Core features</a> ·
   <a href="#why-filmbox-instead-of-other-tools">Why choose it</a> ·
-  <a href="#highlights-in-1100">Highlights</a> ·
+  <a href="#highlights-unreleased">Highlights</a> ·
   <a href="#download--install">Download</a> ·
   <a href="#quick-start">Quick start</a>
 </p>
@@ -68,7 +68,7 @@ In one sentence: **your collection deserves a proper "library", not just a pile 
 - **🔍 Non-standard ID recognition**: names like `IRO061C`, `SONE-760CH`, `300MAAN-123` — "letters glued to digits, with version tails" — are normalized to `IRO-061` / `SONE-760`, and automatically tag subtitle (`-C`) / uncensored (`-U`) / VR / 4K / multi-part.
 - **🧹 Multi-version merge + content dedup**: uncensored/censored/director's cut/subtitled are auto-grouped into one title; precise duplicates identified by "size + content hash". **Obvious splits (`-cd1`/`(1)`/`-a`) are recognized as a set and never misjudged as duplicates or wrongly deleted.**
 - **🖼 Metadata scraping**: pluggable data sources (JavBus / JavDB / AV-Wiki / local `.nfo` / custom JSON·HTML rules) fill in cover, actresses, genres, series, studio, rating, synopsis; manual entry works when scraping fails.
-- **🤖 Optional AI enhancement**: compatible with any OpenAI-protocol endpoint — fill a key for cloud, or use local Ollama key-free. Natural-language search like "find a few story-driven ones where the actress is a teacher" pulls them right up; one-click synopsis generation and tag completion on the detail page. Auto-degrades to plain search when AI is disabled.
+- **🤖 Optional AI enhancement**: compatible with any OpenAI-protocol endpoint (cloud key or local Ollama, key-free); auto-degrades when disabled. A ✨ assistant bubble works on any page: natural-language movie search, synopsis/tag generation, subtitle translation, plot Q&A with timestamp citations, and **library Q&A** (taste profile / watch stats / library health — stats run locally, the model only parses your question, library data never leaves the machine).
 - **📺 Zero-config playback monitoring**: hand a file to VLC / PotPlayer / MPC / mpv and the background auto-records "how long watched, where stopped, finished or not"; resume progress, similar recommendations, and "my viewing" preference analysis so the next pick is easy.
 - **🩺 Data health checkup**: six media issues (missing file / incomplete parts / missing cover / placeholder image / unrecognized ID / suspected duplicate) + four low-quality screenings (ad samples / low bitrate / inferior same-ID version / corrupted), one-click keep-best and clean-up.
 - **🎴 Gallery curation**: card wall + actress wall + tag cloud + smart playlists (auto-aggregated by rules) + similar recommendations, turning "hoarding" into "something you can pull out and watch".
@@ -98,19 +98,13 @@ Market options fall into two rough camps: **general media scrapers** (TinyMediaM
 
 ---
 
-## 🌟 Highlights in 1.11.0
+## 🌟 Highlights (unreleased)
 
-> Release date: 2026-08-15
+- **🤖 AI assistant library mode**: summon the ✨ bubble on any page; natural-language movie search, "what to watch tonight" taste-weighted picks, and library Q&A (taste profile / watch stats / library health) — stats run locally, the model only parses your question, **library data never leaves the machine**; an optional "AI summary" turns stats into prose (aggregate numbers only, off by default).
+- **🧩 Extension components**: install FFmpeg and speech-recognition components/models with one click from Settings (resumable downloads, multi-source fallback, offline import, uninstall) — no command line needed.
+- **🔊 Speech dialogue + AI plot without subtitles**: extract dialogue on the detail page for AI plot understanding; movies without subtitles get AI synopses from metadata.
+- **🔍 Transparent AI call log**: source labels (in-app / external / background), full prompts & replies inspectable, one-click clear.
 
-- **🔎 Scrape-failure reason panel**: the maintenance center gains a "Scrape Failure Reasons" Tab that turns the old "scrape failed = black box" into a visual diagnosis. Each failed title shows **per-source details** (status + reason per data source) with an overall classification and suggested action; failures are grouped-counted into five buckets — anti-bot block / network error / source has no such title / parse failure / bad ID — so you can tell at a glance whether "the source is down" or "the title truly isn't there".
-- **One-click retry + re-scrape with another source**: only re-run transient network/blocked items (stable misses untouched), or pick titles and a specific data source (e.g. switch to av-wiki) to re-fetch and bypass the blocked site.
-- **💬 Subtitle matching now picks files directly**: on the maintenance page click "Choose files" to upload subtitles, matched to library titles by ID and one-click aligned/renamed (with copy-to-keep-original support).
-- **🧹 Repeat detection strengthens split recognition**: beyond `_1`/`-cd1`/`.part3`, added bracket `(1)`, `[2]`, single-letter `-a`, and resolution-tagged `1080p-1` split detection; an ID's trailing digit is no longer mistaken for a sequence number.
-- **🔔 About-page version check**: hooks into GitHub Releases, shows current/latest version with release notes, supports custom update sources.
-- **📡 Remote access as its own tab**: multi-address click-to-switch QR generation, custom token, firewall-pass hints.
-- **⏱ Scheduled auto-scan**: periodic background incremental import by minute interval.
-
-Full changelog in **[`CHANGELOG.md`](CHANGELOG.md)**.
 
 ---
 
@@ -192,6 +186,34 @@ python run.py serve            # serves web_dist/ directly
 ```bash
 python build.py                # produces dist/片匣/片匣.exe
 ```
+
+---
+
+## 🤖 AI enhancement guide (optional)
+
+> AI runs on your own endpoint (cloud key or local Ollama, key-free). When disabled, AI features degrade to rule/stats versions and everything else keeps working. Configure in the **AI Center** (models / prompts / call log / glossary).
+
+### AI assistant (✨ bubble, bottom-right)
+
+Open it from any page; once a movie detail is open, the assistant carries that movie's context.
+
+- **Movie mode** (context present): AI synopsis (from subtitles, or metadata when none), tag suggestions, subtitle translation, plot Q&A with `[mm:ss]` citations, similar recommendations.
+- **Library mode** (no context): ask your whole collection —
+  - **Natural-language search**: "high-rated films of actress X", "S1 costume dramas" → parsed into filters → results open straight into details;
+  - **Library Q&A**: "my favourite genres", "how many watched", "how many lack plots", "free disk space" — stats run locally, **the model only parses your question, library data never leaves the machine**;
+  - **What to watch tonight**: taste-weighted picks from watch history, zero tokens.
+- **Privacy**: every request and reply is visible (and clearable) in **AI Center → Call log**; the optional "AI summary" is off by default — cloud models only ever receive aggregate numbers, local Ollama is automatic full mode.
+
+### Extension components (Settings → Components)
+
+FFmpeg and speech recognition are installed on demand, fully in the UI — no command line:
+
+1. **FFmpeg** (~100MB): cover frames, previews, embedded-subtitle detection and browser-playback remux depend on it → one-click install.
+2. **Speech recognition** (~170MB components + ~460MB small model): both ready → "Extract dialogue" on a movie detail → AI understands the plot from dialogue.
+3. Cannot download / offline: **manually import** official zips or existing folders; relocate the component root to another drive.
+4. The Docker image ships FFmpeg preinstalled; speech components install the same way in containers (on the mounted volume, survives image upgrades).
+
+Platform-by-platform guide (Windows portable / source / Docker NAS / offline) in **[docs/扩展组件手册.md](docs/扩展组件手册.md)**.
 
 ---
 
