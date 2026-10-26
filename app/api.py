@@ -773,7 +773,8 @@ def sniff_all_covers() -> Dict[str, Any]:
 def extract_cover(movie_id: int) -> Dict[str, Any]:
     """从影片视频中抽一帧作为封面（未刮削到封面的影片可用）。"""
     cfg = load_config()
-    ffmpeg = (cfg.get("ffmpeg_path") or "ffmpeg").strip() or "ffmpeg"
+    from .ext_components import ffmpeg_exe
+    ffmpeg = ffmpeg_exe(cfg)
     with db() as conn:
         mv = store.movie_detail(conn, movie_id)
         if not mv:
@@ -792,7 +793,8 @@ def extract_cover(movie_id: int) -> Dict[str, Any]:
 def extract_all_covers() -> Dict[str, Any]:
     """批量：为所有「没有封面」的影片从视频抽帧生成封面。"""
     cfg = load_config()
-    ffmpeg = (cfg.get("ffmpeg_path") or "ffmpeg").strip() or "ffmpeg"
+    from .ext_components import ffmpeg_exe
+    ffmpeg = ffmpeg_exe(cfg)
     with db() as conn:
         ids = [r["id"] for r in query_all(
             conn, "SELECT id FROM movies WHERE cover = '' AND has_code = 1")]
@@ -2925,7 +2927,8 @@ def emby_refresh() -> Dict[str, Any]:
 def _gen_previews_sync(movie_id: int, target: str, quality: str = None):
     """同步生成并落库预览图（可在共享线程池内异步运行），返回 (paths, error)。"""
     cfg = load_config()
-    ffmpeg = (cfg.get("ffmpeg_path") or "ffmpeg").strip() or "ffmpeg"
+    from .ext_components import ffmpeg_exe
+    ffmpeg = ffmpeg_exe(cfg)
     q = (quality or cfg.get("previews_quality") or "smart").strip() or "smart"
     out_dir = COVER_DIR / "preview" / str(movie_id)
     try:
@@ -4020,6 +4023,28 @@ def api_list_collections() -> Dict[str, Any]:
 def api_list_tags() -> Dict[str, Any]:
     with db() as conn:
         return {"items": store.list_tags(conn)}
+
+
+@router.post("/movies/{movie_id}/tags/ai-promote")
+def promote_ai_tags(movie_id: int, payload: Dict[str, Any] = Body(default={})) -> Dict[str, Any]:
+    """AI 建议转正：新标签以 source='ai' 入库，已有标签只加关联；随后清待定区。"""
+    names = payload.get("names") or []
+    with db() as conn:
+        if not store.movie_detail(conn, movie_id):
+            raise HTTPException(status_code=404, detail="影片不存在")
+        r = store.promote_ai_tags(conn, movie_id, names)
+        r["movie"] = store.movie_detail(conn, movie_id)
+        return r
+
+
+@router.post("/tags/cleanup")
+def api_cleanup_tags(payload: Dict[str, Any] = Body(default={})) -> Dict[str, Any]:
+    """按来源批量删除标签（含全部影片关联）。用于清理 AI 产生的标签。"""
+    try:
+        with db() as conn:
+            return store.cleanup_tags_by_source(conn, str(payload.get("source") or ""))
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
 
 
 @router.post("/tags/rename")

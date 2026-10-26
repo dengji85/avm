@@ -114,13 +114,23 @@ async function submitPicked() {
 
 onMounted(() => { if (open.value && !collList.value.length) load() })
 
-// 菜单用 fixed 定位在 body 上，滚动/缩放时位置会错位，统一关闭。
-function onReflow() { if (open.value) open.value = false }
+// 菜单 fixed 定位在 body 上：滚动时重新定位跟随按钮（而不是粗暴关闭——
+// 之前任何 scroll 事件都会把菜单关掉，片单一多菜单内部滚动也会误关）。
+// 按钮滚出视口才收起。
+function onReflow() {
+  if (!open.value) return
+  const btn = rootEl.value?.querySelector('.atc-fab, .btn.icon')
+  if (btn) {
+    const r = btn.getBoundingClientRect()
+    if (r.bottom < 0 || r.top > window.innerHeight) { open.value = false; return }
+  }
+  placeMenu()
+}
 watch(open, (v) => {
-  if (v) window.addEventListener('scroll', onReflow, true)
-  else window.removeEventListener('scroll', onReflow, true)
+  if (v) window.addEventListener('scroll', onReflow, { capture: true, passive: true })
+  else window.removeEventListener('scroll', onReflow, { capture: true })
 })
-onBeforeUnmount(() => window.removeEventListener('scroll', onReflow, true))
+onBeforeUnmount(() => window.removeEventListener('scroll', onReflow, { capture: true }))
 </script>
 
 <template>

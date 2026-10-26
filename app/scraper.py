@@ -115,7 +115,8 @@ def apply_metadata(conn, movie_id: int, meta: Dict[str, Any], cfg: Dict[str, Any
             payload[field] = meta[field]
 
     if payload:
-        store.update_movie(conn, movie_id, payload)
+        # 刮削新建的标签打 source='scraper'，与人工 / AI 来源区分，便于后期批量清理
+        store.update_movie(conn, movie_id, payload, tag_source="scraper")
 
     cover_changed = False
     if cfg.get("cover", {}).get("download", True) and meta.get("cover"):
@@ -612,7 +613,8 @@ def _target_ids(conn, ids: Optional[List[int]], scope: str,
 def _extract_remaining_covers(conn, cfg: Dict[str, Any], total: int) -> int:
     """刮削收尾：对仍无封面的影片，从视频抽帧兜底（临时占位封面）。
     返回成功抽取的数量。受 cover.auto_extract 开关控制。"""
-    ffmpeg = (cfg.get("ffmpeg_path") or "ffmpeg").strip() or "ffmpeg"
+    from .ext_components import ffmpeg_exe
+    ffmpeg = ffmpeg_exe(cfg)
     ids = [r["id"] for r in query_all(
         conn, "SELECT id FROM movies WHERE cover = '' AND has_code = 1")]
     if not ids:
@@ -911,7 +913,8 @@ def start_scrape_async(ids: Optional[List[int]] = None, scope: str = "missing",
 def batch_local_covers() -> Dict[str, int]:
     """本地封面嗅探；嗅探不到时自动从视频抽帧兜底。不联网。"""
     cfg = load_config()
-    ffmpeg = (cfg.get("ffmpeg_path") or "ffmpeg").strip() or "ffmpeg"
+    from .ext_components import ffmpeg_exe
+    ffmpeg = ffmpeg_exe(cfg)
     conn = connect()
     found = 0
     extracted = 0

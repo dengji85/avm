@@ -235,6 +235,9 @@ export const listTags = async () => {
 }
 export const renameTag = (oldName, newName) => post('/tags/rename', { old: oldName, new: newName })
 export const deleteTag = (name) => post('/tags/delete', { name })
+/* AI 建议转正：新标签以 source='ai' 入库（供后期批量清理）；返回更新后的影片详情 */
+export const aiPromoteTags = (movieId, names) => post(`/movies/${movieId}/tags/ai-promote`, { names })
+export const cleanupTags = (source) => post('/tags/cleanup', { source })
 
 /* ---------------- 统计 / 存储 ---------------- */
 export const getProfile = () => get('/profile')

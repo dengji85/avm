@@ -5,7 +5,7 @@ import {
   getMovie, updateMovie, deleteMovie, toggleFlag, playMovie,
   exportNfo, getPreviews, getSimilar, coverUrl, coverThumbUrl, uploadCover, clearCover,
   extractCover,
-  listTags, renameTag, deleteTag,
+  listTags, renameTag, deleteTag, aiPromoteTags, cleanupTags,
   dlnaDevices, dlnaAddDevice, dlnaCast, dlnaStop,
   getActress, avatarUrl, getConfig, scanMovieSubtitles, extStatus,
 } from '../api.js'
@@ -91,6 +91,31 @@ const asrLimit = ref('0')
 function openAiCenter() {
   close()
   state.view = 'ai'
+}
+
+/** 直达 设置 → 扩展组件（装语音组件 / 下模型） */
+function openExt() {
+  close()
+  state.view = 'settings'
+  state.settingsTab = 'ext'
+}
+
+/**
+ * 提取 / 重新提取对白：入口任何状态下都可点。
+ * 未就绪 → 带去扩展组件页；已提取过 → 确认覆盖后再提取。
+ */
+async function onExtractDialog() {
+  if (ai.dialog.status === 'running') return
+  if (!ai.asr.lib_available || !ai.asr.model_available) {
+    toast(t('ai.dialogGoExt'), 'err')
+    openExt()
+    return
+  }
+  if (ai.dialog.has_text) {
+    const ok = await confirmDialog(t('ai.reExtractConfirm'), t('ai.reExtractHint'), { danger: false })
+    if (!ok) return
+  }
+  ai.startDialog(asrLimit)
 }
 
 /* 扫描同目录外挂字幕：放好 srt/ass 后点一下即可登记 */
@@ -502,6 +527,33 @@ async function removeTag(name) {
   finally { tagBusy.value = false }
 }
 
+/* ---------- AI 建议标签：待定区（tags_ai 列），不进标签库 ----------
+   转正走专用端点：新标签以 source='ai' 入库（后期可在标签管理器批量清理），
+   已有标签只加关联不动来源；待定区由端点同步清理 */
+const aiTags = computed(() => (Array.isArray(mv.value?.tags_ai) ? mv.value.tags_ai : []))
+async function saveAiTags(list) {
+  const r = await updateMovie(id.value, { tags_ai: list })
+  mv.value = { ...mv.value, tags_ai: (r && r.tags_ai) || list }
+}
+async function promoteAiTags(names) {
+  if (tagBusy.value || !names.length) return
+  tagBusy.value = true
+  try {
+    const r = await aiPromoteTags(id.value, names)
+    if (r.movie) mv.value = { ...mv.value, ...r.movie }
+    window.dispatchEvent(new CustomEvent('avm-refresh'))
+  } catch (e) { toast(e.message, 'err') }
+  finally { tagBusy.value = false }
+}
+function promoteAiTag(name) { return promoteAiTags([name]) }
+function promoteAllAiTags() { return promoteAiTags([...aiTags.value]) }
+async function dropAiTag(name) {
+  try { await saveAiTags(aiTags.value.filter((x) => x !== name)) } catch (e) { toast(e.message, 'err') }
+}
+async function clearAiTags() {
+  try { await saveAiTags([]) } catch (e) { toast(e.message, 'err') }
+}
+
 /* ---------- 全局标签管理（改名 / 删除无关联标签） ---------- */
 const showTagMgr = ref(false)
 const allTagList = ref([])
@@ -547,6 +599,23 @@ async function doDeleteTag(name) {
       await updateMovie(id.value, { tags: next })
       mv.value = { ...mv.value, tags: next }
     }
+    window.dispatchEvent(new CustomEvent('avm-refresh'))
+  } catch (e) { toast(e.message, 'err') }
+  finally { tagMgrBusy.value = false }
+}
+
+/* 批量清理 AI 来源标签：删除标签及其全部影片关联（确认后执行） */
+const aiTagCount = computed(() => allTagList.value.filter((x) => x.source === 'ai').length)
+async function doCleanupAiTags() {
+  if (tagMgrBusy.value || !aiTagCount.value) return
+  const names = allTagList.value.filter((x) => x.source === 'ai').map((x) => x.name).join('、')
+  if (!(await confirmDialog(t('detail.aiTagCleanup'), t('detail.aiTagCleanupDesc', { n: aiTagCount.value, names }), { danger: true }))) return
+  tagMgrBusy.value = true
+  try {
+    const r = await cleanupTags('ai')
+    toast(t('detail.aiTagCleaned', { n: r.removed }), 'ok')
+    await refreshTagMgr()
+    if (id.value) await load()
     window.dispatchEvent(new CustomEvent('avm-refresh'))
   } catch (e) { toast(e.message, 'err') }
   finally { tagMgrBusy.value = false }
@@ -969,6 +1038,22 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', onKey) })
                     </span>
                   </div>
                   <div v-else class="dim small">{{ $t('detail.noTags') }}</div>
+
+                  <!-- AI 建议标签：待定区，不进标签库；转正（＋）后才参与筛选/统计 -->
+                  <div v-if="aiTags.length" class="ai-tags-row">
+                    <div class="dd-tags-head">
+                      <span class="lbl">✨ {{ $t('detail.aiTagsPending') }}</span>
+                      <button class="link-btn" @click="promoteAllAiTags">{{ $t('detail.aiTagPromoteAll') }}</button>
+                      <button class="link-btn" @click="clearAiTags">{{ $t('detail.aiTagClear') }}</button>
+                    </div>
+                    <div class="chip-list wrap">
+                      <span v-for="t in aiTags" :key="'ai-' + t" class="badge ai-tag clickable" :title="$t('detail.aiTagTip')">
+                        {{ t }}
+                        <button class="tag-x promote" :title="$t('detail.aiTagPromote')" @click.stop="promoteAiTag(t)">＋</button>
+                        <button class="tag-x" :title="$t('common.delete')" @click.stop="dropAiTag(t)">×</button>
+                      </span>
+                    </div>
+                  </div>
                   <div class="tag-edit">
                     <div class="tag-input-wrap">
                       <input
@@ -1007,6 +1092,11 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', onKey) })
                         <button class="icon-btn" :title="$t('common.close')" @click="showTagMgr = false">×</button>
                       </div>
                       <p class="muted small">{{ $t('detail.tagMgrHint') }}</p>
+                      <div class="dd-tags-head">
+                        <span v-if="aiTagCount" class="dim small">✨ {{ $t('detail.aiTagCount', { n: aiTagCount }) }}</span>
+                        <button v-if="aiTagCount" class="link-btn danger"
+                                :title="$t('detail.aiTagCleanupTip')" @click="doCleanupAiTags">{{ $t('detail.aiTagCleanup') }}</button>
+                      </div>
                       <div v-if="!allTagList.length" class="dim">{{ $t('detail.noTags') }}</div>
                       <ul class="tm-list">
                         <li v-for="t in allTagList" :key="t.id" class="tm-item">
@@ -1016,7 +1106,7 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', onKey) })
                             <button class="btn tiny ghost" @click="editingTag = ''">{{ $t('common.cancel') }}</button>
                           </template>
                           <template v-else>
-                            <span class="tm-name">{{ t.name }}</span>
+                            <span class="tm-name">{{ t.name }}<span v-if="t.source === 'ai'" class="badge ai-src" :title="$t('detail.aiTagCleanupTip')">✨</span><span v-else-if="t.source === 'scraper'" class="badge scraper-src" :title="$t('detail.scraperSrcTip')">⇩</span></span>
                             <span class="dim small">{{ $t('detail.usedCount', { n: t.count }) }}</span>
                             <span class="tm-actions">
                               <button class="link-btn" @click="editingTag = t.name; editingTagNew = t.name">{{ $t('detail.rename') }}</button>
@@ -1113,50 +1203,58 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', onKey) })
                       </div>
                     </template>
 
-                    <!-- 没字幕：说清楚要怎么补，而不是给个点了报错的按钮 -->
+                    <!-- 没字幕：说清楚要怎么补（对白提取已独立成块，见下方 ai-dialog-sec） -->
                     <div v-else-if="!ai.probing" class="aiq-need-box">
                       <p class="aiq-need">{{ $t('ai.needSubs') }}</p>
                       <div class="hstack wrap">
                         <button class="btn tiny ghost" @click="scanSidecars">{{ $t('detail.scanSubs') }}</button>
-                        <select v-if="ai.dialog.status !== 'running' && !ai.dialog.has_text"
-                                v-model="asrLimit" class="inp tiny asr-limit"
-                                :title="$t('ai.asrLimitTip')">
-                          <option value="0">{{ $t('ai.asrFull') }}</option>
-                          <option value="600">{{ $t('ai.asrFirst10') }}</option>
-                          <option value="1200">{{ $t('ai.asrFirst20') }}</option>
-                          <option value="1800">{{ $t('ai.asrFirst30') }}</option>
-                        </select>
-                        <button
-                          v-if="ai.dialog.status !== 'running' && !ai.dialog.has_text"
-                          class="btn tiny"
-                          :title="$t('ai.extractDialogHint')"
-                          :disabled="!ai.asr.lib_available || !ai.asr.model_available"
-                          @click="ai.startDialog(asrLimit)"
-                        >{{ $t('ai.extractDialog') }}</button>
-                        <span v-if="ai.dialog.status === 'running'" class="badge">{{ ai.dialog.percent }}%</span>
-                        <span v-else-if="ai.dialog.has_text" class="badge ok">{{ $t('ai.dialogDone', { n: ai.dialog.segments }) }}</span>
-                        <span v-else-if="ai.dialog.status === 'error'" class="badge err">{{ $t('ai.dialogFailed') }}</span>
-                        <button v-if="ai.dialog.has_text" class="btn tiny ghost" @click="ai.toggleDialogText">
-                          {{ ai.dialog.show ? $t('ai.hideDialog') : $t('ai.viewDialog') }}
-                        </button>
-                        <button v-if="ai.dialog.has_text" class="btn tiny" :title="$t('ai.dialogDraftHint')" @click="ai.exportSrt">
-                          {{ $t('ai.dialogExportSrt') }}
-                        </button>
-                        <button v-if="ai.dialog.has_text" class="btn tiny ghost" @click="ai.deleteDialog">{{ $t('common.delete') }}</button>
-                        <button v-if="!ai.asr.lib_available || !ai.asr.model_available"
-                                class="link-btn" @click="openAiCenter">{{ $t('ai.needSubsCenter') }}</button>
                       </div>
-
-                      <p v-if="ai.dialog.status === 'running'" class="hint">{{ ai.dialog.message || $t('ai.dialogRunning') }}</p>
-                      <div v-if="ai.dialog.status === 'running'" class="aiq-bar">
-                        <span :style="{ width: (ai.dialog.percent || 0) + '%' }"></span>
-                      </div>
-                      <p v-if="!ai.asr.lib_available" class="hint">{{ $t('ai.dialogNoLib') }}</p>
-                      <p v-else-if="!ai.asr.model_available" class="hint">{{ $t('ai.dialogNoModel', { dir: ai.asr.model_dir }) }}</p>
-                      <p v-if="ai.dialog.error" class="aiq-err">{{ ai.dialog.error }}</p>
-                      <p v-if="ai.dialog.has_text" class="hint">{{ $t('ai.dialogThenExport') }}</p>
-                      <pre v-if="ai.dialog.show && ai.dialog.text" class="aiq-dlg">{{ ai.dialog.text }}</pre>
                     </div>
+                  </div>
+
+                  <!-- 提取对白：独立成块、任何状态常显——本地 Whisper，不依赖 AI 开关与字幕；
+                       有字幕的片也能提取（字幕缺内容时对白更准），提取过是「重新提取」 -->
+                  <div class="ai-dialog-sec">
+                    <div class="ai-dialog-head">
+                      <b>{{ $t('ai.extractDialog') }}</b>
+                      <span class="hint">{{ $t('ai.extractDialogHint') }}</span>
+                    </div>
+                    <div class="hstack wrap">
+                      <select v-if="ai.dialog.status !== 'running'"
+                              v-model="asrLimit" class="inp tiny asr-limit"
+                              :title="$t('ai.asrLimitTip')">
+                        <option value="0">{{ $t('ai.asrFull') }}</option>
+                        <option value="600">{{ $t('ai.asrFirst10') }}</option>
+                        <option value="1200">{{ $t('ai.asrFirst20') }}</option>
+                        <option value="1800">{{ $t('ai.asrFirst30') }}</option>
+                      </select>
+                      <button
+                        v-if="ai.dialog.status !== 'running'"
+                        class="btn tiny"
+                        :title="ai.dialog.has_text ? $t('ai.reExtractHint') : $t('ai.extractDialogHint')"
+                        @click="onExtractDialog"
+                      >{{ ai.dialog.has_text ? $t('ai.reExtract') : $t('ai.extractDialog') }}</button>
+                      <span v-if="ai.dialog.status === 'running'" class="badge">{{ ai.dialog.percent }}%</span>
+                      <span v-else-if="ai.dialog.has_text" class="badge ok">{{ $t('ai.dialogDone', { n: ai.dialog.segments }) }}</span>
+                      <span v-else-if="ai.dialog.status === 'error'" class="badge err">{{ $t('ai.dialogFailed') }}</span>
+                      <button v-if="ai.dialog.has_text" class="btn tiny ghost" @click="ai.toggleDialogText">
+                        {{ ai.dialog.show ? $t('ai.hideDialog') : $t('ai.viewDialog') }}
+                      </button>
+                      <button v-if="ai.dialog.has_text" class="btn tiny" :title="$t('ai.dialogDraftHint')" @click="ai.exportSrt">
+                        {{ $t('ai.dialogExportSrt') }}
+                      </button>
+                      <button v-if="ai.dialog.has_text" class="btn tiny ghost" @click="ai.deleteDialog">{{ $t('common.delete') }}</button>
+                    </div>
+
+                    <p v-if="ai.dialog.status === 'running'" class="hint">{{ ai.dialog.message || $t('ai.dialogRunning') }}</p>
+                    <div v-if="ai.dialog.status === 'running'" class="aiq-bar">
+                      <span :style="{ width: (ai.dialog.percent || 0) + '%' }"></span>
+                    </div>
+                    <p v-if="!ai.asr.lib_available" class="hint">{{ $t('ai.dialogNoLib') }}</p>
+                    <p v-else-if="!ai.asr.model_available" class="hint">{{ $t('ai.dialogNoModel', { dir: ai.asr.model_dir }) }}</p>
+                    <p v-if="ai.dialog.error" class="aiq-err">{{ ai.dialog.error }}</p>
+                    <p v-if="ai.dialog.has_text" class="hint">{{ $t('ai.dialogThenExport') }}</p>
+                    <pre v-if="ai.dialog.show && ai.dialog.text" class="aiq-dlg">{{ ai.dialog.text }}</pre>
                   </div>
 
                   <button class="btn tiny mt" @click="startEdit">{{ $t('detail.editMeta') }}</button>
@@ -1241,7 +1339,10 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', onKey) })
     </aside>
 
     <!-- 灯箱 -->
-    <div v-if="lightboxSrc" class="lightbox" @click.self="closeLightbox">
+    <div v-if="lightboxSrc" class="lightbox" @click="closeLightbox">
+      <!-- 关闭按钮常驻右上角：之前只能靠 Esc 或点背景，关闭区域不明显 -->
+      <button class="lb-close" :title="$t('common.close')" :aria-label="$t('common.close')"
+              @click.stop="closeLightbox">✕</button>
       <div class="lb-box">
         <div class="lb-main">
           <button v-if="lightboxNav" class="lb-nav" :title="$t('detail.prevImage')"
@@ -1305,6 +1406,15 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', onKey) })
   display: inline-flex; align-items: center; justify-content: center; opacity: .8; padding: 0;
 }
 .tag-x:hover { opacity: 1; background: #e5484d; color: #fff; }
+.tag-x.promote:hover { background: var(--c-primary); }
+/* AI 建议标签待定区：虚线边框与正式标签区分，＋ 转正 / × 丢弃 */
+.ai-tags-row { margin-top: 8px; }
+.badge.ai-tag { border-style: dashed; }
+.badge.ai-tag .tag-x.promote { color: var(--c-primary); opacity: 1; }
+/* 标签管理器里的来源徽章 */
+.badge.ai-src, .badge.scraper-src { font-size: 10px; padding: 0 4px; margin-left: 4px; }
+.badge.ai-src { color: var(--c-primary); }
+.badge.scraper-src { color: var(--c-text-dim, #999); }
 .tag-edit { display: flex; gap: var(--sp-2); align-items: center; }
 .tag-input-wrap { position: relative; flex: 1; min-width: 0; }
 .tag-input {
@@ -1438,6 +1548,10 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', onKey) })
 .aiq { margin-top: var(--sp-3); display: flex; flex-direction: column; gap: 8px; }
 .aiq-need { margin: 0; font-size: var(--fs-sm); color: var(--c-text-3); line-height: 1.7; }
 .aiq-need-box { display: flex; flex-direction: column; gap: 6px; }
+/* 对白提取独立块：任何状态常显（本地 Whisper，不依赖 AI 开关与字幕） */
+.ai-dialog-sec { border-top: 1px dashed var(--c-line); margin-top: var(--sp-3); padding-top: var(--sp-3); display: flex; flex-direction: column; gap: 8px; }
+.ai-dialog-head { display: flex; align-items: baseline; gap: 10px; }
+.ai-dialog-head .hint { margin: 0; }
 /* 提取时长选择：跟着内容宽度，不要撑满一行 */
 .asr-limit { width: auto; min-width: 132px; }
 .aiq-bar {
@@ -1590,6 +1704,14 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', onKey) })
   color: #fff; font-size: 22px; line-height: 1; cursor: pointer;
 }
 .lb-nav:hover { background: rgba(255,255,255,.16); }
+/* 关闭按钮：右上角常驻，任何尺寸屏幕都一眼可见 */
+.lb-close {
+  position: absolute; top: 14px; right: 16px; width: 44px; height: 44px;
+  border-radius: 50%; border: 1px solid rgba(255,255,255,.35);
+  background: rgba(0,0,0,.55); color: #fff; font-size: 20px; line-height: 1;
+  cursor: pointer; z-index: 2; transition: background var(--t-fast), transform var(--t-fast);
+}
+.lb-close:hover { background: rgba(255,255,255,.2); transform: scale(1.06); }
 .lb-count { color: rgba(255,255,255,.72); font-size: 12px; font-variant-numeric: tabular-nums; }
 .lb-thumbs { display: flex; gap: 6px; max-width: min(88vw, 1500px); overflow-x: auto; padding: 2px; }
 .lb-thumbs img {

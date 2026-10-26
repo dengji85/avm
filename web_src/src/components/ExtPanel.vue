@@ -104,17 +104,15 @@
               <label>{{ $t('settings.asrTmp') }}</label>
               <input v-model="speech.tmp_dir" :placeholder="$t('settings.asrTmpPh')" />
             </div>
-            <details class="ext-adv">
-              <summary class="hint">{{ $t('aiCenter.extAdvanced') }}</summary>
-              <div class="field">
-                <label>{{ $t('settings.asrLibs') }}</label>
-                <input v-model="speech.libs_dir" :placeholder="$t('aiCenter.extAsrLibsPh')" />
-              </div>
-              <div class="field">
-                <label>{{ $t('settings.asrModelDir') }}</label>
-                <input v-model="speech.model_dir" :placeholder="$t('aiCenter.extAsrModelPh')" />
-              </div>
-            </details>
+            <!-- 自定义路径平铺（原先藏在「高级」折叠里，用户找不到）：依赖 / 模型都可指定任意盘位置 -->
+            <div class="field">
+              <label>{{ $t('settings.asrLibs') }}</label>
+              <input v-model="speech.libs_dir" :placeholder="$t('aiCenter.extAsrLibsPh')" />
+            </div>
+            <div class="field">
+              <label>{{ $t('settings.asrModelDir') }}</label>
+              <input v-model="speech.model_dir" :placeholder="$t('aiCenter.extAsrModelPh')" />
+            </div>
             <button class="btn tiny" :disabled="speechSaving" @click="saveSpeech">
               {{ $t('common.save') }}
             </button>

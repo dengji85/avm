@@ -91,7 +91,7 @@ def _res_rank(label: str) -> int:
 # ----------------------------------------------------------------- 分类表
 
 
-def get_or_create(conn: sqlite3.Connection, table: str, name: Any) -> Optional[int]:
+def get_or_create(conn: sqlite3.Connection, table: str, name: Any, source: str = "") -> Optional[int]:
     if table not in _TAXONOMY:
         raise ValueError(f"非法分类表: {table}")
     name = norm_name(name)
@@ -100,6 +100,9 @@ def get_or_create(conn: sqlite3.Connection, table: str, name: Any) -> Optional[i
     row = conn.execute(f"SELECT id FROM {table} WHERE name = ?", (name,)).fetchone()
     if row:
         return row[0]
+    if table == "tags" and source:
+        # 标签带来源（如 'ai' = AI 建议转正创建），供后续批量清理
+        return conn.execute("INSERT INTO tags(name, source) VALUES(?, ?)", (name, source)).lastrowid
     return conn.execute(f"INSERT INTO {table}(name) VALUES(?)", (name,)).lastrowid
 
 
@@ -109,12 +112,12 @@ def ensure_tag(conn: sqlite3.Connection, name: Any) -> Optional[int]:
 
 
 def set_relations(conn: sqlite3.Connection, movie_id: int, kind: str,
-                  names: Iterable[Any], replace: bool = True) -> None:
+                  names: Iterable[Any], replace: bool = True, source: str = "") -> None:
     link_table, col, tax_table = _REL_META[kind]
     if replace:
         conn.execute(f"DELETE FROM {link_table} WHERE movie_id = ?", (movie_id,))
     for raw in names or []:
-        rid = get_or_create(conn, tax_table, raw)
+        rid = get_or_create(conn, tax_table, raw, source=source)
         if rid:
             conn.execute(
                 f"INSERT OR IGNORE INTO {link_table}(movie_id, {col}) VALUES(?, ?)",
@@ -1235,6 +1238,12 @@ def movie_detail(conn: sqlite3.Connection, movie_id: int) -> Optional[Dict[str, 
     row["actresses"] = get_relations(conn, movie_id, "actress")
     row["genres"] = get_relations(conn, movie_id, "genre")
     row["tags"] = get_relations(conn, movie_id, "tag")
+    # AI 建议标签：影片上的待定建议（JSON），与正式标签分离，不参与检索/统计
+    try:
+        parsed = json.loads(row.get("tags_ai") or "[]")
+        row["tags_ai"] = parsed if isinstance(parsed, list) else []
+    except Exception:
+        row["tags_ai"] = []
     row["files"] = query_all(
         conn,
         "SELECT id, path, filename, ext, size, mtime, part, missing, strm_url, sub_tracks "
@@ -1253,7 +1262,8 @@ _EDITABLE = {
 }
 
 
-def update_movie(conn: sqlite3.Connection, movie_id: int, payload: Dict[str, Any]) -> None:
+def update_movie(conn: sqlite3.Connection, movie_id: int, payload: Dict[str, Any],
+                 tag_source: str = "") -> None:
     sets: List[str] = []
     args: List[Any] = []
 
@@ -1286,6 +1296,17 @@ def update_movie(conn: sqlite3.Connection, movie_id: int, payload: Dict[str, Any
         sets.append("code_norm = ?")
         args.append(_smart_code(payload["code"]))
 
+    # AI 建议标签：只写入影片上的待定建议列（JSON），**不建标签关联**——
+    # 标签库 / 检索 / 统计全部读正式关联，AI 建议零污染；「转正」由前端并入 tags 再走关联写入
+    if "tags_ai" in payload:
+        items: List[str] = []
+        for x in (payload.get("tags_ai") or []):
+            name = norm_name(x)
+            if name and name not in items:
+                items.append(name)
+        sets.append("tags_ai = ?")
+        args.append(json.dumps(items[:12], ensure_ascii=False))
+
     for field, table in (("studio", "studios"), ("publisher", "studios"), ("series", "series")):
         if field in payload:
             col = "series_id" if field == "series" else f"{field}_id"
@@ -1298,7 +1319,8 @@ def update_movie(conn: sqlite3.Connection, movie_id: int, payload: Dict[str, Any
 
     for kind, field in (("actress", "actresses"), ("genre", "genres"), ("tag", "tags")):
         if field in payload:
-            set_relations(conn, movie_id, kind, _split_multi(payload[field]))
+            set_relations(conn, movie_id, kind, _split_multi(payload[field]),
+                          source=tag_source if kind == "tag" else "")
 
 
 def delete_movie(conn: sqlite3.Connection, movie_id: int) -> None:
@@ -2713,11 +2735,48 @@ def recommend_movies(conn: sqlite3.Connection, limit: int = 30, seed: int = None
 def list_tags(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
     """返回所有已存在的标签及其使用次数，用于详情页标签输入建议。"""
     rows = conn.execute(
-        "SELECT t.id AS id, t.name AS name, COUNT(mt.movie_id) AS count "
+        "SELECT t.id AS id, t.name AS name, t.source AS source, COUNT(mt.movie_id) AS count "
         "FROM tags t LEFT JOIN movie_tag mt ON mt.tag_id = t.id "
         "GROUP BY t.id ORDER BY count DESC, t.name"
     ).fetchall()
-    return [{"id": r["id"], "name": r["name"], "count": r["count"]} for r in rows]
+    return [{"id": r["id"], "name": r["name"], "source": r["source"] or "", "count": r["count"]} for r in rows]
+
+
+def promote_ai_tags(conn: sqlite3.Connection, movie_id: int, names: Iterable[Any]) -> Dict[str, Any]:
+    """AI 建议转正：已有标签直接关联（来源不变），新标签以 source='ai' 创建；
+    然后从影片的 tags_ai 待定区移除已转正项。"""
+    promoted: List[str] = []
+    for raw in names or []:
+        name = norm_name(raw)
+        if not name:
+            continue
+        row = conn.execute("SELECT id FROM tags WHERE name = ?", (name,)).fetchone()
+        if row:
+            tid = row["id"]
+        else:
+            tid = conn.execute("INSERT INTO tags(name, source) VALUES(?, 'ai')", (name,)).lastrowid
+        conn.execute("INSERT OR IGNORE INTO movie_tag(movie_id, tag_id) VALUES(?, ?)", (movie_id, tid))
+        promoted.append(name)
+    try:
+        pending = json.loads(conn.execute("SELECT tags_ai FROM movies WHERE id = ?", (movie_id,)).fetchone()[0] or "[]")
+    except Exception:
+        pending = []
+    left = [x for x in (pending if isinstance(pending, list) else []) if x not in set(promoted)]
+    conn.execute("UPDATE movies SET tags_ai = ? WHERE id = ?",
+                 (json.dumps(left, ensure_ascii=False), movie_id))
+    return {"promoted": promoted, "tags_ai": left}
+
+
+def cleanup_tags_by_source(conn: sqlite3.Connection, source: str) -> Dict[str, Any]:
+    """按来源批量删除标签（含全部影片关联）。用于清理 AI 产生的标签。"""
+    source = (source or "").strip()
+    if not source:
+        raise ValueError("必须指定要清理的来源")
+    ids = [r["id"] for r in conn.execute("SELECT id FROM tags WHERE source = ?", (source,)).fetchall()]
+    for tid in ids:
+        conn.execute("DELETE FROM movie_tag WHERE tag_id = ?", (tid,))
+    conn.execute("DELETE FROM tags WHERE source = ?", (source,))
+    return {"ok": True, "removed": len(ids)}
 
 
 def rename_tag(conn: sqlite3.Connection, old_name: str, new_name: str) -> Dict[str, Any]:
@@ -2932,15 +2991,24 @@ def extract_cover_from_video(conn: sqlite3.Connection, movie_id: int,
 
     智能选帧：在中段范围（20%~80%）均匀采样多帧，逐帧打分（亮度/色彩/清晰度/信息量），
     挑出最能反映影片内容、且避开黑场/字幕/花屏/纯色的那一帧作封面。
-    需要外部 ffmpeg（配置 ffmpeg_path 或 PATH；若都没有则自动探测 tools/ffmpeg）。"""
+    需要外部 ffmpeg（调用方一般已传 ffmpeg_exe() 解析结果；此处兜底：PATH → 组件目录 → tools/ffmpeg）。"""
     from . import images
     from .config import COVER_DIR
-    # 解析 ffmpeg：PATH 找不到时探测项目自带
+    # 解析 ffmpeg：PATH 找不到时依次探测组件目录、项目自带
     if not os.path.dirname(ffmpeg) and not shutil.which(ffmpeg):
-        cand = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                            "tools", "ffmpeg", "bin", "ffmpeg.exe")
-        if os.path.exists(cand):
-            ffmpeg = cand
+        try:
+            from .ext_components import ffmpeg_ext_paths
+            for cand in ffmpeg_ext_paths():
+                if cand.exists():
+                    ffmpeg = str(cand)
+                    break
+        except Exception:
+            pass
+        if not os.path.dirname(ffmpeg):
+            cand = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                                "tools", "ffmpeg", "bin", "ffmpeg.exe")
+            if os.path.exists(cand):
+                ffmpeg = cand
     video = movie_primary_file(conn, movie_id)
     if not video or not os.path.exists(video):
         return None

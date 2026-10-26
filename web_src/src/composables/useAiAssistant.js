@@ -176,12 +176,12 @@ export function useAiAssistant({ movieId, movie, toast, confirm, onChange }) {
     const picked = pickedTags.value.map((x) => x.name)
     if (!picked.length) return
     try {
-      const cur = (movie.value?.tags || []).map(String)
-      const merged = [...new Set([...cur, ...picked])]
-      await updateMovie(movieId.value, { tags: merged })
-      if (movie.value) movie.value.tags = merged
-      tags.items = tags.items.map((x) => (picked.includes(x.name) ? { ...x, existing: true, picked: false } : x))
-      toast(t('ai.tagsAdded', { n: picked.length }), 'ok')
+      // 不直接并入正式标签（会污染全库标签清单）：存为该片的「AI 建议」待定区，
+      // 详情页里确认「转正」后才真正进标签库
+      const r = await updateMovie(movieId.value, { tags_ai: picked })
+      if (movie.value && r) movie.value.tags_ai = r.tags_ai || picked
+      tags.items = tags.items.map((x) => (picked.includes(x.name) ? { ...x, picked: false } : x))
+      toast(t('ai.tagsSaved'), 'ok')
       if (onChange) onChange()
     } catch (e) {
       tags.error = e.message || t('ai.failed')

@@ -458,7 +458,8 @@ def _run(movie_id: int, video: str, cfg: Dict[str, Any], size: str,
     started = time.time()
     wav = os.path.join(tmp_dir(movie_id), "_audio.wav")
     try:
-        ffmpeg = str(cfg.get("ffmpeg_path") or "ffmpeg").strip() or "ffmpeg"
+        from .ext_components import ffmpeg_exe
+        ffmpeg = ffmpeg_exe(cfg)
         need = _need_mb(video, ffmpeg, max_seconds)
         free = shutil.disk_usage(tmp_dir(movie_id)).free / 1048576.0
         if free < need:

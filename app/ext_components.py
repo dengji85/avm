@@ -152,6 +152,43 @@ def ffmpeg_ext_paths() -> List[Path]:
     return [root / n for n in names]
 
 
+def ffmpeg_exe(cfg: Optional[Dict[str, Any]] = None) -> str:
+    """功能侧统一 ffmpeg 路径解析：用户配置 > 组件目录 > PATH > 便携包自带。
+
+    不做版本探测（无子进程），抽帧 / 预览 / 转封装等热路径可安全调用。
+    组件页在线安装只写 data/ext、不碰 ffmpeg_path 配置——所有功能必须走这里，
+    否则会出现「面板显示已就绪、功能却报 ffmpeg 不可用」的分裂。
+    找不到时返回用户配置原值或 "ffmpeg"，交由调用方按旧逻辑报错。"""
+    c = cfg if cfg is not None else load_config()
+    cand = str(c.get("ffmpeg_path") or "").strip()
+    if cand and os.path.isfile(cand):
+        return cand
+    for p in ffmpeg_ext_paths():
+        if p.exists():
+            return str(p)
+    w = shutil.which("ffmpeg")
+    if w:
+        return w
+    base = Path(__file__).resolve().parent.parent
+    names = ("ffmpeg.exe", "ffmpeg") if os.name == "nt" else ("ffmpeg",)
+    for n in names:
+        cc = base / "tools" / "ffmpeg" / "bin" / n
+        if cc.exists():
+            return str(cc)
+    return cand or "ffmpeg"
+
+
+def ffprobe_exe(cfg: Optional[Dict[str, Any]] = None) -> str:
+    """与 ffmpeg 同目录的 ffprobe；配置只有裸名时回退 PATH。"""
+    ff = ffmpeg_exe(cfg)
+    d = os.path.dirname(ff)
+    if not d:
+        return shutil.which("ffprobe") or "ffprobe"
+    name = "ffprobe.exe" if ff.lower().endswith(".exe") else "ffprobe"
+    p = os.path.join(d, name)
+    return p if os.path.isfile(p) else ff
+
+
 def _ffmpeg_version(exe: str) -> str:
     try:
         r = subprocess.run([exe, "-version"], stdout=subprocess.PIPE,

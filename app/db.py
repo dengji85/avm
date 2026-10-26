@@ -274,12 +274,19 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE movies ADD COLUMN plot_source TEXT DEFAULT ''")
     if "ai_plot_at" not in movie_cols:
         conn.execute("ALTER TABLE movies ADD COLUMN ai_plot_at TEXT DEFAULT ''")
+    # AI 建议标签（JSON 数组）：只存影片上的待定建议，不进标签库——「转正」时才写正式标签关联
+    if "tags_ai" not in movie_cols:
+        conn.execute("ALTER TABLE movies ADD COLUMN tags_ai TEXT DEFAULT ''")
     # 片头/片尾跳过点（秒）：详情页播放器里一键标记，播放时自动跳过
     if "skip_intro" not in movie_cols:
         conn.execute("ALTER TABLE movies ADD COLUMN skip_intro REAL DEFAULT 0")
     if "skip_outro" not in movie_cols:
         conn.execute("ALTER TABLE movies ADD COLUMN skip_outro REAL DEFAULT 0")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_movies_embedzh ON movies(embed_sub_zh)")
+    # 标签来源：'' = 人工 / 未知，'ai' = AI 建议转正时创建（供标签管理器批量清理）
+    tag_cols = {r[1] for r in conn.execute("PRAGMA table_info(tags)").fetchall()}
+    if "source" not in tag_cols:
+        conn.execute("ALTER TABLE tags ADD COLUMN source TEXT DEFAULT ''")
     file_cols = {r[1] for r in conn.execute("PRAGMA table_info(movie_files)").fetchall()}
     if "quick_hash" not in file_cols:
         conn.execute("ALTER TABLE movie_files ADD COLUMN quick_hash INTEGER DEFAULT 0")
