@@ -30,7 +30,10 @@ const summary = computed(() => {
         <span>{{ $t('detail.aiBilingual') }}</span>
       </label>
       <button class="btn tiny primary" :disabled="ai.subs.loading || !ai.hasSubtitles" @click="ai.translateSubs">
-        {{ ai.subs.loading ? $t('ai.working') : $t('detail.aiTranslate') }}
+        {{ ai.subs.loading ? $t('ai.subsProgress', { p: ai.subs.percent }) : $t('detail.aiTranslate') }}
+      </button>
+      <button v-if="ai.subs.loading" class="btn tiny ghost" @click="ai.cancelTranslateSubs">
+        {{ $t('common.cancel') }}
       </button>
     </div>
 

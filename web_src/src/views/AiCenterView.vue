@@ -81,6 +81,18 @@
             <p class="hint">{{ privNote }}</p>
           </div>
 
+          <!-- 剧情理解：优先原文字幕（机翻中文可能失真，国内模型还有额外审查） -->
+          <div class="aic-card">
+            <div class="aic-card-head">
+              <strong>{{ $t('aiCenter.plotOrigTitle') }}</strong>
+            </div>
+            <label class="priv-chk">
+              <input type="checkbox" v-model="priv.prefer_original" @change="savePriv" />
+              <span>{{ $t('aiCenter.plotOrigLabel') }}</span>
+            </label>
+            <p class="hint">{{ $t('aiCenter.plotOrigHint') }}</p>
+          </div>
+
           <!-- 联网搜索：给 agent 的「查资料」技能配后端。默认关闭，配了才联网 -->
           <div class="aic-card">
             <div class="aic-card-head">
@@ -416,6 +428,11 @@
             <label>{{ $t('aiCenter.temperature') }}</label>
             <input v-model.number="form.temperature" type="number" step="0.1" min="0" max="2" />
           </div>
+          <div class="field">
+            <label>{{ $t('aiCenter.maxTokens') }}</label>
+            <input v-model.number="form.max_tokens" type="number" step="1000" min="0" max="64000" />
+            <span class="hint">{{ $t('aiCenter.maxTokensHint') }}</span>
+          </div>
         </div>
         <label class="aic-chk"><input type="checkbox" v-model="form.enabled" /> {{ $t('aiCenter.enabled') }}</label>
         <label class="aic-chk"><input type="checkbox" v-model="form.make_default" /> {{ $t('aiCenter.makeDefault') }}</label>
@@ -485,10 +502,10 @@ const saving = ref(false)
 
 const form = reactive({
   open: false, isEdit: false, name: '', base_url: '', api_key: '', model: '',
-  kind: 'cloud', timeout: 60, temperature: 0.4, enabled: true, make_default: false,
+  kind: 'cloud', timeout: 60, temperature: 0.4, max_tokens: 0, enabled: true, make_default: false,
 })
 
-const priv = reactive({ insights: false, insights_actress: false })
+const priv = reactive({ insights: false, insights_actress: false, prefer_original: true })
 // 联网搜索配置：SearXNG 地址 / Tavily Key，二选一；配了才联网，默认不联网
 const web = reactive({ url: '', key: '', busy: false, ok: null, message: '', statusText: '' })
 const localModel = computed(() => (models.value.find((m) => m.is_default) || {}).kind === 'local')
@@ -501,6 +518,8 @@ async function loadPriv() {
     const c = await getConfig()
     priv.insights = !!((c.ai || {}).insights)
     priv.insights_actress = !!((c.ai || {}).insights_actress)
+    // 默认开：剧情理解优先原文字幕（机翻中文有失真风险）
+    priv.prefer_original = ((c.ai || {}).prefer_original_sub) !== false
     web.url = (c.ai || {}).websearch_url || ''
     web.key = (c.ai || {}).websearch_key || ''
     const st = await aiWebsearchStatus()
@@ -543,7 +562,13 @@ async function checkWeb() {
 
 async function savePriv() {
   try {
-    await putConfig({ ai: { insights: priv.insights, insights_actress: priv.insights_actress } })
+    await putConfig({
+      ai: {
+        insights: priv.insights,
+        insights_actress: priv.insights_actress,
+        prefer_original_sub: priv.prefer_original,
+      },
+    })
     toast(t('aiCenter.saved'), 'ok')
   } catch (e) {
     toast(e.message, 'err')
@@ -574,6 +599,7 @@ function openForm(m) {
     kind: m ? m.kind : 'cloud',
     timeout: m ? m.timeout : 60,
     temperature: m ? m.temperature : 0.4,
+    max_tokens: m ? (m.max_tokens || 0) : 0,
     enabled: m ? !!m.enabled : true,
     make_default: false,
   })
@@ -593,6 +619,7 @@ async function save() {
       kind: form.kind,
       timeout: Number(form.timeout) || 60,
       temperature: Number(form.temperature),
+      max_tokens: Number(form.max_tokens) || 0,
       enabled: !!form.enabled,
       make_default: !!form.make_default,
     }

@@ -18,10 +18,10 @@ import os
 import re
 import sqlite3
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from . import ai_core, ai_prompts, subtext
-from .ai_core import AIConfig, AiError, chat, register_prompt
+from .ai_core import AIConfig, AiError, chat, log, register_prompt
 from .config import DATA_DIR
 from .db import connect
 
@@ -45,7 +45,7 @@ register_prompt("subtitle.translate", "v1")
 
 TARGETS = ("zh-Hans", "zh-Hant", "en")
 MAX_CUES = 4000            # 单部片最多处理的字幕条数（防止异常字幕爆预算）
-BATCH_CHARS = 1400         # 每个请求打包的原文长度
+BATCH_CHARS = 4000         # 每个请求打包的原文长度（大多数影片一次即可译完，连贯性更好）
 MAX_GLOSSARY = 200         # 单批最多注入的术语条数：术语表再大也不至于把 prompt 撑爆
 
 _SRT_TIME = re.compile(
@@ -259,23 +259,56 @@ def _batches(cues: List[Cue]) -> List[List[int]]:
     return batches
 
 
-def translate_cues(cues: List[Cue], cfg: Dict[str, Any], target: str) -> Tuple[List[str], int]:
-    """逐批翻译，返回（译文列表, 实际送出的原文字符数）。"""
+
+def _truncated(err: BaseException) -> bool:
+    """是不是「输出被 max_tokens 截断」——这类错误拆小批次就能成功，值得重试。"""
+    return "token 上限截断" in str(err) or "finish_reason=length" in str(err)
+
+
+def translate_cues(cues: List[Cue], cfg: Dict[str, Any], target: str,
+                   progress: Optional[Callable[[int, int], None]] = None) -> Tuple[List[str], int]:
+    """逐批翻译，返回（译文列表, 实际送出的原文字符数）。
+
+    progress(done, total)：每完成一个顶层批次回调一次；回调**抛异常即中止翻译**
+    （后台任务用它响应「取消」）。
+    """
     c = AIConfig.from_config(cfg)
     out: List[str] = [""] * len(cues)
     sent = 0
     sys_msg = ai_prompts.render("subtitle.translate", cfg, target=target)
 
-    for batch in _batches(cues):
+    carry = ""   # 上一批末尾几条（原文+译文），作为语气与术语的衔接参考
+
+    all_batches = _batches(cues)
+    total_batches = max(1, len(all_batches))
+    done_batches = 0
+
+    def _tick() -> None:
+        nonlocal done_batches
+        done_batches += 1
+        if progress is not None:
+            progress(done_batches, total_batches)
+
+    def run_batches(batches, depth=0):
+        nonlocal carry
+        for batch in batches:
+            _one(batch, depth)
+            _tick()
+
+    def _one(batch, depth=0):
+        nonlocal carry, sent
+        if not batch:
+            return
         payload = [{"i": i, "t": cues[i].text} for i in batch]
         # 只带本批字幕里真出现过的术语：术语表再大，prompt 也不会随批次数膨胀
         block = _glossary_block(glossary_hits("\n".join(cues[i].text for i in batch), target))
-        user = block + "字幕 JSON：\n" + json.dumps(payload, ensure_ascii=False)
+        user = block + carry + "字幕 JSON：\n" + json.dumps(payload, ensure_ascii=False)
         ok = False
+        err_msg = ""
         try:
             data = _chat_json_list(c, [{"role": "system", "content": sys_msg},
                                        {"role": "user", "content": user}],
-                                   max_tokens=600 * max(1, len(batch) // 8 + 1),
+                                   max_tokens=min(6000, 240 + len(batch) * 40),
                                    purpose="subtitle.translate")
             for item in data:
                 if not isinstance(item, dict):
@@ -286,8 +319,22 @@ def translate_cues(cues: List[Cue], cfg: Dict[str, Any], target: str) -> Tuple[L
                     out[idx] = txt
                     ok = True
             sent += sum(len(cues[i].text) for i in batch)
-        except AiError:
+            # 记住本批末尾两行，下一批 prompt 里带上——跨批语气与指代才连得上
+            tail = [(cues[i].text, out[i]) for i in batch[-2:] if out[i]]
+            if tail:
+                carry = ("上文参考（保持称呼、语气与译名一致，**不要重复翻译**）：\n"
+                         + "\n".join("%s => %s" % (a[:80], b[:80]) for a, b in tail) + "\n\n")
+        except AiError as e:
             ok = False
+            err_msg = str(e)
+        if not ok and depth < 2 and len(batch) > 1 and _truncated(AiError(err_msg)):
+            # 多半是输出被 max_tokens 截断（推理型模型常见）：对半拆开重试
+            mid = len(batch) // 2
+            log.info("批次 %d 条失败或截断，拆成 %d + %d 重试",
+                     len(batch), mid, len(batch) - mid)
+            _one(batch[:mid], depth + 1)
+            _one(batch[mid:], depth + 1)
+            return
         if not ok:
             # 整批失败：降级为逐条，单条再失败就保留原文。
             # 降级同样带术语表——模型不听话时更需要译名约束。
@@ -304,6 +351,7 @@ def translate_cues(cues: List[Cue], cfg: Dict[str, Any], target: str) -> Tuple[L
                 except AiError:
                     out[i] = cues[i].text
 
+    run_batches(all_batches)
     return out, sent
 
 
@@ -314,6 +362,18 @@ def _sub_dir(movie_id: int) -> str:
 
 
 def register(conn: sqlite3.Connection, movie_id: int, path: str, lang: str) -> int:
+    """登记 AI 译文：同影片同语言**只保留一条**——重新翻译覆盖文件并更新记录。
+
+    以前每次翻译都 INSERT 一条新记录，而产物文件名固定（<lang>.srt）会被覆盖，
+    结果是多条记录指向同一个文件；删除其中一条会把文件删掉，其余记录全部失效
+    （播放器菜单里字幕「凭空消失」）。"""
+    row = conn.execute(
+        "SELECT id FROM movie_subtitles WHERE movie_id=? AND lang=? AND source='ai-translate'",
+        (movie_id, lang)).fetchone()
+    if row:
+        conn.execute("UPDATE movie_subtitles SET file_path=?, filename=? WHERE id=?",
+                     (path, os.path.basename(path), row["id"]))
+        return int(row["id"])
     cur = conn.execute(
         "INSERT INTO movie_subtitles(movie_id, file_path, filename, lang, source) "
         "VALUES(?,?,?,?,'ai-translate')",
@@ -337,7 +397,8 @@ def unregister(conn: sqlite3.Connection, movie_id: int, sub_id: int) -> Optional
 
 
 def translate_movie(movie_id: int, cfg: Dict[str, Any], target: str = "zh-Hans",
-                    bilingual: bool = False) -> Dict[str, Any]:
+                    bilingual: bool = False,
+                    progress: Optional[Callable[[int, int], None]] = None) -> Dict[str, Any]:
     """为单部片生成翻译字幕；无可用字幕时抛 ValueError（接口层转 400）。"""
     if target not in TARGETS:
         raise ValueError("不支持的目标语言：%s" % target)
@@ -352,7 +413,7 @@ def translate_movie(movie_id: int, cfg: Dict[str, Any], target: str = "zh-Hans",
         # 这样任务明细里的 chars、批次预算和真实消耗是同一个口径。
         # （并发跑多部时会把别人的用量一并算进来，属于偏保守的高估。）
         before = int(ai_core.stats().get("prompt_chars", 0))
-        texts, sent = translate_cues(got["cues"], cfg, target)
+        texts, sent = translate_cues(got["cues"], cfg, target, progress=progress)
         used = max(0, int(ai_core.stats().get("prompt_chars", 0)) - before)
         if not any(texts):
             raise ValueError("翻译结果为空，请检查模型配置或稍后重试")

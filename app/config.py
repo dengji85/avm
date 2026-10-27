@@ -296,6 +296,11 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         # 是否从刮削源下载并落盘；关闭则仅保留远程 URL，不占本地空间
         "avatar_download": False,
         "fanart_download": True,
+        # 竖版海报（poster）取图策略：right = 取右侧（默认，人物主视觉常见位置）
+        # center = 居中裁切；fit = 整图缩进 2:3 画布，空白用模糊背景填充
+        "poster_strategy": "right",
+        # 是否向 DMM 抓官方竖版海报（真海报，比裁横图清晰）；关掉则只用本地裁切
+        "poster_dmm": True,
     },
     # 把刮削结果落盘到影片目录，供 Emby / Jellyfin / Kodi 等外部媒体服务器识别。
     # 定位：**导出能力（兼容层）**，默认关闭；片匣自己的库与播放不依赖它。
@@ -369,6 +374,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         # 两者都能在 AI 中心按批次临时覆盖，这里是全局默认值。
         "job_concurrency": 2,
         "budget_chars_per_run": 0,
+        # 剧情理解优先原文字幕（默认开）：问答/简介用原文轨理解，机翻中文字幕仅作对照
+        "prefer_original_sub": True,
         # 用户自定义的 system 提示词：{prompt_id: text}，缺省用内置默认值
         "prompts": {},
         # 问库润色：允许把「问库」的聚合统计摘要（类型 / 数量等，不含文件路径、

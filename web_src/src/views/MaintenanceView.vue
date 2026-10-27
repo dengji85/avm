@@ -48,6 +48,13 @@ const setTab = (id) => { state.maintTab = id }
 
 <style scoped>
 .maint { display: flex; flex-direction: column; min-height: 0; }
-.tab-body { padding: var(--sp-4) var(--sp-5); }
+/* 固定列宽：六个页签（概览/存储/字幕/失败/日志/导出）共用一条稳定的内容列，
+   切换与加载时不再随内容伸缩闪烁 */
+.tab-body {
+  width: min(1080px, 100%);
+  margin: 0 auto;
+  scrollbar-gutter: stable;
+  padding: var(--sp-4) var(--sp-5);
+}
 .hint { font-size: var(--fs-xs); color: var(--c-text-3); }
 </style>

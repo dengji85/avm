@@ -434,7 +434,8 @@ def execute_spec(conn, spec: Dict[str, Any]) -> Dict[str, Any]:
 _tools_ok = True
 
 
-def _plan(c: AIConfig, question: str, vocab_text: str, feedback: str = "") -> Dict[str, Any]:
+def _plan(c: AIConfig, question: str, vocab_text: str, feedback: str = "",
+          history: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
     """一次规划调用：问题 + 库字典（+ 上一轮失败反馈）→ 查询规格。
 
     优先 tool calling（参数受 schema 约束，比自由 JSON 稳）；端点不支持时自动
@@ -442,6 +443,16 @@ def _plan(c: AIConfig, question: str, vocab_text: str, feedback: str = "") -> Di
     """
     global _tools_ok
     user = "【库字典】\n%s\n\n【用户问题】%s" % (vocab_text, question)
+    # 会话历史：追问（「那这部呢」「再多一点」）要靠它才能理解指代
+    hist_msgs: List[Dict[str, Any]] = []
+    for h in (history or []):
+        if not isinstance(h, dict):
+            continue
+        role = str(h.get("role") or "")
+        content = str(h.get("content") or "").strip()
+        if role in ("user", "assistant") and content:
+            hist_msgs.append({"role": role, "content": content[:600]})
+    hist_msgs = hist_msgs[-6:]
     if feedback:
         user += "\n\n【上一轮结果】\n" + feedback
     purpose = "library.qa.repair" if feedback else "library.qa"
@@ -449,6 +460,7 @@ def _plan(c: AIConfig, question: str, vocab_text: str, feedback: str = "") -> Di
     if _tools_ok:
         try:
             out = chat_tools(c, [{"role": "system", "content": _TOOL_SYSTEM},
+                                 *hist_msgs,
                                  {"role": "user", "content": user}],
                              tools=_TOOLS, purpose=purpose)
             spec = _spec_from_calls(out.get("tool_calls") or [])
@@ -469,6 +481,7 @@ def _plan(c: AIConfig, question: str, vocab_text: str, feedback: str = "") -> Di
 
     try:
         spec = chat_json(c, [{"role": "system", "content": _AGENT_SYSTEM},
+                             *hist_msgs,
                              {"role": "user", "content": user}],
                          max_tokens=400, purpose=purpose)
     except Exception as e:                               # noqa: BLE001 规划失败降级为关键词
@@ -497,7 +510,8 @@ def _plan_meta(spec: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def ask_library(question: str, cfg: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+def ask_library(question: str, cfg: Optional[Dict[str, Any]] = None,
+                history: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
     """口语问库：规划（带库字典）→ 本地执行 → 0 结果时带着反馈重规划一次。
 
     与旧版的区别：模型不再「凭常识猜类型名」，而是从库字典里挑真实存在的值；
@@ -511,7 +525,7 @@ def ask_library(question: str, cfg: Optional[Dict[str, Any]] = None) -> Dict[str
 
     with db() as conn:
         vocab_text = vocab_mod.block(conn)
-        spec = _plan(c, q, vocab_text)
+        spec = _plan(c, q, vocab_text, history=history)
         if not spec:
             spec = {"kind": "search", "params": {"q": [q]}}
         spec["question"] = q
@@ -526,7 +540,7 @@ def ask_library(question: str, cfg: Optional[Dict[str, Any]] = None) -> Dict[str
                 % json.dumps({"kind": spec.get("kind"), "params": spec.get("params") or {}},
                              ensure_ascii=False)
             )
-            retry = _plan(c, q, vocab_text, feedback)
+            retry = _plan(c, q, vocab_text, feedback, history=history)
             if retry:
                 retry["question"] = q
                 res2 = execute_spec(conn, retry)

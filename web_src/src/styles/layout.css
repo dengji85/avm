@@ -254,6 +254,8 @@
 
 /* 视图滚动内容区 */
 .view-body {
+  /* 滚动条槽位常驻：内容高度变化时滚动条出现与否都不挤占内容区，消除水平闪烁 */
+  scrollbar-gutter: stable;
   flex: 1;
   min-height: 0;
   overflow-y: auto;
@@ -349,6 +351,9 @@
 .card .thumb img {
   width: 100%; height: 100%;
   object-fit: cover;
+  /* 没有竖版海报时的回退：横图裁切锚点靠右（人物主视觉一般在右侧），
+     不再取中间的纯文字区；有海报时整图比例就是 2:3，这里不产生裁切 */
+  object-position: right center;
   transition: transform var(--t-slow), opacity var(--t-base);
 }
 .card:hover .thumb img { transform: scale(1.045); }

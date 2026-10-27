@@ -122,16 +122,22 @@ def _is_zh(lang: str) -> bool:
     return ("中文" in s) or s.startswith(("zh", "cn", "chs", "cht"))
 
 
-def _track_priority(t: Dict[str, Any]) -> Tuple[int, int]:
-    """数字越小越优先：中文 > 其他语言；文本 > 图形。"""
+def _track_priority(t: Dict[str, Any], prefer_original: bool = False) -> Tuple[int, int]:
+    """数字越小越优先。
+
+    * 默认：中文 > 其他语言（用户实际看到的字幕，更准）；
+    * prefer_original：原文 > 中文（机翻中文字幕会失真，剧情理解优先原文；
+      国内模型对中文内容还有额外审查，原文轨更安全）。
+    强制字幕（forced）与部分字幕始终排后。"""
     zh = 1 if t.get("zh") else 0
     bad = 1 if (t.get("forced") or t.get("partial")) else 0
-    return (0 if zh else 1, bad)
+    # 默认模式：中文(zh=1) → 0 排前；原文优先：非中文(zh=0) → 0 排前
+    ahead = (1 - zh) if not prefer_original else zh
+    return (ahead, bad)
 
 
-def collect(files: List[Dict[str, Any]], sidecar: List[Dict[str, Any]],
-            cfg: Dict[str, Any]) -> Dict[str, Any]:
-    """返回 {"text": str, "source": "embedded"|"sidecar"|"", "track": str, "chars": int}"""
+def _collect_tracks(files: List[Dict[str, Any]], prefer_original: bool) -> List[Tuple[Tuple[int, int], Dict[str, Any], Dict[str, Any]]]:
+    """所有内嵌文本轨候选，按优先级排序（中文/原文取决于 prefer_original）。"""
     candidates: List[Tuple[Tuple[int, int], Dict[str, Any], Dict[str, Any]]] = []
     for f in files or []:
         path = f.get("path") or ""
@@ -144,8 +150,17 @@ def collect(files: List[Dict[str, Any]], sidecar: List[Dict[str, Any]],
         for t in (info.get("tracks") or []):
             if t.get("kind") != "text":
                 continue
-            candidates.append((_track_priority(t), f, t))
+            candidates.append((_track_priority(t, prefer_original), f, t))
     candidates.sort(key=lambda x: x[0])
+    return candidates
+
+
+def collect(files: List[Dict[str, Any]], sidecar: List[Dict[str, Any]],
+            cfg: Dict[str, Any], prefer_original: bool = False) -> Dict[str, Any]:
+    """返回 {"text": str, "source": "embedded"|"sidecar"|"", "track": str, "chars": int}
+
+    prefer_original=True 时优先取原文轨（通常是日语），机翻中文字幕只作兜底。"""
+    candidates = _collect_tracks(files, prefer_original)
 
     for _, f, t in candidates:
         raw = subprobe.extract_track_text(f["path"], int(t.get("si") or 0), cfg)
@@ -158,9 +173,9 @@ def collect(files: List[Dict[str, Any]], sidecar: List[Dict[str, Any]],
             return {"text": text[:MAX_CHARS], "source": "embedded",
                     "track": label.strip(" ·"), "chars": len(text)}
 
-    # 外挂字幕：优先中文，其次任意
+    # 外挂字幕：按同样的偏好排序（原文优先时非中文文件排在前面）
     sidecar = [s for s in (sidecar or []) if (s.get("path") or "")]
-    sidecar.sort(key=lambda s: 0 if _is_zh(s.get("lang") or "") else 1)
+    sidecar.sort(key=lambda s: (1 if (_is_zh(s.get("lang") or "") == prefer_original) else 0))
     for s in sidecar:
         text = _read_text_file(s["path"])
         if text:
@@ -171,31 +186,44 @@ def collect(files: List[Dict[str, Any]], sidecar: List[Dict[str, Any]],
 
 
 def collect_cues(files: List[Dict[str, Any]], sidecar: List[Dict[str, Any]],
-                 cfg: Dict[str, Any]) -> Dict[str, Any]:
-    """取字幕分句（带时间码），供「剧情问答」按时间戳引用。"""
-    candidates: List[Tuple[Tuple[int, int], Dict[str, Any], Dict[str, Any]]] = []
-    for f in files or []:
-        path = f.get("path") or ""
-        if not path or not os.path.isfile(path) or not f.get("sub_tracks"):
-            continue
-        try:
-            info = json.loads(f["sub_tracks"])
-        except (ValueError, TypeError):
-            continue
-        for t in (info.get("tracks") or []):
-            if t.get("kind") == "text":
-                candidates.append((_track_priority(t), f, t))
-    candidates.sort(key=lambda x: x[0])
+                 cfg: Dict[str, Any], prefer_original: bool = False) -> Dict[str, Any]:
+    """取字幕分句（带时间码），供「剧情问答」按时间戳引用。
+
+    混合策略：中文轨负责**召回**（中文提问和日文字幕做字符重合会颗粒无收），
+    原文轨负责**理解**——返回 cues（召回用，优先中文）与 orig_cues（原文，供答案）。
+    只有原文轨时，cues 直接就是原文（召回交给整片抽样兜底）。
+    """
+    candidates = _collect_tracks(files, prefer_original=False)   # 召回基准始终优先中文
+    zh_cues: List[Tuple[float, str]] = []
+    zh_track = ""
+    orig_cues: List[Tuple[float, str]] = []
+    orig_track = ""
 
     for _, f, t in candidates:
+        need_orig = prefer_original and not orig_cues and not t.get("zh")
+        if zh_cues and not need_orig:
+            break
         raw = subprobe.extract_track_text(f["path"], int(t.get("si") or 0), cfg)
         cues = parse_srt_cues(raw)[:MAX_CUES]
-        if cues:
-            label = ((t.get("lang") or "").upper() or "UND")
-            if t.get("title"):
-                label += " · " + t["title"]
-            return {"cues": cues, "source": "embedded", "track": label, "count": len(cues)}
+        if not cues:
+            continue
+        label = ((t.get("lang") or "").upper() or "UND")
+        if t.get("title"):
+            label += " · " + t["title"]
+        if t.get("zh"):
+            if not zh_cues:
+                zh_cues, zh_track = cues, label
+        elif prefer_original and not orig_cues:
+            orig_cues, orig_track = cues, label
+        elif not zh_cues and not prefer_original:
+            zh_cues, zh_track = cues, label
 
+    if zh_cues:
+        return {"cues": zh_cues, "orig_cues": orig_cues, "source": "embedded",
+                "track": zh_track, "orig_track": orig_track if orig_cues else "",
+                "count": len(zh_cues)}
+
+    # 外挂字幕：同样读中文（召回）与原文（理解）各一份
     sidecar = [s for s in (sidecar or []) if (s.get("path") or "")]
     sidecar.sort(key=lambda s: 0 if _is_zh(s.get("lang") or "") else 1)
     for s in sidecar:
@@ -210,8 +238,20 @@ def collect_cues(files: List[Dict[str, Any]], sidecar: List[Dict[str, Any]],
             continue
         cues = (_ass_cues(raw) if os.path.splitext(path)[1].lower() in (".ass", ".ssa")
                 else parse_srt_cues(raw))[:MAX_CUES]
-        if cues:
-            return {"cues": cues, "source": "sidecar",
-                    "track": (s.get("lang") or "外挂字幕"), "count": len(cues)}
+        if not cues:
+            continue
+        is_zh = _is_zh(s.get("lang") or "")
+        if is_zh and not zh_cues:
+            zh_cues, zh_track = cues, (s.get("lang") or "外挂字幕")
+        elif prefer_original and not is_zh and not orig_cues:
+            orig_cues, orig_track = cues, (s.get("lang") or "外挂字幕")
 
-    return {"cues": [], "source": "", "track": "", "count": 0}
+    if zh_cues:
+        return {"cues": zh_cues, "orig_cues": orig_cues, "source": "sidecar",
+                "track": zh_track, "orig_track": orig_track if orig_cues else "",
+                "count": len(zh_cues)}
+    if orig_cues:
+        return {"cues": orig_cues, "orig_cues": [], "source": "sidecar",
+                "track": orig_track, "orig_track": "", "count": len(orig_cues)}
+
+    return {"cues": [], "orig_cues": [], "source": "", "track": "", "orig_track": "", "count": 0}

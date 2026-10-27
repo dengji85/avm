@@ -29,7 +29,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from .config import DATA_DIR, load_config
 from .db import connect
-from .threadpool import submit_task
+from .threadpool import submit_long
 
 LOG_PREFIX = "[asr]"
 
@@ -592,7 +592,7 @@ def start(movie_id: int, video: str, max_seconds: int = 0,
             return dict(cur)
     _set_job(movie_id, status="running", percent=1, message="排队中…",
              error="", cancel=False)
-    submit_task(_run, movie_id, video, cfg, size, language,
+    submit_long(_run, movie_id, video, cfg, size, language,
                 int(max_seconds or 0), int(start_seconds or 0))
     return summary(movie_id)
 

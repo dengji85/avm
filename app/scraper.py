@@ -72,7 +72,8 @@ def _classify_error(exc: BaseException) -> str:
 
 
 def apply_metadata(conn, movie_id: int, meta: Dict[str, Any], cfg: Dict[str, Any],
-                   overwrite: bool = False, mark_scraped: bool = True) -> Dict[str, Any]:
+                   overwrite: bool = False, mark_scraped: bool = True,
+                   force_cover: bool = False) -> Dict[str, Any]:
     """把抓到的元数据写入影片，返回实际改动的字段。
 
     mark_scraped=False 时不写 scraped_at：用于「扫描后自动导入本地 NFO」——
@@ -102,9 +103,15 @@ def apply_metadata(conn, movie_id: int, meta: Dict[str, Any], cfg: Dict[str, Any
     if src_code and not _is_bad_text(src_code) and not current.get("has_code"):
         payload["code"] = src_code
 
-    for field in ("runtime", "rating"):
-        if field in meta and (overwrite or _is_empty(current.get(field))):
-            payload[field] = meta[field]
+    if "runtime" in meta and (overwrite or _is_empty(current.get("runtime"))):
+        payload["runtime"] = meta["runtime"]
+    if "rating" in meta and (overwrite or _is_empty(current.get("rating"))):
+        # 刮削源多为 0–10 分（javbus 等），界面是 5 星制 → 折半统一口径
+        try:
+            raw = float(meta["rating"] or 0)
+        except (TypeError, ValueError):
+            raw = 0.0
+        payload["rating"] = round(raw / 2.0, 1) if raw > 5 else round(raw, 1)
 
     for field in ("studio", "publisher", "series"):
         if meta.get(field) and (overwrite or _is_empty(current.get(field))):
@@ -120,12 +127,13 @@ def apply_metadata(conn, movie_id: int, meta: Dict[str, Any], cfg: Dict[str, Any
 
     cover_changed = False
     if cfg.get("cover", {}).get("download", True) and meta.get("cover"):
-        # 视频抽帧封面（cover_source='video'）视为临时占位，可被正式刮削图覆盖
-        can_override = (overwrite or not current.get("cover")
-                        or current.get("cover_source") == "video")
-        if can_override:
-            cover_changed = bool(save_cover(conn, current, str(meta["cover"]), cfg,
-                                            source=meta.get("source", "scrape")))
+        # 覆盖策略交给 save_cover：force（重刮覆盖）/ 抽帧占位 / 新图明显更好，三者之一才换
+        before_cover = str(current.get("cover") or "")
+        saved = save_cover(conn, current, str(meta["cover"]), cfg,
+                           source=meta.get("source", "scrape"),
+                           force=bool(overwrite) or bool(force_cover),
+                           replace_placeholder=(current.get("cover_source") == "video"))
+        cover_changed = bool(saved) and saved != before_cover
 
     fanart_changed = False
     if cfg.get("media", {}).get("fanart_download", True) and meta.get("fanart"):
@@ -165,23 +173,63 @@ def apply_metadata(conn, movie_id: int, meta: Dict[str, Any], cfg: Dict[str, Any
 
 
 def save_cover(conn, movie: Dict[str, Any], location: str, cfg: Dict[str, Any],
-               source: str = "manual") -> Optional[str]:
-    """location 可以是 http(s) URL，也可以是本地图片路径。"""
+               source: str = "manual", force: bool = False,
+               replace_placeholder: bool = False) -> Optional[str]:
+    """保存封面（URL 或本地文件），并按「更清晰才替换」决定是否覆盖旧图。
+
+    规则（解决「重刮也换不掉历史低清图」）：
+      * force=True（用户手工设置封面）→ 无条件替换；
+      * 没有旧封面 / 旧封面是抽帧占位（replace_placeholder）→ 直接写；
+      * 新图明显更好（面积 ≥ 1.6 倍，或旧图宽度 < 600 且新图更宽）→ 升级替换；
+      * 否则保留旧图，但仍然确保竖版海报存在。
+    写完横版封面后：先本地生成 2:3 竖版海报，再（可配置）向 DMM 抓官方竖版覆盖。
+    """
     key = movie["key"]
-    name: Optional[str] = None
-    if location.lower().startswith(("http://", "https://")):
+    # 先把候选图拿到内存，避免未通过质量判定却已在磁盘留下垃圾
+    data: Optional[bytes] = None
+    if str(location).lower().startswith(("http://", "https://")):
         data = images.download(location, cfg)
-        if data:
-            name = images.save_bytes(key, data, location)
     else:
         p = Path(location)
-        if p.exists() and p.is_file():
-            name = images.save_local_file(key, p)
-    if name:
-        conn.execute(
-            "UPDATE movies SET cover = ?, cover_source = ? WHERE id = ?",
-            (name, source[:60], movie["id"]),
-        )
+        if p.exists() and p.is_file() and p.stat().st_size > 512:
+            try:
+                data = p.read_bytes()
+            except OSError:
+                data = None
+    if not data:
+        return None
+
+    new_size = images.bytes_size(data)
+    cur_name = str(movie.get("cover") or "")
+    cur_size = images.cover_size(cur_name) if cur_name else None
+    take_it = (force or replace_placeholder or not cur_name
+               or images.better_cover(new_size, cur_size))
+
+    name = cur_name
+    if take_it:
+        saved = images.save_bytes(key, data, location)
+        if saved:
+            name = saved
+            conn.execute(
+                "UPDATE movies SET cover = ?, cover_source = ? WHERE id = ?",
+                (name, source[:60], movie["id"]),
+            )
+        elif not cur_name:
+            return None
+
+    if not name:
+        return None
+
+    code = str(movie.get("code") or "").strip()
+    # 1) 先尝试把横版封面升级成 DMM 大图（2184×1468），质量不足则不换
+    if source in ("scrape", "matched", "local") and code:
+        up = images.upgrade_from_dmm(str(key), code, cfg, cover_file=name)
+        if up.get("cover") and up["cover"] != name:
+            name = up["cover"]
+            conn.execute("UPDATE movies SET cover = ? WHERE id = ?", (name, movie["id"]))
+    # 2) 再生成竖版海报：官方 ps 优先（开关控制），否则从最终封面裁切
+    images.ensure_poster(name, cfg, code=code,
+                         allow_network=images.poster_dmm_enabled(cfg))
     return name
 
 
@@ -345,8 +393,12 @@ def _prefetch_images(meta: Optional[Dict[str, Any]], cfg: Dict[str, Any]):
     return m, tmp
 
 
+def _cover_rank(provider_name: str) -> int:
+    """封面来源排序：0 = 在线源（优先），1 = 本地 NFO（通常是用户已有的小图）。"""
+    return 1 if str(provider_name or "") == "local_nfo" else 0
+
 def scrape_one(conn, movie_id: int, providers: List[Any], cfg: Dict[str, Any],
-               overwrite: bool = False) -> Dict[str, Any]:
+               overwrite: bool = False, force_cover: bool = False) -> Dict[str, Any]:
     """单部刮削（供 API 单部补头像 / 单部抓取）。在主线程同步抓 + 写库。"""
     movie = store.movie_detail(conn, movie_id)
     if not movie:
@@ -363,6 +415,8 @@ def scrape_one(conn, movie_id: int, providers: List[Any], cfg: Dict[str, Any],
 
     primary_meta = None
     primary_name = None
+    best_cover = None       # (rank, url, provider)
+    covers_all: List[tuple] = []   # 所有封面候选，重刮时按实际像素挑最大
     for provider in run_providers:
         try:
             meta = provider.fetch(movie)
@@ -374,17 +428,44 @@ def scrape_one(conn, movie_id: int, providers: List[Any], cfg: Dict[str, Any],
             # 第一个命中的源作为主源，写入全部元数据
             primary_meta = meta
             primary_name = provider.name
-            continue
-        # 后续源：若主源缺封面，用后续源补齐封面（不覆盖已写入的文本字段）
-        if not primary_meta.get("cover") and meta.get("cover"):
-            primary_meta = dict(primary_meta)
-            primary_meta["cover"] = meta["cover"]
-            primary_meta["source"] = f"{primary_name}+{provider.name}"
+        else:
+            # 后续源：补齐主源缺失的文本字段（不覆盖已有值）
+            merged = dict(primary_meta)
+            for key, val in meta.items():
+                if key in ("source", "cover") or val in (None, "", [], 0):
+                    continue
+                if merged.get(key) in (None, "", [], 0):
+                    merged[key] = val
+            primary_meta = merged
+        # 封面单独竞标：在线源优先，本地 NFO 靠后（最终仍过质量门）
+        url = str(meta.get("cover") or "").strip()
+        if url:
+            rank = _cover_rank(provider.name)
+            covers_all.append((rank, url, provider.name))
+            if best_cover is None or rank < best_cover[0]:
+                best_cover = (rank, url, provider.name)
 
     if primary_meta is None:
         return {"ok": False, "reason": "所有数据源均未命中"}
+    # 重刮（overwrite）：多个候选时实际下载比像素面积，取最大的一张
+    if overwrite and len(covers_all) > 1:
+        best_area = -1
+        for rank, url, pname in covers_all:
+            data = images.download(url, cfg)
+            sz = images.bytes_size(data) if data else None
+            if not sz:
+                continue
+            area = sz[0] * sz[1]
+            if area > best_area:
+                best_area = area
+                best_cover = (rank, url, pname)
+    if best_cover and str(primary_meta.get("cover") or "") != best_cover[1]:
+        primary_meta = dict(primary_meta)
+        primary_meta["cover"] = best_cover[1]
+        primary_meta["source"] = f"{primary_name}+{best_cover[2]}"
     try:
-        result = apply_metadata(conn, movie_id, primary_meta, cfg, overwrite)
+        result = apply_metadata(conn, movie_id, primary_meta, cfg, overwrite,
+                               force_cover=force_cover)
     except Exception:
         conn.rollback()
         raise
@@ -410,6 +491,7 @@ def scrape_one_parallel(movie: Dict[str, Any], providers: List[Any], cfg: Dict[s
         run_providers = [p for p in providers if p.name == "local_nfo"]
     primary_meta = None
     primary_name = None
+    best_cover = None   # (rank, url, provider)：封面单独竞标，在线源优先
     net_err = False  # 是否存在「临时网络/服务端错误」或「反爬拦截」源（不进跳过名单）
     per_provider: List[Dict[str, Any]] = []  # 逐源明细，供失败面板诊断
     try:
@@ -454,6 +536,12 @@ def scrape_one_parallel(movie: Dict[str, Any], providers: List[Any], cfg: Dict[s
                 continue
             if not meta:
                 continue
+            # 封面候选：独立于主源
+            _url = str(meta.get("cover") or "").strip()
+            if _url:
+                _rank = _cover_rank(provider.name)
+                if best_cover is None or _rank < best_cover[0]:
+                    best_cover = (_rank, _url, provider.name)
             if primary_meta is None:
                 primary_meta = meta
                 primary_name = provider.name
@@ -464,7 +552,7 @@ def scrape_one_parallel(movie: Dict[str, Any], providers: List[Any], cfg: Dict[s
             merged = dict(primary_meta)
             changed = False
             for key, val in meta.items():
-                if key == "source" or val in (None, "", [], 0):
+                if key in ("source", "cover") or val in (None, "", [], 0):
                     continue
                 cur = merged.get(key)
                 if cur in (None, "", [], 0):
@@ -478,6 +566,12 @@ def scrape_one_parallel(movie: Dict[str, Any], providers: List[Any], cfg: Dict[s
             if changed:
                 merged["source"] = f"{primary_name}+{provider.name}"
                 primary_meta = merged
+
+        if best_cover and primary_meta is not None:
+            if str(primary_meta.get("cover") or "") != best_cover[1]:
+                primary_meta = dict(primary_meta)
+                primary_meta["cover"] = best_cover[1]
+                primary_meta["source"] = f"{primary_name}+{best_cover[2]}"
 
         if primary_meta is None:
             # 没有命中：若是网络/服务端临时错误或被拦导致，标记 neterr（不进跳过名单）
@@ -637,7 +731,7 @@ def _extract_remaining_covers(conn, cfg: Dict[str, Any], total: int) -> int:
 
 def run_scrape(ids: Optional[List[int]] = None, scope: str = "missing",
                overwrite: Optional[bool] = None, task_id: str = "",
-               force: bool = False) -> Dict[str, Any]:
+               force: bool = False, force_cover: bool = False) -> Dict[str, Any]:
     cfg = load_config(refresh=True)
     if overwrite is None:
         overwrite = bool(cfg["scraper"].get("overwrite", False))
@@ -760,7 +854,8 @@ def run_scrape(ids: Optional[List[int]] = None, scope: str = "missing",
                     meta = res["meta"]
                     ok = False
                     try:
-                        ares = apply_metadata(conn, mid, meta, cfg, overwrite)
+                        ares = apply_metadata(conn, mid, meta, cfg, overwrite,
+                                              force_cover=force_cover)
                         ok = True
                         reason = "成功"
                         status = "ok"
@@ -884,14 +979,16 @@ def run_scrape(ids: Optional[List[int]] = None, scope: str = "missing",
 
 
 def start_scrape_async(ids: Optional[List[int]] = None, scope: str = "missing",
-                       overwrite: Optional[bool] = None, force: bool = False) -> bool:
+                       overwrite: Optional[bool] = None, force: bool = False,
+                       force_cover: bool = False) -> bool:
     if not SCRAPE.start():
         return False
     task_id = SCRAPE.task_id
 
     def worker() -> None:
         try:
-            res = run_scrape(ids, scope, overwrite, task_id=task_id, force=force)
+            res = run_scrape(ids, scope, overwrite, task_id=task_id, force=force,
+                             force_cover=force_cover)
             if not res.get("ok"):
                 SCRAPE.finish(SCRAPE.message or "抓取未执行")
             else:

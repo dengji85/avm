@@ -1,7 +1,7 @@
 <script setup>
 import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
 import { state } from '../state.js'
-import { listMovies, updateMovie, coverUrl, coverThumbUrl, getRecommend } from '../api.js'
+import { listMovies, updateMovie, coverThumbUrl, getRecommend } from '../api.js'
 import { toast, coverFallback, fmtMin, qualityTag, recommendReason } from '../utils.js'
 import { t } from '../i18n/index.js'
 
@@ -185,7 +185,8 @@ function openDetail() { if (cur.value) state.currentId = cur.value.id }
           @pointerup="onUp"
           @pointercancel="onUp"
         >
-          <img :src="coverUrl(cur.id)" alt="" draggable="false" @error="coverFallback" @dblclick="openDetail" />
+          <img :src="coverThumbUrl(cur.id, 720)" alt="" draggable="false"
+             @error="coverFallback" @dblclick="openDetail" />
 
           <div v-if="hint" class="sw-hint" :class="hint.cls">{{ $t(hint.text) }}</div>
 

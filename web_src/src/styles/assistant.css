@@ -260,7 +260,7 @@
   background: var(--c-surface); color: var(--c-text-2); font-size: var(--fs-xs);
 }
 .asst-sim-open:hover { border-color: var(--c-primary); }
-.asst-sim-open img { width: 100%; aspect-ratio: 3/4; object-fit: cover; border-radius: var(--r-sm); }
+.asst-sim-open img { width: 100%; aspect-ratio: 2/3; object-fit: cover; border-radius: var(--r-sm); }
 .asst-reasons { display: flex; gap: 3px; flex-wrap: wrap; }
 .asst-reason {
   padding: 1px 5px; border-radius: 999px; font-size: 10px;

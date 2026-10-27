@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import hashlib
 import html
+import json
 import re
 import shutil
+import time
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 from .config import COVER_DIR, avatar_dir, fanart_dir, ensure_dirs, outbound_ssl_context
 
@@ -38,6 +40,376 @@ def cover_path(filename: str) -> Optional[Path]:
         return None
     p = COVER_DIR / filename
     return p if p.exists() else None
+
+
+# ---------------------------------------------------------------- 竖版海报（poster）
+#
+# 三级来源，质量从高到低：
+#   1. **DMM 官方竖版原图** `{番号}ps.jpg`（1000–1540px 宽，真·海报）——最清晰；
+#   2. 横版封面按策略裁出 2:3（默认取右侧）——离线可用，兜底；
+#   3. 原生竖版封面（FC2 等）直接归一化到 2:3。
+# 原图（横版完整封面）始终不动：详情页 / fanart 导出用完整图。
+# 文件名由 cover 推导 + 同目录 `.poster.json` 记策略来源，策略变更自动失效重生成。
+
+POSTER_SUFFIX = "_poster.jpg"
+POSTER_META_SUFFIX = "_poster.json"
+# right = 取右侧（默认，人物主视觉常见位置）；center = 居中；fit = 完整缩放+模糊背景补边
+POSTER_STRATEGIES = ("right", "center", "fit")
+_POSTER_MAX_H = 1400          # 上限：DMM 官方竖版通常 1032–1534 宽，控制在一倍屏够用且体积可控
+
+
+def poster_name(cover_file: str) -> str:
+    """由封面文件名推导竖版海报文件名。"""
+    return Path(str(cover_file)).stem + POSTER_SUFFIX
+
+
+def poster_path(cover_file: str) -> Optional[Path]:
+    """返回已生成的竖版海报路径（不存在返回 None）。"""
+    if not cover_file:
+        return None
+    p = COVER_DIR / poster_name(cover_file)
+    return p if p.exists() else None
+
+
+def _poster_meta_path(cover_file: str) -> Path:
+    return COVER_DIR / (Path(str(cover_file)).stem + POSTER_META_SUFFIX)
+
+
+def _read_meta(path: Path) -> Dict[str, Any]:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _write_meta(path: Path, data: Dict[str, Any]) -> None:
+    try:
+        path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    except OSError:
+        pass
+
+
+# ---- DMM 官图：番号 -> awsimgsrc 路径（ps = 竖版海报，pl = 横版封面） ----
+
+def _dmm_code(code: str) -> str:
+    """番号归一化成 DMM 路径名：JUL-185 -> jul00185（数字补足 5 位）。
+
+    FC2 / 素人 / 无码等库里没有统一 awsimgsrc 编号的，直接放弃（返回空）。
+    """
+    s = str(code or "").strip().lower()
+    if not s or s.startswith("fc2"):
+        return ""
+    m = re.match(r"^((?:\d+)?[a-z]+)[-_ ]?0*(\d{1,6})(?:[-_ ]?\d+)?$", s)
+    if not m:
+        return ""
+    return "%s%05d" % (m.group(1), int(m.group(2)))
+
+
+def dmm_urls(code: str) -> Optional[Dict[str, str]]:
+    c = _dmm_code(code)
+    if not c:
+        return None
+    base = "https://awsimgsrc.dmm.co.jp/pics_dig/digital/video/%s/%s" % (c, c)
+    return {"poster": base + "ps.jpg", "cover": base + "pl.jpg"}
+
+
+def _open_image(src: Path) -> Optional[Any]:
+    try:
+        from PIL import Image, ImageOps
+        im = Image.open(src)
+        return ImageOps.exif_transpose(im).convert("RGB")
+    except Exception:
+        return None
+
+
+def _fit_canvas(im: Any) -> Any:
+    """整图缩进 2:3 画布居中，空白用模糊放大的原图填充（不丢信息）。"""
+    from PIL import Image, ImageFilter
+    w, h = im.size
+    canvas_h = min(_POSTER_MAX_H * 2, max(h, 1400))
+    canvas_w = round(canvas_h * 2 / 3)
+    bg = im.resize((canvas_w, canvas_h), Image.LANCZOS).filter(ImageFilter.GaussianBlur(24))
+    bg = Image.eval(bg, lambda v: int(v * 0.68))
+    scale = min(canvas_w / w, canvas_h / h)
+    fg = im.resize((max(1, round(w * scale)), max(1, round(h * scale))), Image.LANCZOS)
+    bg.paste(fg, ((canvas_w - fg.width) // 2, (canvas_h - fg.height) // 2))
+    return bg
+
+
+# 裁切后窄于这个宽度就认为「裁出来会糊」：800×540 的横版裁 2:3 只有 360 宽，
+# 放到卡片上等于把 360px 放大到 2x 屏 —— 不如保留 800 宽、两侧模糊补边
+POSTER_CROP_MIN_W = 520
+
+
+def _render_poster(im: Any, strategy: str) -> Any:
+    """把任意比例的图渲染成精确 2:3 竖版（不裁主体、不放大）。"""
+    w, h = im.size
+    if h >= w * 1.15:
+        # 原生竖版：只裁掉两侧多余的 1–2 像素级边，绝不裁内容区
+        tw = min(w, round(h * 2 / 3))
+        x0 = (w - tw) // 2
+        return im.crop((x0, 0, x0 + tw, h))
+    if strategy == "fit" or (0.85 <= h / w < 1.15):
+        # 方形 / 接近方形的封面裁 2:3 会切掉 1/3 宽，主体必断——直接补边
+        return _fit_canvas(im)
+    crop_w = min(w, max(1, round(h * 2 / 3)))
+    x0 = (w - crop_w) // 2 if strategy == "center" else (w - crop_w)
+    return im.crop((x0, 0, x0 + crop_w, h))
+
+
+def _save_poster(im: Any, dst: Path) -> bool:
+    """保存为 2:3 JPEG；只缩小不放大（源小就保持原尺寸，糊图放大只会更糊）。"""
+    try:
+        from PIL import Image
+        out = im
+        if out.height > _POSTER_MAX_H:
+            target_w = max(1, round(out.width * _POSTER_MAX_H / out.height))
+            out = out.resize((target_w, _POSTER_MAX_H), Image.LANCZOS)
+        elif out.width < POSTER_CROP_MIN_W:
+            # 低清裁切偏窄（800×540 裁出 360 宽）：温和放大填满卡片，
+            # 上限 1.45 倍——再多只是把糊图摊大
+            scale = min(1.45, POSTER_CROP_MIN_W / max(1, out.width))
+            if scale > 1.05:
+                out = out.resize((round(out.width * scale), round(out.height * scale)), Image.LANCZOS)
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        out.save(dst, "JPEG", quality=88, optimize=True, progressive=True)
+        return True
+    except Exception:
+        return False
+
+
+def _effective_strategy(im: Any, strategy: str) -> str:
+    """实际会采用的策略（低清横版自动 fit、方形自动 fit）。用于写元信息。"""
+    w, h = im.size
+    if h >= w * 1.15:
+        return "portrait"
+    if strategy == "fit" or (0.85 <= h / w < 1.15):
+        return "fit"
+    return strategy
+
+
+def make_poster(src: Path, dst: Path, strategy: str = "right",
+                meta: Dict[str, Any] | None = None) -> bool:
+    """从图片文件生成 2:3 竖版海报（离线兜底路径）。"""
+    im = _open_image(src)
+    if im is None or im.width < 40 or im.height < 40:
+        return False
+    effective = _effective_strategy(im, strategy)
+    out = _render_poster(im, strategy)
+    if not _save_poster(out, dst):
+        return False
+    info = {"from": "cover", "strategy": effective,
+            "src_w": im.width, "src_h": im.height,
+            "src_mtime": src.stat().st_mtime}
+    if meta:
+        info.update(meta)
+    _write_meta(COVER_DIR / (Path(str(src.name)).stem + POSTER_META_SUFFIX), info)
+    return True
+
+
+def save_poster_from_bytes(data: bytes, cover_file: str,
+                           cfg: Optional[Dict[str, Any]] = None) -> Optional[str]:
+    """DMM 官方竖版图落盘为海报（归一化到 2:3，不放大）。"""
+    try:
+        from io import BytesIO
+        from PIL import Image, ImageOps
+        im = Image.open(BytesIO(data))
+        im = ImageOps.exif_transpose(im).convert("RGB")
+    except Exception:
+        return None
+    dst = COVER_DIR / poster_name(cover_file)
+    out = _render_poster(im, "right")
+    if not _save_poster(out, dst):
+        return None
+    src = cover_path(cover_file)
+    _write_meta(COVER_DIR / (Path(str(cover_file)).stem + POSTER_META_SUFFIX),
+                {"from": "dmm", "src_w": im.width, "src_h": im.height,
+                 "src_mtime": src.stat().st_mtime if src else 0})
+    return dst.name
+
+
+
+# ---- DMM 无图缓存：素人/无码番号在 DMM 没有条目，反复探测只会白等超时 ----
+_DMM_MISS_FILE = ".dmm_missing.json"
+_DMM_MISS_TTL = 7 * 24 * 3600
+
+
+def _dmm_miss_load() -> Dict[str, float]:
+    try:
+        data = json.loads((COVER_DIR / _DMM_MISS_FILE).read_text(encoding="utf-8"))
+        return {str(k): float(v) for k, v in (data or {}).items() if isinstance(v, (int, float))}
+    except Exception:
+        return {}
+
+
+def _dmm_miss_get(code: str) -> bool:
+    cid = _dmm_code(code)
+    if not cid:
+        return True
+    ts = _dmm_miss_load().get(cid) or 0
+    return (time.time() - ts) < _DMM_MISS_TTL
+
+
+def _dmm_miss_add(code: str) -> None:
+    cid = _dmm_code(code)
+    if not cid:
+        return
+    data = _dmm_miss_load()
+    data[cid] = time.time()
+    try:
+        (COVER_DIR / _DMM_MISS_FILE).write_text(json.dumps(data), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def dmm_available(code: str) -> bool:
+    """该番号近期是否值得再向 DMM 探测（避免反复超时）。"""
+    return bool(_dmm_code(code)) and not _dmm_miss_get(code)
+
+
+
+# 低于这个宽度视为「低清封面」：允许被明显更好的图替换（重刮时不被历史低清图锁死）
+COVER_CLEAR_MIN_W = 600
+# 新图面积要达到旧图的这个倍数才算「更好的封面」
+COVER_UPGRADE_RATIO = 1.6
+
+
+def bytes_size(data: bytes) -> Optional[Tuple[int, int]]:
+    """从字节流读图片尺寸（解不出返回 None）。"""
+    try:
+        from io import BytesIO
+
+        from PIL import Image
+        with Image.open(BytesIO(data)) as im:
+            return (im.width, im.height)
+    except Exception:
+        return None
+
+
+def file_size(path: Optional[Path]) -> Optional[Tuple[int, int]]:
+    if path is None or not Path(path).exists():
+        return None
+    try:
+        from PIL import Image
+        with Image.open(path) as im:
+            return (im.width, im.height)
+    except Exception:
+        return None
+
+
+def cover_size(cover_file: str) -> Optional[Tuple[int, int]]:
+    """当前封面（data/covers 下）的像素尺寸。"""
+    return file_size(cover_path(cover_file))
+
+
+def better_cover(new: Optional[Tuple[int, int]], old: Optional[Tuple[int, int]]) -> bool:
+    """新封面是否值得替换旧封面：按像素面积判断，低清老图优先让位。
+
+    * 没有旧图 → 用新的；
+    * 新图面积 ≥ 旧图 1.6 倍 → 升级；
+    * 旧图宽度 < COVER_CLEAR_MIN_W（低清）且新图更宽 → 升级。
+    这样既不会被 360×540 的本地图锁死，也不会把 2184×1468 的官方大图换成站点小图。
+    """
+    if new is None:
+        return False
+    if old is None:
+        return True
+    nw, nh = new
+    ow, oh = old
+    if nw * nh >= ow * oh * COVER_UPGRADE_RATIO:
+        return True
+    if ow < COVER_CLEAR_MIN_W and nw > ow:
+        return True
+    return False
+
+
+def poster_dmm_enabled(cfg: Optional[Dict[str, Any]] = None) -> bool:
+    """是否允许向 DMM 抓官方竖版（设置 → 媒体库 → 竖版海报）。"""
+    try:
+        from .config import load_config
+        media = ((cfg or load_config()).get("media") or {})
+        return bool(media.get("poster_dmm", True))
+    except Exception:
+        return True
+
+
+def _poster_strategy(cfg: Optional[Dict[str, Any]]) -> str:
+    try:
+        from .config import load_config
+        val = str(((cfg or load_config()).get("media") or {}).get("poster_strategy") or "right")
+    except Exception:
+        val = "right"
+    return val if val in POSTER_STRATEGIES else "right"
+
+
+def ensure_poster(cover_file: str, cfg: Optional[Dict[str, Any]] = None,
+                  code: str = "", allow_network: bool = False) -> Optional[str]:
+    """确保竖版海报存在（必要时重生成）。返回海报文件名，失败返回 None。
+
+    失效条件：海报缺失 / 源图更新 / 策略变更（官方竖版不受策略影响）/
+    允许联网但当前还不是官方竖版。
+    """
+    if not cover_file:
+        return None
+    src = cover_path(cover_file)
+    if src is None:
+        return None
+    dst = COVER_DIR / poster_name(cover_file)
+    meta = _read_meta(COVER_DIR / (Path(str(cover_file)).stem + POSTER_META_SUFFIX))
+    strategy = _poster_strategy(cfg)
+    from_dmm = meta.get("from") == "dmm"
+    stale = (
+        not dst.exists()
+        or float(meta.get("src_mtime") or 0) < src.stat().st_mtime
+        or (not from_dmm and meta.get("strategy") != strategy)
+        or (allow_network and bool(code) and not from_dmm)
+    )
+    if not stale:
+        return dst.name
+
+    # 1) 优先 DMM 官方竖版（真海报，比裁横图清晰一个档次）
+    if allow_network and code and dmm_available(code):
+        urls = dmm_urls(code)
+        if urls:
+            data = download(urls["poster"], cfg or {}, referer="https://www.dmm.co.jp/")
+            if data:
+                name = save_poster_from_bytes(data, cover_file)
+                if name:
+                    return name
+            else:
+                _dmm_miss_add(code)
+
+    # 2) 兜底：从封面裁 / 归一化
+    ok = make_poster(src, dst, strategy)
+    return dst.name if ok else None
+
+
+def upgrade_from_dmm(key: str, code: str, cfg: Dict[str, Any],
+                     cover_file: str = "") -> Dict[str, str]:
+    """用 DMM 高清横版（pl）替换当前封面，**仅当确实更清晰时**。
+
+    竖版海报不在这里处理：``ensure_poster(allow_network=True)`` 会优先取官方 ps，
+    没有官方竖版才从（此时已经升级过的）横版裁切——顺序上必须先升级封面再生成海报。
+    只在刮削路径调用，手工上传 / 抽帧不覆盖用户选择。
+    """
+    urls = dmm_urls(code)
+    if not urls or not dmm_available(code):
+        return {}
+    out: Dict[str, str] = {}
+    data = download(urls["cover"], cfg, referer="https://www.dmm.co.jp/")
+    if data:
+        new_size = bytes_size(data)
+        cur_size = cover_size(cover_file) if cover_file else None
+        if better_cover(new_size, cur_size):
+            name = save_bytes(key, data, urls["cover"])
+            if name:
+                out["cover"] = name
+        else:
+            # 已有更大的图：记住「DMM 查过」避免每次重复请求
+            pass
+    if not out.get("cover"):
+        _dmm_miss_add(code)
+    return out
 
 
 def _guess_ext(data: bytes, url: str = "") -> str:

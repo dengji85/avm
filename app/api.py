@@ -39,6 +39,14 @@ from .jobs import SCAN, SCRAPE, ACTRESS_FETCH, NFO_EXPORT
 
 router = APIRouter(prefix="/api")
 
+
+# 按领域拆出的子路由（阶段 2）：路径与行为不变，只是文件分开。
+from .routers import covers as _covers_api          # noqa: E402
+from .routers import ext as _ext_api                # noqa: E402
+
+router.include_router(_covers_api.router)
+router.include_router(_ext_api.router)
+
 # 当前程序版本（单一真源见 app/__init__.__version__，与发布版本保持一致）。
 from . import __version__ as APP_VERSION
 # 编译/构建日期，格式 YYYY-MM-DD。由 build.py 在打包时重写为实际构建日期；
@@ -255,69 +263,13 @@ def mark_played(movie_id: int) -> Dict[str, Any]:
 # ------------------------------------------------------------------ 封面
 
 
-@router.get("/cover/{movie_id}")
-def get_cover(movie_id: int, request: Request) -> Response:
-    with db() as conn:
-        row = query_one(conn, "SELECT code, title, cover FROM movies WHERE id = ?", (movie_id,))
-    if row is None:
-        raise HTTPException(404, "影片不存在")
-    path = images.cover_path(row["cover"] or "")
-    if path:
-        st = path.stat()
-        etag = f'"{int(st.st_mtime)}.{st.st_size}"'
-        if request.headers.get("If-None-Match") == etag:
-            return Response(status_code=304, headers={"ETag": etag, "Cache-Control": "no-cache"})
-        return FileResponse(path, headers={"Cache-Control": "no-cache", "ETag": etag})
-    svg = images.placeholder_svg(row["code"] or "", row["title"] or "")
-    etag = f'"{hashlib.md5(svg.encode("utf-8", "ignore")).hexdigest()}"'
-    if request.headers.get("If-None-Match") == etag:
-        return Response(status_code=304, headers={"ETag": etag, "Cache-Control": "no-cache"})
-    return Response(svg, media_type="image/svg+xml",
-                    headers={"Cache-Control": "no-cache", "ETag": etag})
 
 
 # ------------------------------------------------------------------ 女优头像 / 背景大图
 
 
-@router.get("/avatar/{name:path}")
-def get_avatar(name: str, request: Request) -> Response:
-    """返回女优头像。name 为本地相对文件名；若为远程 URL 则代理转发（规避跨域/防盗链）。"""
-    if images.is_remote(name):
-        return _proxy_image(name)
-    path = images.avatar_path(name)
-    if path:
-        st = path.stat()
-        etag = f'"{int(st.st_mtime)}.{st.st_size}"'
-        if request.headers.get("If-None-Match") == etag:
-            return Response(status_code=304, headers={"ETag": etag, "Cache-Control": "no-cache"})
-        return FileResponse(str(path), headers={"Cache-Control": "no-cache", "ETag": etag})
-    # 无头像：返回一张中性占位 SVG
-    svg = images.placeholder_svg(name, "无头像")
-    etag = f'"{hashlib.md5(svg.encode("utf-8", "ignore")).hexdigest()}"'
-    return Response(svg, media_type="image/svg+xml",
-                    headers={"Cache-Control": "no-cache", "ETag": etag})
 
 
-@router.get("/fanart/{movie_id}")
-def get_fanart(movie_id: int, request: Request) -> Response:
-    """返回影片背景大图（fanart）。"""
-    with db() as conn:
-        row = query_one(conn, "SELECT code, title, fanart FROM movies WHERE id = ?", (movie_id,))
-    if row is None:
-        raise HTTPException(404, "影片不存在")
-    if images.is_remote(row["fanart"] or ""):
-        return _proxy_image(row["fanart"])
-    path = images.fanart_path(row["fanart"] or "")
-    if path:
-        st = path.stat()
-        etag = f'"{int(st.st_mtime)}.{st.st_size}"'
-        if request.headers.get("If-None-Match") == etag:
-            return Response(status_code=304, headers={"ETag": etag, "Cache-Control": "no-cache"})
-        return FileResponse(str(path), headers={"Cache-Control": "no-cache", "ETag": etag})
-    svg = images.placeholder_svg(row["code"] or "", "无背景图")
-    etag = f'"{hashlib.md5(svg.encode("utf-8", "ignore")).hexdigest()}"'
-    return Response(svg, media_type="image/svg+xml",
-                    headers={"Cache-Control": "no-cache", "ETag": etag})
 
 
 @router.post("/media/cache-avatars")
@@ -537,8 +489,8 @@ def _start_actress_fetch(mode: str, limit: int = 0) -> Dict[str, Any]:
     if not ACTRESS_FETCH.start():
         raise HTTPException(409, "已有女优资料抓取任务在执行中")
     cfg = load_config()
-    from .threadpool import submit_task
-    submit_task(_run_actress_fetch, mode, limit, cfg)
+    from .threadpool import submit_long
+    submit_long(_run_actress_fetch, mode, limit, cfg)
     return {"ok": True, "mode": mode}
 
 
@@ -697,120 +649,7 @@ def actress_fetch_cancel() -> Dict[str, Any]:
     return {"ok": True}
 
 
-def _proxy_image(url: str) -> Response:
-    """代理远程图片，规避前端跨域与防盗链；失败时返回占位 SVG。"""
-    try:
-        import requests
-        cfg = load_config()
-        proxy = (cfg.get("scraper", {}).get("proxy") or "") or None
-        proxies = {"http": proxy, "https": proxy} if proxy else None
-        resp = requests.get(url, timeout=20, headers={"User-Agent": "Mozilla/5.0"}, proxies=proxies)
-        resp.raise_for_status()
-        ctype = resp.headers.get("Content-Type", "image/jpeg")
-        if not ctype.startswith("image/"):
-            ctype = "image/jpeg"
-        return Response(resp.content, media_type=ctype,
-                        headers={"Cache-Control": "public, max-age=3600"})
-    except Exception:
-        svg = images.placeholder_svg("ERR", "图片获取失败")
-        return Response(svg, media_type="image/svg+xml",
-                        headers={"Cache-Control": "public, max-age=60"})
 
-
-@router.post("/movies/{movie_id}/cover")
-def set_cover(movie_id: int, payload: Dict[str, Any] = Body(default={})) -> Dict[str, Any]:
-    cfg = load_config()
-    location = str(payload.get("url") or payload.get("path") or "").strip()
-    with db() as conn:
-        movie = store.movie_detail(conn, movie_id)
-        if not movie:
-            raise HTTPException(404, "影片不存在")
-        if not location:  # 不传地址时自动嗅探本地图片
-            name = scraper.sniff_local_cover(conn, movie_id, cfg)
-        else:
-            name = scraper.save_cover(conn, movie, location, cfg, source="manual")
-        if not name:
-            raise HTTPException(400, "封面获取失败，请检查地址或本地文件是否有效")
-        return {"ok": True, "cover": name}
-
-
-@router.post("/movies/{movie_id}/cover/upload")
-async def upload_cover(movie_id: int, file: UploadFile = File(...)) -> Dict[str, Any]:
-    data = await file.read()
-    with db() as conn:
-        movie = store.movie_detail(conn, movie_id)
-        if not movie:
-            raise HTTPException(404, "影片不存在")
-        name = images.save_bytes(movie["key"], data, file.filename or "")
-        if not name:
-            raise HTTPException(400, "图片无效")
-        conn.execute(
-            "UPDATE movies SET cover = ?, cover_source = 'upload' WHERE id = ?", (name, movie_id))
-    return {"ok": True, "cover": name}
-
-
-@router.delete("/movies/{movie_id}/cover")
-def clear_cover(movie_id: int) -> Dict[str, Any]:
-    with db() as conn:
-        row = query_one(conn, "SELECT cover FROM movies WHERE id = ?", (movie_id,))
-        if row and row["cover"]:
-            p = COVER_DIR / row["cover"]
-            if p.exists():
-                try:
-                    p.unlink()
-                except OSError:
-                    pass
-        conn.execute("UPDATE movies SET cover = '', cover_source = '' WHERE id = ?", (movie_id,))
-    return {"ok": True}
-
-
-@router.post("/covers/local-sniff")
-def sniff_all_covers() -> Dict[str, Any]:
-    return scraper.batch_local_covers()
-
-
-@router.post("/movies/{movie_id}/extract-cover")
-def extract_cover(movie_id: int) -> Dict[str, Any]:
-    """从影片视频中抽一帧作为封面（未刮削到封面的影片可用）。"""
-    cfg = load_config()
-    from .ext_components import ffmpeg_exe
-    ffmpeg = ffmpeg_exe(cfg)
-    with db() as conn:
-        mv = store.movie_detail(conn, movie_id)
-        if not mv:
-            raise HTTPException(404, "影片不存在")
-        if mv.get("files") and (mv["files"][0].get("strm_url") or ""):
-            raise HTTPException(400, "网络串流无法抽帧，请手动上传封面")
-        name = store.extract_cover_from_video(conn, movie_id, ffmpeg)
-    if not name:
-        raise HTTPException(400, "抽帧失败：ffmpeg 不可用、视频无法读取或无有效帧")
-    if name == "skipped":
-        raise HTTPException(409, "该影片已有正式封面（刮削/上传），不会用视频抽帧覆盖")
-    return {"ok": True, "cover": name, "cover_source": "video"}
-
-
-@router.post("/covers/extract-all")
-def extract_all_covers() -> Dict[str, Any]:
-    """批量：为所有「没有封面」的影片从视频抽帧生成封面。"""
-    cfg = load_config()
-    from .ext_components import ffmpeg_exe
-    ffmpeg = ffmpeg_exe(cfg)
-    with db() as conn:
-        ids = [r["id"] for r in query_all(
-            conn, "SELECT id FROM movies WHERE cover = '' AND has_code = 1")]
-    ok = 0
-    failed = 0
-    for mid in ids:
-        try:
-            with db() as conn:
-                name = store.extract_cover_from_video(conn, mid, ffmpeg)
-            if name:
-                ok += 1
-            else:
-                failed += 1
-        except Exception:
-            failed += 1
-    return {"ok": True, "extracted": ok, "failed": failed, "total": len(ids)}
 
 
 # ------------------------------------------------------------------ 分类/统计
@@ -1162,7 +1001,9 @@ def start_scrape(payload: Dict[str, Any] = Body(default={})) -> Dict[str, Any]:
     scope = str(payload.get("scope", "missing"))
     overwrite = payload.get("overwrite")
     force = bool(payload.get("force", False))
-    if not scraper.start_scrape_async(ids, scope, overwrite, force=force):
+    force_cover = bool(payload.get("force_cover", False))
+    if not scraper.start_scrape_async(ids, scope, overwrite, force=force,
+                                      force_cover=force_cover):
         raise HTTPException(409, "已有抓取任务在执行中")
     return {"ok": True}
 
@@ -1575,53 +1416,18 @@ def ai_asr_status() -> Dict[str, Any]:
 
 
 # ------------------------------------------------------------------ 扩展组件
-@router.get("/ext/status")
-def ext_status() -> Dict[str, Any]:
-    """全部可选组件（ffmpeg / ASR 依赖 / 模型）的检测状态与当前安装任务。"""
-    from . import ext_components
-    return ext_components.status()
 
 
-@router.get("/ext/task")
-def ext_task() -> Dict[str, Any]:
-    """当前安装任务进度（前端 2 秒轮询）。"""
-    from . import ext_components
-    return ext_components.task_state()
 
 
-@router.post("/ext/{cid}/install")
-def ext_install(cid: str, payload: Dict[str, Any] = Body(default={})) -> Dict[str, Any]:
-    """安装组件：下载（可断点续传）→ 解压 → 校验。同一时间只允许一个任务。"""
-    from . import ext_components
-    try:
-        return ext_components.install(cid, source=str((payload or {}).get("source") or "auto"))
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e.args[0] if e.args else str(e)))
 
 
-@router.post("/ext/task/cancel")
-def ext_cancel() -> Dict[str, Any]:
-    from . import ext_components
-    return ext_components.cancel()
 
 
-@router.post("/ext/{cid}/import")
-def ext_import(cid: str, payload: Dict[str, Any] = Body(default={})) -> Dict[str, Any]:
-    """手动导入离线包：zip / tar 包或已解压目录（服务端所在机器可访问的路径）。"""
-    from . import ext_components
-    try:
-        return ext_components.import_component(cid, str((payload or {}).get("dir") or ""))
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e.args[0] if e.args else str(e)))
 
 
-@router.post("/ext/{cid}/uninstall")
-def ext_uninstall(cid: str) -> Dict[str, Any]:
-    from . import ext_components
-    try:
-        return ext_components.uninstall(cid)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e.args[0] if e.args else str(e)))
+
+
 
 
 @router.get("/movies/{movie_id}/dialog")
@@ -1692,7 +1498,8 @@ def _ai_plot_for_movie(movie_id: int, preview: bool = False) -> Dict[str, Any]:
     if not m:
         raise ValueError("影片不存在")
     # 抽字幕会调用 ffmpeg，放到数据库连接之外，避免长时间占用
-    sub = subtext.collect(m.get("files") or [], m.get("subtitles") or [], cfg)
+    sub = subtext.collect(m.get("files") or [], m.get("subtitles") or [], cfg,
+                          prefer_original=bool(((cfg.get("ai") or {}).get("prefer_original_sub", True))))
     # 依次尝试：字幕 → 语音对白 → 元数据。
     # 模型对某些内容会返回空串（内容过滤），这种情况下继续降级，而不是让用户看到
     # 「全部分段摘要都失败了」这种无法操作的错误。
@@ -2018,17 +1825,33 @@ def ai_jobs_cancel_active() -> Dict[str, Any]:
 @router.post("/ai/translate/{movie_id}")
 def ai_translate_subtitle(movie_id: int, target: str = "zh-Hans",
                           bilingual: bool = False) -> Dict[str, Any]:
-    """单部片字幕翻译（同步执行）：产物落 data/subs/{id}/ 并登记到字幕列表。"""
+    """单部片字幕翻译：**后台任务**（长片要几分钟，同步请求会被浏览器/反代判超时）。
+
+    立即返回任务状态，前端轮询 ``GET /ai/translate/{id}`` 看进度；
+    产物仍落 data/subs/{id}/ 并登记到字幕列表。
+    """
     cfg = load_config(refresh=True)
     if not ai_mod.is_available(cfg):
         raise HTTPException(status_code=400, detail="AI 未启用：请先在 设置 → AI 中配置接口与模型")
-    try:
-        r = translate.translate_movie(movie_id, cfg, target, bilingual)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=str(e))
-    return r
+    with db() as conn:
+        if not query_one(conn, "SELECT 1 FROM movies WHERE id = ?", (movie_id,)):
+            raise HTTPException(status_code=404, detail="影片不存在")
+    from . import translate_job
+    return translate_job.start(movie_id, cfg, target, bool(bilingual))
+
+
+@router.get("/ai/translate/{movie_id}")
+def ai_translate_status(movie_id: int) -> Dict[str, Any]:
+    """单部翻译任务进度（前端 1 秒轮询一次）。"""
+    from . import translate_job
+    return translate_job.state(movie_id)
+
+
+@router.post("/ai/translate/{movie_id}/cancel")
+def ai_translate_cancel(movie_id: int) -> Dict[str, Any]:
+    """取消单部翻译：在下一批结束时中断，已译好的批次结果不落盘。"""
+    from . import translate_job
+    return translate_job.cancel(movie_id)
 
 
 @router.post("/ai/ask/{movie_id}")
@@ -2045,11 +1868,13 @@ def ai_ask_plot(movie_id: int, payload: Dict[str, Any] = Body(default={})) -> Di
     if not mv:
         raise HTTPException(status_code=404, detail="影片不存在")
     # 抽字幕与调用模型都可能几十秒，放在数据库连接之外，避免长时间占用 SQLite 连接
-    cue_info = subtext.collect_cues(mv.get("files") or [], mv.get("subtitles") or [], cfg)
+    cue_info = subtext.collect_cues(mv.get("files") or [], mv.get("subtitles") or [], cfg,
+                                    prefer_original=bool(((cfg.get("ai") or {}).get("prefer_original_sub", True))))
     if not cue_info["cues"]:
         raise HTTPException(status_code=400, detail="这部影片没有可用字幕，无法问答")
     try:
-        ans = ai_extra.answer_about_plot(question, cue_info["cues"], mv, cfg=cfg)
+        ans = ai_extra.answer_about_plot(question, cue_info["cues"], mv, cfg=cfg,
+                                     orig_cues=cue_info.get("orig_cues") or [])
     except Exception as e:
         raise HTTPException(status_code=502, detail=str(e))
     if ans.get("reason") == "no-match":
@@ -2545,8 +2370,13 @@ def delete_movie_subtitle(movie_id: int, sub_id: int) -> Dict[str, Any]:
         path = translate.unregister(conn, movie_id, sub_id)
         if path is None:
             raise HTTPException(status_code=404, detail="字幕不存在")
+        # 同路径被其它记录引用时不要删文件（历史数据里可能多条记录共享一个译文文件）
+        shared = False
+        if path:
+            shared = bool(conn.execute(
+                "SELECT 1 FROM movie_subtitles WHERE file_path=? LIMIT 1", (path,)).fetchone())
         conn.commit()
-    if path and "/subs/" in path.replace("\\", "/"):
+    if path and not shared and "/subs/" in path.replace("\\", "/"):
         try:
             os.remove(path)
         except OSError:
@@ -2732,11 +2562,26 @@ def ai_library_qa(payload: Dict[str, Any] = Body(default={})) -> Dict[str, Any]:
     if not question:
         raise HTTPException(status_code=400, detail="question 为空")
     try:
-        return ai_library.ask_library(question, cfg)
+        return ai_library.ask_library(question, cfg,
+                                      history=_chat_history(payload.get("history")))
     except ai_core.AiError as e:
         raise HTTPException(status_code=502, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=502, detail=str(e))
+
+
+def _chat_history(raw: Any, limit: int = 8) -> List[Dict[str, Any]]:
+    """清洗前端传来的会话历史：只认 user/assistant 的纯文本，防超长 prompt。"""
+    out: List[Dict[str, Any]] = []
+    for h in (raw or []) if isinstance(raw, list) else []:
+        if not isinstance(h, dict):
+            continue
+        role = str(h.get("role") or "")
+        content = str(h.get("content") or "").strip()
+        if role not in ("user", "assistant") or not content:
+            continue
+        out.append({"role": role, "content": content[:600]})
+    return out[-limit:]
 
 
 @router.post("/ai/agent")
@@ -2753,7 +2598,8 @@ def ai_agent_run(payload: Dict[str, Any] = Body(default={})) -> Dict[str, Any]:
     cfg = load_config(refresh=True)
     movie = payload.get("movie") if isinstance(payload.get("movie"), dict) else None
     try:
-        return agent_mod.run_agent(question, cfg, movie=movie)
+        return agent_mod.run_agent(question, cfg, movie=movie,
+                                   history=_chat_history(payload.get("history")))
     except ai_core.AiError as e:
         raise HTTPException(status_code=502, detail=str(e))
     except Exception as e:                               # noqa: BLE001 接口层统一兜底
@@ -2776,7 +2622,8 @@ def ai_agent_stream(payload: Dict[str, Any] = Body(default={})) -> StreamingResp
 
     def gen():
         try:
-            for ev in agent_mod.iter_agent(question, cfg, movie=movie):
+            for ev in agent_mod.iter_agent(question, cfg, movie=movie,
+                                           history=_chat_history(payload.get("history"))):
                 yield "data: %s\n\n" % json.dumps(ev, ensure_ascii=False)
         except Exception as e:                       # noqa: BLE001 流里出错只能作为事件下发
             yield "data: %s\n\n" % json.dumps(
@@ -2810,7 +2657,9 @@ def scrape_single(movie_id: int, payload: Dict[str, Any] = Body(default={})) -> 
     if only:
         plist = [p for p in plist if p.name == only] or plist
     with db() as conn:
-        result = scraper.scrape_one(conn, movie_id, plist, cfg, bool(payload.get("overwrite", True)))
+        result = scraper.scrape_one(conn, movie_id, plist, cfg,
+                                    bool(payload.get("overwrite", True)),
+                                    force_cover=bool(payload.get("force_cover", False)))
         result["movie"] = store.movie_detail(conn, movie_id)
     return result
 
@@ -2972,8 +2821,8 @@ def movie_previews(movie_id: int, generate: bool = False) -> Dict[str, Any]:
                 shutil.rmtree(old_dir, ignore_errors=True)
             with db() as conn:
                 store.set_previews(conn, movie_id, [], current_q)
-            from .threadpool import submit_task
-            submit_task(_gen_previews_sync, movie_id, target, current_q)
+            from .threadpool import submit_long
+            submit_long(_gen_previews_sync, movie_id, target, current_q)
             regenerating = True
     urls = [f"/covers/preview/{movie_id}/{os.path.basename(p)}" for p in (paths or [])]
     return {"available": True, "paths": paths or [], "urls": urls,
@@ -3006,8 +2855,8 @@ def generate_previews_bg(movie_id: int, body: dict = Body(default={})) -> Dict[s
             shutil.rmtree(old_dir, ignore_errors=True)
         with db() as conn:
             store.set_previews(conn, movie_id, [], current_q)
-    from .threadpool import submit_task
-    submit_task(_gen_previews_sync, movie_id, target, current_q)
+    from .threadpool import submit_long
+    submit_long(_gen_previews_sync, movie_id, target, current_q)
     return {"started": True, "message": "已在后台生成预览图"}
 
 
@@ -3037,8 +2886,8 @@ def regenerate_all_previews() -> Dict[str, Any]:
                 store.set_previews(conn, mid, [], current_q)
             _gen_previews_sync(mid, target, current_q)
 
-    from .threadpool import submit_task
-    submit_task(_run)
+    from .threadpool import submit_long
+    submit_long(_run)
     return {"started": True, "message": "已在后台重新生成全部预览图"}
 
 

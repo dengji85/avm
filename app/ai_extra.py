@@ -81,8 +81,13 @@ def _with_neighbors(cues: List[Tuple[float, str]], idx: List[int]) -> List[int]:
 
 def answer_about_plot(question: str, cues: List[Tuple[float, str]],
                       movie: Dict[str, Any], top: int = 10,
-                      cfg: Dict[str, Any] | None = None) -> Dict[str, Any]:
-    """基于字幕回答剧情问题，并给出字幕时间戳依据。"""
+                      cfg: Dict[str, Any] | None = None,
+                      orig_cues: List[Tuple[float, str]] | None = None) -> Dict[str, Any]:
+    """基于字幕回答剧情问题，并给出字幕时间戳依据。
+
+    orig_cues 存在时（通常是日语原文轨）：召回归中文轨，**理解依据原文**——
+    机翻中文字幕常有失真（专有名词错译、国内模型额外审查），把原文一并交给
+    模型自己理解，比让它读二手翻译更可靠。中文片段仍随附作时间对照。"""
     c = AIConfig.from_config(cfg)
     cues = list(cues or [])
     q = _query_bigrams(question)
@@ -114,8 +119,29 @@ def answer_about_plot(question: str, cues: List[Tuple[float, str]],
     sys = ai_prompts.system("plot.qa", cfg)
     hint = ("（以下是整片字幕按时间均匀抽取的片段，可用于概括整体剧情）\n"
             if mode == "digest" else "")
-    user = ("影片：%s\n\n问题：%s\n\n字幕片段：\n%s%s"
-            % (movie.get("title") or movie.get("code") or "", question, hint, "\n".join(blocks)))
+    # 原文轨：取命中时间窗（±2.5 秒）内的原文行——原文说同一句话才可靠，
+    # 交给模型「按原文理解 + 必要时自行翻译」，中文片段仅作时间对照
+    orig_block = ""
+    if orig_cues:
+        starts = [s for s, _ in picked]
+        rows: List[Tuple[float, str]] = []
+        prev_text = ""
+        for s0, txt in orig_cues:
+            if not any(abs(s0 - t0) <= 2.5 for t0 in starts):
+                continue
+            if txt == prev_text:
+                continue
+            rows.append((s0, txt))
+            prev_text = txt
+            if len(rows) >= 120:
+                break
+        if rows:
+            orig_block = ("原文字幕（**优先依据它理解剧情**，必要时自行翻译）：\n%s\n\n"
+                          "机翻中文字幕（仅供时间对照，可能有失真）：\n"
+                          % "\n".join("[%s] %s" % (_clock(s), x) for s, x in rows))
+    user = ("影片：%s\n\n问题：%s\n\n%s字幕片段：\n%s%s"
+            % (movie.get("title") or movie.get("code") or "", question,
+               orig_block, hint, "\n".join(blocks)))
     out = chat(c, [{"role": "system", "content": sys}, {"role": "user", "content": user}],
                max_tokens=1200, purpose="plot.qa").strip()
     # 依据列表与真正送给模型的片段保持一致：截断会漏掉答案引用的时间戳

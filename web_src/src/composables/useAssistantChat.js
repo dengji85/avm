@@ -434,6 +434,16 @@ export function useAssistantChat({ ai, movie }) {
     }
   }
 
+  /** 会话历史（最近 8 条纯文本）：让「再找两部」「那部呢」这类追问接得上上一轮 */
+  function chatHistory() {
+    const out = []
+    for (const m of messages.value) {
+      if (m.role === 'user' && m.text) out.push({ role: 'user', content: String(m.text).slice(0, 500) })
+      else if (m.role === 'bot' && m.say) out.push({ role: 'assistant', content: String(m.say).slice(0, 500) })
+    }
+    return out.slice(-8)
+  }
+
   async function runQa(text) {
     if (busy.value) return
     resetLibrary()
@@ -543,6 +553,7 @@ export function useAssistantChat({ ai, movie }) {
     // 把「当前影片」告诉 agent：没有元数据时它才能拿番号去联网查
     const m = movie.value
     const ctx = (m && (m.code || m.title)) ? { code: m.code || '', title: m.title || '' } : null
+    const history = chatHistory()
     try {
       return await aiAgentStream(text, (ev) => {
         if (ev.type === 'step' && ev.step) {
@@ -553,7 +564,7 @@ export function useAssistantChat({ ai, movie }) {
         } else if (ev.type === 'answer') {
           library.answer = ev.text || ''
         }
-      }, ctx)
+      }, ctx, history)
     } finally {
       library.streaming = false
     }
@@ -573,7 +584,7 @@ export function useAssistantChat({ ai, movie }) {
         err = (e && e.message) || String(e)
       }
       try {
-        return await aiLibraryQa(text)
+        return await aiLibraryQa(text, chatHistory())
       } catch (e) {
         err = err || (e && e.message) || String(e)
       }

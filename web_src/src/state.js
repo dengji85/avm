@@ -80,6 +80,9 @@ export const state = reactive({
   aiSection: '',
   density: saved.density || 'cozy',
   cardSize: saved.cardSize || 'normal',   // dense | normal | large
+  // 详情页布局：hero = 整宽大图+信息叠加 / split = 左图右信息 / compact = 紧凑横图
+  detailLayout: ['hero', 'split', 'compact'].includes(saved.detailLayout)
+    ? saved.detailLayout : 'compact',
   sidebarCollapsed: !!saved.sidebarCollapsed,
   mobileNavOpen: false,
   // 播放器偏好：auto=智能优先网络（失败回退系统） / web=始终网络 / external=始终系统
@@ -124,6 +127,7 @@ export const state = reactive({
 watch(
   () => ({
     theme: state.theme, density: state.density, cardSize: state.cardSize,
+    detailLayout: state.detailLayout,
     sidebarCollapsed: state.sidebarCollapsed, sort: state.sort,
     page_size: state.page_size, multiOp: state.multiOp, lastCollection: state.lastCollection,
     playOrder: state.playQueue.order, playLoop: state.playQueue.loop,

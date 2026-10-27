@@ -246,6 +246,12 @@ def init_db() -> None:
 def _migrate(conn: sqlite3.Connection) -> None:
     """为新版本新增的列做 ALTER 迁移，保证老库可平滑升级。"""
     movie_cols = {r[1] for r in conn.execute("PRAGMA table_info(movies)").fetchall()}
+    # 评分口径统一为 0–5（界面是 5 星制）：历史刮削数据是 0–10，折半一次即可；
+    # 幂等——折半后不会再有 >5 的值，重复执行无影响。
+    try:
+        conn.execute("UPDATE movies SET rating = ROUND(rating / 2.0, 1) WHERE rating > 5")
+    except Exception:
+        pass
     if "code_norm" not in movie_cols:
         conn.execute("ALTER TABLE movies ADD COLUMN code_norm TEXT DEFAULT ''")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_movies_codenorm ON movies(code_norm)")

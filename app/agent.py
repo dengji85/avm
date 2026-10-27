@@ -338,6 +338,20 @@ def _merge_result(best: Optional[Dict[str, Any]], out: Dict[str, Any]) -> Option
 _FINAL_PROMPT = "请用一两句中文总结上面的检索结果，不要调用工具，不要罗列字段。"
 
 
+
+def _history_messages(history: Optional[List[Dict[str, Any]]], limit: int = 8) -> List[Dict[str, Any]]:
+    """把前端传来的历史清洗成 OpenAI messages（只认 user/assistant 的纯文本）。"""
+    out: List[Dict[str, Any]] = []
+    for h in (history or []):
+        if not isinstance(h, dict):
+            continue
+        role = str(h.get("role") or "")
+        content = str(h.get("content") or "").strip()
+        if role not in ("user", "assistant") or not content:
+            continue
+        out.append({"role": role, "content": content[:600]})
+    return out[-limit:]
+
 def _done(answer: str, steps: List[Dict[str, Any]], best: Optional[Dict[str, Any]],
           stopped: str, extra: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     payload: Dict[str, Any] = {
@@ -356,7 +370,8 @@ def _done(answer: str, steps: List[Dict[str, Any]], best: Optional[Dict[str, Any
 
 def iter_agent(question: str, cfg: Optional[Dict[str, Any]] = None, *,
                movie: Optional[Dict[str, Any]] = None,
-               max_steps: int = MAX_STEPS) -> Iterator[Dict[str, Any]]:
+               max_steps: int = MAX_STEPS,
+               history: Optional[List[Dict[str, Any]]] = None) -> Iterator[Dict[str, Any]]:
     """把一轮 agent 跑成**事件流**：调一次工具就吐一条 ``step``，结论边生成边吐 ``delta``。
 
     事件类型：
@@ -389,10 +404,15 @@ def iter_agent(question: str, cfg: Optional[Dict[str, Any]] = None, *,
     stopped = ""
 
     with db() as conn:
+        # 会话历史（最近几轮）：让「再找两部类似的」「那这部呢」这类追问接得上
+        hist_msgs = _history_messages(history)
         messages: List[Dict[str, Any]] = [
             {"role": "system", "content": _SYSTEM},
-            {"role": "user", "content": "【库字典】\n%s\n\n【用户问题】%s%s"
-                                        % (vocab.block(conn), q, movie_ctx)},
+            *hist_msgs,
+            {"role": "user", "content": "【库字典】\n%s\n\n【用户问题】%s%s%s"
+                                        % (vocab.block(conn), q, movie_ctx,
+                                           "\n\n（这是延续上文的提问：结合上面的对话理解指代）"
+                                           if hist_msgs else "")},
         ]
         for _ in range(max(1, int(max_steps))):
             # 一旦查到结果，就把「检索」这个工具收走：模型只剩「看详情 / 收尾」两条路。
@@ -473,6 +493,7 @@ def iter_agent(question: str, cfg: Optional[Dict[str, Any]] = None, *,
 
 def run_agent(question: str, cfg: Optional[Dict[str, Any]] = None, *,
               movie: Optional[Dict[str, Any]] = None,
+              history: Optional[List[Dict[str, Any]]] = None,
               max_steps: int = MAX_STEPS) -> Dict[str, Any]:
     """非流式版本：消费 ``iter_agent``，接口与 CLI 继续按原样使用。
 
@@ -480,7 +501,7 @@ def run_agent(question: str, cfg: Optional[Dict[str, Any]] = None, *,
     """
     final: Dict[str, Any] = {"answer": "", "steps": [], "items": [], "rows": [],
                              "note": "", "stopped": ""}
-    for ev in iter_agent(question, cfg, movie=movie, max_steps=max_steps):
+    for ev in iter_agent(question, cfg, movie=movie, max_steps=max_steps, history=history):
         if ev.get("type") == "done":
             final = {k: v for k, v in ev.items() if k != "type"}
     return final

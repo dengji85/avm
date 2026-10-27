@@ -6,6 +6,7 @@ import {
   API, getConfig, putConfig, listProviders, testScraper as apiTest, aiAsrStatus,
   parsePreview as apiParse, fsList, sniffCovers, extractAllCovers, csvUrl, cacheAvatars,
   fillActressAvatars, rescanLocalCovers, fetchActressProfile, getServerInfo, revealToken, rotateToken, checkUpdate,
+  posterTaskStart, posterTaskState, posterTaskCancel,
   fsMounts,
   listPlugins, togglePlugin, regenAllPreviews, streamCacheStats, clearStreamCache,
   listSessions, revokeSession, getAudit, logout as apiLogout, logoutAll as apiLogoutAll,
@@ -44,7 +45,8 @@ watch(() => state.settingsTab, (v) => {
 const cfg = reactive({
   library: { paths: [], min_size_mb: 0, ignore_keywords: [], video_extensions: [], missing_grace_days: 30, delete_to_recycle_bin: true },
   cover: { auto_local: false, download: false },
-  media: { avatar_dir: 'avatars', fanart_dir: 'fanarts', avatar_download: false, fanart_download: true },
+  media: { avatar_dir: 'avatars', fanart_dir: 'fanarts', avatar_download: false,
+    fanart_download: true, poster_strategy: 'right', poster_dmm: true },
   // 导出到媒体目录的工具整体搬到了 维护页 → 导出（含其配置），这里只留 Emby 联动
   emby: {
     enabled: false, base_url: '', api_key: '', user_id: '',
@@ -207,6 +209,8 @@ async function saveLibrary() {
         fanart_dir: (cfg.media.fanart_dir || 'fanarts').toString().trim() || 'fanarts',
         avatar_download: !!cfg.media.avatar_download,
         fanart_download: !!cfg.media.fanart_download,
+        poster_strategy: cfg.media.poster_strategy || 'right',
+        poster_dmm: cfg.media.poster_dmm !== false,
       },
     }
     await putConfig(patch)
@@ -762,6 +766,61 @@ async function doFetchProfile() {
 
 // 重新嗅探本地已有的封面图片，命中则落盘写回（无需全量重扫）
 const rescanningCovers = ref(false)
+const posterMsg = ref('')
+// 后台任务进度：大库（上千部）联网升级是分钟级，必须后台跑 + 轮询
+const posterTask = reactive({
+  running: false, total: 0, done: 0, percent: 0, message: '',
+  generated: 0, skipped: 0, failed: 0, upgraded: 0,
+})
+const posterBusy = computed(() => posterTask.running)
+let posterTimer = 0
+
+function stopPosterPoll() {
+  if (posterTimer) {
+    clearInterval(posterTimer)
+    posterTimer = 0
+  }
+}
+
+async function pollPoster() {
+  try {
+    const s = await posterTaskState()
+    Object.assign(posterTask, s)
+    if (!s.running) {
+      stopPosterPoll()
+      posterMsg.value = s.message || ''
+      if (s.total) toast(s.message, s.failed ? 'err' : 'ok')
+    }
+  } catch (e) {
+    stopPosterPoll()
+    posterTask.running = false
+    posterMsg.value = e.message
+  }
+}
+
+async function doGenPosters(force = false) {
+  if (posterTask.running) return
+  posterMsg.value = ''
+  try {
+    Object.assign(posterTask, await posterTaskStart(force, posterUpgrade.value))
+    stopPosterPoll()
+    posterTimer = setInterval(pollPoster, 800)
+  } catch (e) {
+    posterMsg.value = e.message
+    toast(e.message, 'err')
+  }
+}
+
+async function cancelGenPosters() {
+  try {
+    await posterTaskCancel()
+  } catch (e) {
+    toast(e.message, 'err')
+  }
+}
+
+onBeforeUnmount(stopPosterPoll)
+
 async function doRescanLocalCovers() {
   rescanningCovers.value = true
   try {
@@ -1366,7 +1425,51 @@ onMounted(async () => {
           </div>
         </div>
 
+        <!-- 竖版海报：横版封面自动裁出 2:3 竖图，海报墙 / 媒体服务器都用它 -->
         <div class="panel">
+          <div class="panel-head">{{ $t('settings.posterTitle') }} <span class="sub">{{ $t('settings.posterSub') }}</span></div>
+          <div class="panel-body">
+            <div class="field-row">
+              <label>{{ $t('settings.posterStrategy') }}</label>
+              <select v-model="cfg.media.poster_strategy" class="aic-sel-sm">
+                <option value="right">{{ $t('settings.posterRight') }}</option>
+                <option value="center">{{ $t('settings.posterCenter') }}</option>
+                <option value="fit">{{ $t('settings.posterFit') }}</option>
+              </select>
+            </div>
+            <span class="hint">{{ $t('settings.posterHint') }}</span>
+            <div class="field-row checkbox">
+              <label>{{ $t('settings.posterUpgrade') }}</label>
+              <label class="toggle">
+                <input type="checkbox" v-model="cfg.media.poster_dmm" /><span class="track"></span>
+              </label>
+            </div>
+          </div>
+          <div class="panel-foot">
+            <button class="btn primary" :disabled="saving" @click="saveLibrary">{{ $t('common.save') }}</button>
+            <button class="btn" :disabled="posterBusy" @click="doGenPosters()">
+              {{ posterBusy ? $t('settings.posterWorking') : $t('settings.posterGen') }}
+            </button>
+            <button class="btn ghost" :disabled="posterBusy" @click="doGenPosters(true)">
+              {{ $t('settings.posterForce') }}
+            </button>
+            <button v-if="posterBusy" class="btn ghost" @click="cancelGenPosters">
+              {{ $t('common.cancel') }}
+            </button>
+            <span v-if="posterMsg && !posterBusy" class="hint">{{ posterMsg }}</span>
+          </div>
+          <div v-if="posterTask.total || posterBusy" class="poster-progress">
+            <div class="poster-bar">
+              <div class="poster-bar-in" :style="{ width: posterTask.percent + '%' }"></div>
+            </div>
+            <span class="hint">
+              {{ posterTask.percent }}% · {{ posterTask.done }}/{{ posterTask.total }}
+              <template v-if="posterTask.message"> · {{ posterTask.message }}</template>
+            </span>
+          </div>
+        </div>
+
+<div class="panel">
           <div class="panel-head">{{ $t('settings.embyTitle') }} <span class="sub">{{ $t('settings.embySub') }}</span></div>
           <div class="panel-body">
             <div class="field-row checkbox">
@@ -1771,6 +1874,18 @@ onMounted(async () => {
                 <button class="btn tiny" :class="{ active: state.density === 'compact' }" @click="state.density = 'compact'">{{ $t('settings.densityCompact') }}</button>
               </div>
             </div>
+            <div class="field-row">
+              <label>{{ $t('settings.detailLayout') }}</label>
+              <div class="btn-group">
+                <button class="btn tiny" :class="{ active: state.detailLayout === 'hero' }"
+                        @click="state.detailLayout = 'hero'">{{ $t('settings.detailLayoutHero') }}</button>
+                <button class="btn tiny" :class="{ active: state.detailLayout === 'split' }"
+                        @click="state.detailLayout = 'split'">{{ $t('settings.detailLayoutSplit') }}</button>
+                <button class="btn tiny" :class="{ active: state.detailLayout === 'compact' }"
+                        @click="state.detailLayout = 'compact'">{{ $t('settings.detailLayoutCompact') }}</button>
+              </div>
+            </div>
+            <span class="hint">{{ $t('settings.detailLayoutHint') }}</span>
             <div class="field-row">
               <label>{{ $t('settings.cardSize') }}</label>
               <div class="btn-group">
@@ -2208,10 +2323,17 @@ onMounted(async () => {
 .totp-bind-side { flex: 1; min-width: 220px; display: flex; flex-direction: column; gap: var(--sp-2, 8px); }
 .rec-codes { display: block; padding: var(--sp-2, 8px); border-radius: var(--r-sm, 6px); background: var(--c-surface-2, rgba(128,128,128,.12)); word-spacing: 10px; user-select: all; }
 .st-tabs { border-bottom: none; }
-/* 居中 + 舒适最大宽度 + 充足底部留白 */
+/* 竖版海报批量进度条 */
+.poster-progress { padding: 0 var(--sp-4) var(--sp-3); display: flex; flex-direction: column; gap: 4px; }
+.poster-bar { height: 6px; border-radius: 3px; background: var(--c-surface-2); overflow: hidden; }
+.poster-bar-in { height: 100%; background: var(--c-primary); transition: width .3s ease; }
+
+/* 居中 + 固定列宽 + 滚动条槽位常驻：内容加载 / 切换标签时不再左右闪烁。
+   width 固定（而非 max-width），scrollbar-gutter 让滚动条出现与否都不挤占内容区。 */
 .view-body {
-  max-width: 900px;
+  width: min(900px, 100%);
   margin: 0 auto;
+  scrollbar-gutter: stable;
   padding: var(--sp-5) var(--sp-6) var(--sp-10);
   display: block;
 }

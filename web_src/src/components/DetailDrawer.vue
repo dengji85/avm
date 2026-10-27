@@ -3,7 +3,7 @@ import { ref, reactive, computed, watch, onMounted, onBeforeUnmount } from 'vue'
 import { state } from '../state.js'
 import {
   getMovie, updateMovie, deleteMovie, toggleFlag, playMovie,
-  exportNfo, getPreviews, getSimilar, coverUrl, coverThumbUrl, uploadCover, clearCover,
+  exportNfo, getPreviews, getSimilar, coverUrl, coverThumbUrl, fanartUrl, uploadCover, clearCover,
   extractCover,
   listTags, renameTag, deleteTag, aiPromoteTags, cleanupTags,
   dlnaDevices, dlnaAddDevice, dlnaCast, dlnaStop,
@@ -21,6 +21,10 @@ import { aiWorkspace as ws } from '../composables/aiWorkspace.js'
 const { runScrape } = useTasks()
 import VideoPlayer from './VideoPlayer.vue'
 import ActressModal from './ActressModal.vue'
+
+// 详情页布局：hero 沉浸 / split 左图右信息 / compact 紧凑横图
+const LAYOUTS = ['hero', 'split', 'compact']
+const LAYOUT_ICONS = { hero: '▭', split: '◫', compact: '▬' }
 
 const mv = ref(null)
 const loading = ref(false)
@@ -41,17 +45,59 @@ const lightboxList = ref([])
 const lightboxIndex = ref(0)
 const lightboxSrc = computed(() => lightboxList.value[lightboxIndex.value] || '')
 const lightboxNav = computed(() => lightboxList.value.length > 1)
+/* 灯箱缩放：默认铺满可视区（小图也放大），滚轮缩放 1–4 倍，拖动平移，双击还原 */
+const lbScale = ref(1)
+const lbX = ref(0)
+const lbY = ref(0)
+let lbDrag = null
+
+function lbReset() {
+  lbScale.value = 1
+  lbX.value = 0
+  lbY.value = 0
+  lbDrag = null
+}
+
+function lbWheel(e) {
+  const step = e.deltaY > 0 ? -0.25 : 0.25
+  const next = Math.min(4, Math.max(1, Math.round((lbScale.value + step) * 100) / 100))
+  lbScale.value = next
+  if (next === 1) {
+    lbX.value = 0
+    lbY.value = 0
+  }
+}
+
+function lbDown(e) {
+  if (lbScale.value <= 1) return
+  lbDrag = { x: e.clientX, y: e.clientY, ox: lbX.value, oy: lbY.value }
+  try { e.currentTarget.setPointerCapture(e.pointerId) } catch (_) { /* 忽略 */ }
+}
+
+function lbMove(e) {
+  if (!lbDrag) return
+  lbX.value = lbDrag.ox + (e.clientX - lbDrag.x)
+  lbY.value = lbDrag.oy + (e.clientY - lbDrag.y)
+}
+
+function lbUp() {
+  lbDrag = null
+}
+
 function openLightbox(urls, index = 0) {
   const list = (urls || []).filter(Boolean)
   if (!list.length) return
+  lbReset()
   lightboxList.value = list
   lightboxIndex.value = Math.min(Math.max(index, 0), list.length - 1)
 }
 function closeLightbox() {
+  lbReset()
   lightboxList.value = []
   lightboxIndex.value = 0
 }
 function stepLightbox(delta) {
+  lbReset()
   const n = lightboxList.value.length
   if (n < 2) return
   lightboxIndex.value = (lightboxIndex.value + delta + n) % n
@@ -324,6 +370,8 @@ async function load() {
       m.tags = t
     }
     mv.value = m
+  // 首屏即加载预览图：不必等用户切换标签
+  if (tab.value === 'preview' && !previews.value.length) loadPreviews(false)
     // 交给全局 AI 浮窗共用同一个影片对象，并顺手探测一次 AI 是否可用（按钮据此高亮）
     ws.syncMovie(m)
     ws.ensureStatus()
@@ -376,10 +424,18 @@ function playSimilar(s) {
   pendingAutoplay.value = true
 }
 
-// 详情页「重新刮削」复用批量刮削任务管线，进度会出现在右上角任务中心。
-async function doScrape() {
+// 详情页刮削复用批量管线（进度在右上角任务中心）。
+// force=false：只补空字段，封面走质量门（更清晰的才替换）；
+// force=true ：覆盖标题/简介/女优等字段，并**强制替换封面**（连低清图也换掉）。
+async function doScrape(force = false) {
+  if (force) {
+    const ok = await confirmDialog(t('detail.forceScrapeConfirm'), '', {
+      danger: true, okText: t('detail.forceScrape'),
+    })
+    if (!ok) return
+  }
   try {
-    await runScrape({ ids: [id.value], overwrite: true })
+    await runScrape({ ids: [id.value], overwrite: force, force_cover: force })
     toast(t('common.scrapeQueued'), 'ok')
   } catch (e) { toast(e.message, 'err') }
 }
@@ -645,6 +701,11 @@ async function onUpload(e) {
 }
 const bust = ref(Date.now())
 const coverSrc = computed(() => `${coverUrl(id.value)}?t=${bust.value}`)
+// 卡片位是 2:3：用竖版海报填满（横版原图会被居中裁切），灯箱仍给完整原图
+// 详情页顶部大图：有背景大图用 fanart（更宽、更干净），否则用完整横版封面
+const heroSrc = computed(() => (mv.value && mv.value.fanart
+  ? `${fanartUrl(id.value)}?t=${bust.value}`
+  : coverSrc.value))
 
 async function removeCover() {
   if (!(await confirmDialog(t('detail.clearCoverTitle'), t('detail.clearCoverDesc'), { danger: true }))) return
@@ -800,6 +861,7 @@ watch(id, async (v) => {
 watch(tab, (t) => {
   if (t === 'preview' && !previews.value.length) loadPreviews(false)
 })
+/* 首次打开详情页时 tab 本来就是 preview，watch 不会触发 → 这里显式补一次加载 */
 
 function onKey(e) {
   if (!open.value) return
@@ -830,6 +892,15 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', onKey) })
           <span v-if="mv.display_code || mv.code" class="badge code primary">{{ mv.display_code || mv.code }}</span>
           <b class="dh-title ellipsis">{{ mv.title || $t('detail.untitled') }}</b>
           <div class="spacer"></div>
+          <!-- 布局即时切换：不用去设置页，点了立刻看效果 -->
+          <div class="dd-layout-switch" :data-tip="$t('settings.detailLayoutHint')">
+            <button v-for="l in LAYOUTS" :key="l" class="ll"
+                    :class="{ on: (state.detailLayout || 'compact') === l }"
+                    :title="$t('settings.detailLayout' + l[0].toUpperCase() + l.slice(1))"
+                    @click.stop="state.detailLayout = l">
+              <span class="ico">{{ LAYOUT_ICONS[l] }}</span>
+            </button>
+          </div>
           <button class="btn ghost icon" @click="copyText(mainFile?.path || '')" :data-tip="$t('detail.copyPath')">⧉</button>
           <button class="btn ghost icon" @click="close" :data-tip="$t('detail.closeEsc')">✕</button>
         </header>
@@ -848,11 +919,23 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', onKey) })
             />
 
             <!-- 主区 -->
-            <div class="dd-top">
-              <div class="dd-cover">
-                <img :src="coverSrc" alt="" @error="coverFallback" @click="openLightbox([coverSrc], 0)" />
-                <div v-if="progressPct > 0" class="cw-bar"><i :style="{ width: progressPct + '%' }"></i></div>
-                <span v-if="isVideoCover" class="cover-src-badge" :title="$t('detail.videoCoverTip')">{{ $t('detail.videoCover') }}</span>
+            <div class="dd-top" :class="'layout-' + (state.detailLayout || 'compact')">
+              <div class="dd-media">
+                <div class="dd-hero">
+                  <img :src="heroSrc" alt="" @error="coverFallback" @click="openLightbox([coverSrc], 0)" />
+                  <div v-if="progressPct > 0" class="cw-bar"><i :style="{ width: progressPct + '%' }"></i></div>
+                  <span v-if="isVideoCover" class="cover-src-badge" :title="$t('detail.videoCoverTip')">{{ $t('detail.videoCover') }}</span>
+                  <!-- 沉浸布局：标题/番号/时长/评分压在图上，首屏就能看到关键信息 -->
+                  <div v-if="state.detailLayout === 'hero'" class="dd-hero-info">
+                    <div class="dhi-title">{{ mv.title || mv.code }}</div>
+                    <div class="dhi-meta">
+                      <span v-if="mv.code" class="dhi-chip">{{ mv.code }}</span>
+                      <span v-if="mv.runtime">{{ mv.runtime }} {{ $t('detail.minute') }}</span>
+                      <span v-if="mv.rating">★ {{ mv.rating }}</span>
+                      <span v-if="mv.release_date">{{ fmtDate(mv.release_date) }}</span>
+                    </div>
+                  </div>
+                </div>
                 <div class="cov-acts">
                   <button class="btn tiny" @click="fileInput.click()">{{ $t('detail.changeCover') }}</button>
                   <button class="btn tiny" :disabled="extracting" @click="extractFromVideo">{{ $t('detail.extractCover') }}</button>
@@ -862,6 +945,18 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', onKey) })
               </div>
 
               <div class="dd-main">
+                <!-- 右栏标题：与非沉浸布局配合，避免右栏只剩按钮、下方留出大片空位 -->
+                <div v-if="state.detailLayout !== 'hero'" class="dd-head">
+                  <h2 class="dd-name" :title="mv.title">{{ mv.title || mv.code || $t('detail.untitled') }}</h2>
+                  <div class="dd-sub">
+                    <span v-if="mv.code" class="dd-code">{{ mv.display_code || mv.code }}</span>
+                    <span v-if="mv.runtime">{{ mv.runtime }} {{ $t('detail.minute') }}</span>
+                    <span v-if="mv.rating">★ {{ mv.rating }}</span>
+                    <span v-if="mv.actresses && mv.actresses.length" class="dd-acts-names">
+                      {{ mv.actresses.slice(0, 3).join(' / ') }}
+                    </span>
+                  </div>
+                </div>
                 <!-- 主操作：按「播放 / 标记 / 站点 / 维护」四组平铺，全部一级可见，不藏菜单 -->
                 <div class="dd-actions">
                   <div class="dd-g">
@@ -916,7 +1011,11 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', onKey) })
 
                   <div class="dd-g">
                     <span class="dd-g-lbl">{{ $t('detail.grpMaint') }}</span>
-                    <button class="btn tiny ghost" @click="doScrape" :disabled="loading">⟳ {{ $t('detail.rescrape') }}</button>
+                    <!-- 刮削：只补空字段；强制刮削：覆盖字段并强制换封面（含低清图） -->
+                    <button class="btn tiny ghost" @click="doScrape(false)" :disabled="loading"
+                            :title="$t('detail.scrapeTip')">⟳ {{ $t('detail.scrape') }}</button>
+                    <button class="btn tiny ghost" @click="doScrape(true)" :disabled="loading"
+                            :title="$t('detail.forceScrapeTip')">⇊ {{ $t('detail.forceScrape') }}</button>
                     <button class="btn tiny ghost" @click="doNfo">⤓ {{ $t('detail.exportNfo') }}</button>
                     <button class="btn tiny ghost" @click="removeCover">🖼 {{ $t('detail.clearCover') }}</button>
                   </div>
@@ -949,177 +1048,181 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', onKey) })
                     </div>
                   </div>
                 </div>
+              </div>
+              </div>
 
-                <!-- 评分 -->
-                <div class="dd-rate">
-                  <div class="stars">
-                    <span v-for="i in 5" :key="i" class="s" :class="{ on: i <= (mv.rating || 0) }" @click="setRating(i)">★</span>
-                  </div>
-                  <span class="muted">{{ mv.rating ? mv.rating + ' ' + $t('detail.star') : $t('fmt.noRating') }}</span>
-                  <div class="spacer"></div>
-                  <span v-if="mv.play_count" class="badge">{{ $t('detail.playCount', { n: mv.play_count }) }}</span>
+            <div class="dd-extra">
+
+              <!-- 评分 -->
+              <div class="dd-rate">
+                <div class="stars">
+                  <span v-for="i in 5" :key="i" class="s" :class="{ on: i <= (mv.rating || 0) }" @click="setRating(i)">★</span>
                 </div>
+                <span class="muted">{{ mv.rating ? mv.rating + ' ' + $t('detail.star') : $t('fmt.noRating') }}</span>
+                <div class="spacer"></div>
+                <span v-if="mv.play_count" class="badge">{{ $t('detail.playCount', { n: mv.play_count }) }}</span>
+              </div>
 
-                <!-- 标记 -->
-                <div class="chip-list">
-                  <span v-if="mv.subtitle" class="badge ok">{{ $t('detail.subtitle') }}</span>
-                <span v-if="mv.embed_sub_zh" class="badge ok" :title="$t('flag.embedZh')">{{ $t('flag.embedZh') }}</span>
-                  <span v-if="mv.uncensored" class="badge warn">{{ $t('detail.uncensored') }}</span>
-                  <span v-if="quality" class="badge accent">{{ quality }}</span>
-                  <span v-if="mv.vr" class="badge">VR</span>
-                  <span v-if="mv.leak" class="badge err">{{ $t('detail.leak') }}</span>
-                  <span v-for="s in manualSubs" :key="s.id" class="badge sub" :title="s.path">
-                    {{ $t('detail.subFile', { lang: s.lang || '字幕' }) }}
-                  </span>
-                  <!-- 同目录外挂字幕登记：收进徽章行末尾，不再单独占一行 -->
+              <!-- 标记 -->
+              <div class="chip-list">
+                <span v-if="mv.subtitle" class="badge ok">{{ $t('detail.subtitle') }}</span>
+              <span v-if="mv.embed_sub_zh" class="badge ok" :title="$t('flag.embedZh')">{{ $t('flag.embedZh') }}</span>
+                <span v-if="mv.uncensored" class="badge warn">{{ $t('detail.uncensored') }}</span>
+                <span v-if="quality" class="badge accent">{{ quality }}</span>
+                <span v-if="mv.vr" class="badge">VR</span>
+                <span v-if="mv.leak" class="badge err">{{ $t('detail.leak') }}</span>
+                <span v-for="s in manualSubs" :key="s.id" class="badge sub" :title="s.path">
+                  {{ $t('detail.subFile', { lang: s.lang || '字幕' }) }}
+                </span>
+                <!-- 同目录外挂字幕登记：收进徽章行末尾，不再单独占一行 -->
+                <span class="spacer"></span>
+                <button class="btn tiny ghost" :disabled="scanningSubs"
+                        :title="$t('detail.scanSubsHint')" @click="scanSidecars">
+                  {{ scanningSubs ? $t('detail.scanningSubs') : $t('detail.scanSubs') }}
+                </button>
+              </div>
+
+              <!-- 已生成的 AI 字幕译文：下载 / 删除（生成入口统一在 AI 工作台） -->
+              <div v-if="aiSubs.length" class="ai-subs">
+                <div v-for="s in aiSubs" :key="s.id" class="ai-sub-row">
+                  <span class="mono">{{ s.lang }}{{ (s.filename || '').includes('-双语') ? ' · ' + $t('detail.aiBilingual') : '' }}</span>
                   <span class="spacer"></span>
-                  <button class="btn tiny ghost" :disabled="scanningSubs"
-                          :title="$t('detail.scanSubsHint')" @click="scanSidecars">
-                    {{ scanningSubs ? $t('detail.scanningSubs') : $t('detail.scanSubs') }}
-                  </button>
+                  <button class="btn tiny ghost" @click="ai.downloadSub(s)">{{ $t('common.download') }}</button>
+                  <button class="btn tiny ghost" @click="ai.removeAiSub(s)">{{ $t('common.delete') }}</button>
                 </div>
+              </div>
 
-                <!-- 已生成的 AI 字幕译文：下载 / 删除（生成入口统一在 AI 工作台） -->
-                <div v-if="aiSubs.length" class="ai-subs">
-                  <div v-for="s in aiSubs" :key="s.id" class="ai-sub-row">
-                    <span class="mono">{{ s.lang }}{{ (s.filename || '').includes('-双语') ? ' · ' + $t('detail.aiBilingual') : '' }}</span>
-                    <span class="spacer"></span>
-                    <button class="btn tiny ghost" @click="ai.downloadSub(s)">{{ $t('common.download') }}</button>
-                    <button class="btn tiny ghost" @click="ai.removeAiSub(s)">{{ $t('common.delete') }}</button>
-                  </div>
+              <!-- 关键信息 -->
+              <dl class="dd-facts">
+                <template v-if="mv.actresses && mv.actresses.length">
+                  <dt>{{ $t('detail.fActress') }}</dt>
+                  <dd class="chip-list actress-list">
+                    <button
+                      v-for="a in mv.actresses"
+                      :key="a"
+                      class="chip actress-chip"
+                      @click="openActress(a)"
+                      @mouseenter="actressHoverStart(a, $event)"
+                      @mouseleave="scheduleHoverEnd"
+                    >{{ a }}</button>
+                  </dd>
+                </template>
+                <template v-if="mv.genres && mv.genres.length">
+                  <dt>{{ $t('detail.fGenre') }}</dt>
+                  <dd class="chip-list">
+                    <button v-for="g in mv.genres" :key="g" class="chip" @click="filterBy('genre', g)">{{ g }}</button>
+                  </dd>
+                </template>
+                <template v-if="mv.studio"><dt>{{ $t('detail.fStudio') }}</dt><dd><a @click="filterBy('studio', mv.studio)">{{ mv.studio }}</a></dd></template>
+                <template v-if="mv.series"><dt>{{ $t('detail.fSeries') }}</dt><dd><a @click="filterBy('series', mv.series)">{{ mv.series }}</a></dd></template>
+                <template v-if="mv.director"><dt>{{ $t('detail.fDirector') }}</dt><dd>{{ mv.director }}</dd></template>
+                <template v-if="mv.release_date"><dt>{{ $t('detail.fRelease') }}</dt><dd>{{ fmtDate(mv.release_date) }}</dd></template>
+                <template v-if="mv.runtime"><dt>{{ $t('detail.fRuntime') }}</dt><dd>{{ mv.runtime }} {{ $t('detail.minute') }}</dd></template>
+                <template v-if="mv.resolution"><dt>{{ $t('detail.fResolution') }}</dt><dd>{{ mv.resolution }}</dd></template>
+                <dt>{{ $t('detail.fSize') }}</dt><dd>{{ fmtSize(totalSize) }}<span v-if="mv.files && mv.files.length > 1" class="dim"> · {{ $t('detail.filesCount', { n: mv.files.length }) }}</span></dd>
+                <template v-if="mainFile && mainFile.strm_url">
+                  <dt>{{ $t('detail.fSource') }}</dt>
+                  <dd class="mono dim">🌐 {{ hostOf(mainFile.strm_url) }}</dd>
+                </template>
+                <template v-if="mv.added_at"><dt>{{ $t('detail.fAdded') }}</dt><dd>{{ fmtAgo(mv.added_at) }}</dd></template>
+              </dl>
+
+              <!-- 自定义标签：常驻主区可见，随时增删 -->
+              <div class="dd-tags">
+                <div class="dd-tags-head">
+                  <span class="lbl">{{ $t('detail.customTags') }}</span>
+                  <button class="link-btn" @click="openTagMgr">{{ $t('detail.manageTags') }}</button>
+                  <button v-if="ai.ready" class="link-btn" :title="$t('ai.tagsHint')" @click="openAiWithTags">✨ {{ $t('ai.tagsSuggest') }}</button>
                 </div>
+                <div v-if="mv.tags && mv.tags.length" class="chip-list wrap">
+                  <span v-for="t in mv.tags" :key="t" class="badge tag-removable clickable" @click="filterByTag(t)">
+                    {{ t }}
+                    <button class="tag-x" :title="$t('detail.removeTagTitle') + t" @click.stop="removeTag(t)">×</button>
+                  </span>
+                </div>
+                <div v-else class="dim small">{{ $t('detail.noTags') }}</div>
 
-                <!-- 关键信息 -->
-                <dl class="dd-facts">
-                  <template v-if="mv.actresses && mv.actresses.length">
-                    <dt>{{ $t('detail.fActress') }}</dt>
-                    <dd class="chip-list actress-list">
-                      <button
-                        v-for="a in mv.actresses"
-                        :key="a"
-                        class="chip actress-chip"
-                        @click="openActress(a)"
-                        @mouseenter="actressHoverStart(a, $event)"
-                        @mouseleave="scheduleHoverEnd"
-                      >{{ a }}</button>
-                    </dd>
-                  </template>
-                  <template v-if="mv.genres && mv.genres.length">
-                    <dt>{{ $t('detail.fGenre') }}</dt>
-                    <dd class="chip-list">
-                      <button v-for="g in mv.genres" :key="g" class="chip" @click="filterBy('genre', g)">{{ g }}</button>
-                    </dd>
-                  </template>
-                  <template v-if="mv.studio"><dt>{{ $t('detail.fStudio') }}</dt><dd><a @click="filterBy('studio', mv.studio)">{{ mv.studio }}</a></dd></template>
-                  <template v-if="mv.series"><dt>{{ $t('detail.fSeries') }}</dt><dd><a @click="filterBy('series', mv.series)">{{ mv.series }}</a></dd></template>
-                  <template v-if="mv.director"><dt>{{ $t('detail.fDirector') }}</dt><dd>{{ mv.director }}</dd></template>
-                  <template v-if="mv.release_date"><dt>{{ $t('detail.fRelease') }}</dt><dd>{{ fmtDate(mv.release_date) }}</dd></template>
-                  <template v-if="mv.runtime"><dt>{{ $t('detail.fRuntime') }}</dt><dd>{{ mv.runtime }} {{ $t('detail.minute') }}</dd></template>
-                  <template v-if="mv.resolution"><dt>{{ $t('detail.fResolution') }}</dt><dd>{{ mv.resolution }}</dd></template>
-                  <dt>{{ $t('detail.fSize') }}</dt><dd>{{ fmtSize(totalSize) }}<span v-if="mv.files && mv.files.length > 1" class="dim"> · {{ $t('detail.filesCount', { n: mv.files.length }) }}</span></dd>
-                  <template v-if="mainFile && mainFile.strm_url">
-                    <dt>{{ $t('detail.fSource') }}</dt>
-                    <dd class="mono dim">🌐 {{ hostOf(mainFile.strm_url) }}</dd>
-                  </template>
-                  <template v-if="mv.added_at"><dt>{{ $t('detail.fAdded') }}</dt><dd>{{ fmtAgo(mv.added_at) }}</dd></template>
-                </dl>
-
-                <!-- 自定义标签：常驻主区可见，随时增删 -->
-                <div class="dd-tags">
+                <!-- AI 建议标签：待定区，不进标签库；转正（＋）后才参与筛选/统计 -->
+                <div v-if="aiTags.length" class="ai-tags-row">
                   <div class="dd-tags-head">
-                    <span class="lbl">{{ $t('detail.customTags') }}</span>
-                    <button class="link-btn" @click="openTagMgr">{{ $t('detail.manageTags') }}</button>
-                    <button v-if="ai.ready" class="link-btn" :title="$t('ai.tagsHint')" @click="openAiWithTags">✨ {{ $t('ai.tagsSuggest') }}</button>
+                    <span class="lbl">✨ {{ $t('detail.aiTagsPending') }}</span>
+                    <button class="link-btn" @click="promoteAllAiTags">{{ $t('detail.aiTagPromoteAll') }}</button>
+                    <button class="link-btn" @click="clearAiTags">{{ $t('detail.aiTagClear') }}</button>
                   </div>
-                  <div v-if="mv.tags && mv.tags.length" class="chip-list wrap">
-                    <span v-for="t in mv.tags" :key="t" class="badge tag-removable clickable" @click="filterByTag(t)">
+                  <div class="chip-list wrap">
+                    <span v-for="t in aiTags" :key="'ai-' + t" class="badge ai-tag clickable" :title="$t('detail.aiTagTip')">
                       {{ t }}
-                      <button class="tag-x" :title="$t('detail.removeTagTitle') + t" @click.stop="removeTag(t)">×</button>
+                      <button class="tag-x promote" :title="$t('detail.aiTagPromote')" @click.stop="promoteAiTag(t)">＋</button>
+                      <button class="tag-x" :title="$t('common.delete')" @click.stop="dropAiTag(t)">×</button>
                     </span>
                   </div>
-                  <div v-else class="dim small">{{ $t('detail.noTags') }}</div>
+                </div>
+                <div class="tag-edit">
+                  <div class="tag-input-wrap">
+                    <input
+                      v-model="newTag"
+                      class="tag-input"
+                      :placeholder="$t('detail.tagPlaceholder')"
+                      @focus="ensureTags(); showTagSuggest = true"
+                      @blur="onTagBlur"
+                      @keydown.enter.prevent="addTag"
+                      @keydown.down.prevent="moveSuggest(1)"
+                      @keydown.up.prevent="moveSuggest(-1)"
+                      @keydown.esc="showTagSuggest = false"
+                    />
+                    <div v-if="showTagSuggest && tagSuggest.length" class="tag-suggest">
+                      <button
+                        v-for="(s, i) in tagSuggest"
+                        :key="s.name"
+                        class="tag-suggest-item"
+                        :class="{ on: i === suggestIdx }"
+                        @mousedown.prevent="pickTag(s.name)"
+                        @mouseenter="suggestIdx = i"
+                      >
+                        <span>{{ s.name }}</span>
+                        <span class="dim small">{{ $t('detail.usedCount', { n: s.count }) }}</span>
+                      </button>
+                    </div>
+                  </div>
+                  <button class="btn tiny" :disabled="tagBusy || !newTag.trim()" @click="addTag">{{ $t('common.add') }}</button>
+                </div>
 
-                  <!-- AI 建议标签：待定区，不进标签库；转正（＋）后才参与筛选/统计 -->
-                  <div v-if="aiTags.length" class="ai-tags-row">
+                <!-- 全局标签管理弹窗 -->
+                <div v-if="showTagMgr" class="tag-mgr" @click.self="showTagMgr = false">
+                  <div class="tag-mgr-box">
+                    <div class="tm-head">
+                      <b>{{ $t('detail.manageTags') }}</b>
+                      <button class="icon-btn" :title="$t('common.close')" @click="showTagMgr = false">×</button>
+                    </div>
+                    <p class="muted small">{{ $t('detail.tagMgrHint') }}</p>
                     <div class="dd-tags-head">
-                      <span class="lbl">✨ {{ $t('detail.aiTagsPending') }}</span>
-                      <button class="link-btn" @click="promoteAllAiTags">{{ $t('detail.aiTagPromoteAll') }}</button>
-                      <button class="link-btn" @click="clearAiTags">{{ $t('detail.aiTagClear') }}</button>
+                      <span v-if="aiTagCount" class="dim small">✨ {{ $t('detail.aiTagCount', { n: aiTagCount }) }}</span>
+                      <button v-if="aiTagCount" class="link-btn danger"
+                              :title="$t('detail.aiTagCleanupTip')" @click="doCleanupAiTags">{{ $t('detail.aiTagCleanup') }}</button>
                     </div>
-                    <div class="chip-list wrap">
-                      <span v-for="t in aiTags" :key="'ai-' + t" class="badge ai-tag clickable" :title="$t('detail.aiTagTip')">
-                        {{ t }}
-                        <button class="tag-x promote" :title="$t('detail.aiTagPromote')" @click.stop="promoteAiTag(t)">＋</button>
-                        <button class="tag-x" :title="$t('common.delete')" @click.stop="dropAiTag(t)">×</button>
-                      </span>
-                    </div>
-                  </div>
-                  <div class="tag-edit">
-                    <div class="tag-input-wrap">
-                      <input
-                        v-model="newTag"
-                        class="tag-input"
-                        :placeholder="$t('detail.tagPlaceholder')"
-                        @focus="ensureTags(); showTagSuggest = true"
-                        @blur="onTagBlur"
-                        @keydown.enter.prevent="addTag"
-                        @keydown.down.prevent="moveSuggest(1)"
-                        @keydown.up.prevent="moveSuggest(-1)"
-                        @keydown.esc="showTagSuggest = false"
-                      />
-                      <div v-if="showTagSuggest && tagSuggest.length" class="tag-suggest">
-                        <button
-                          v-for="(s, i) in tagSuggest"
-                          :key="s.name"
-                          class="tag-suggest-item"
-                          :class="{ on: i === suggestIdx }"
-                          @mousedown.prevent="pickTag(s.name)"
-                          @mouseenter="suggestIdx = i"
-                        >
-                          <span>{{ s.name }}</span>
-                          <span class="dim small">{{ $t('detail.usedCount', { n: s.count }) }}</span>
-                        </button>
-                      </div>
-                    </div>
-                    <button class="btn tiny" :disabled="tagBusy || !newTag.trim()" @click="addTag">{{ $t('common.add') }}</button>
-                  </div>
-
-                  <!-- 全局标签管理弹窗 -->
-                  <div v-if="showTagMgr" class="tag-mgr" @click.self="showTagMgr = false">
-                    <div class="tag-mgr-box">
-                      <div class="tm-head">
-                        <b>{{ $t('detail.manageTags') }}</b>
-                        <button class="icon-btn" :title="$t('common.close')" @click="showTagMgr = false">×</button>
-                      </div>
-                      <p class="muted small">{{ $t('detail.tagMgrHint') }}</p>
-                      <div class="dd-tags-head">
-                        <span v-if="aiTagCount" class="dim small">✨ {{ $t('detail.aiTagCount', { n: aiTagCount }) }}</span>
-                        <button v-if="aiTagCount" class="link-btn danger"
-                                :title="$t('detail.aiTagCleanupTip')" @click="doCleanupAiTags">{{ $t('detail.aiTagCleanup') }}</button>
-                      </div>
-                      <div v-if="!allTagList.length" class="dim">{{ $t('detail.noTags') }}</div>
-                      <ul class="tm-list">
-                        <li v-for="t in allTagList" :key="t.id" class="tm-item">
-                          <template v-if="editingTag === t.name">
-                            <input v-model="editingTagNew" class="tm-input" @keydown.enter.prevent="doRenameTag" :placeholder="$t('detail.newName')" />
-                            <button class="btn tiny" :disabled="tagMgrBusy || !editingTagNew.trim()" @click="doRenameTag">{{ $t('common.save') }}</button>
-                            <button class="btn tiny ghost" @click="editingTag = ''">{{ $t('common.cancel') }}</button>
-                          </template>
-                          <template v-else>
-                            <span class="tm-name">{{ t.name }}<span v-if="t.source === 'ai'" class="badge ai-src" :title="$t('detail.aiTagCleanupTip')">✨</span><span v-else-if="t.source === 'scraper'" class="badge scraper-src" :title="$t('detail.scraperSrcTip')">⇩</span></span>
-                            <span class="dim small">{{ $t('detail.usedCount', { n: t.count }) }}</span>
-                            <span class="tm-actions">
-                              <button class="link-btn" @click="editingTag = t.name; editingTagNew = t.name">{{ $t('detail.rename') }}</button>
-                              <button class="link-btn danger" @click="doDeleteTag(t.name)">{{ $t('common.delete') }}</button>
-                            </span>
-                          </template>
-                        </li>
-                      </ul>
-                    </div>
+                    <div v-if="!allTagList.length" class="dim">{{ $t('detail.noTags') }}</div>
+                    <ul class="tm-list">
+                      <li v-for="t in allTagList" :key="t.id" class="tm-item">
+                        <template v-if="editingTag === t.name">
+                          <input v-model="editingTagNew" class="tm-input" @keydown.enter.prevent="doRenameTag" :placeholder="$t('detail.newName')" />
+                          <button class="btn tiny" :disabled="tagMgrBusy || !editingTagNew.trim()" @click="doRenameTag">{{ $t('common.save') }}</button>
+                          <button class="btn tiny ghost" @click="editingTag = ''">{{ $t('common.cancel') }}</button>
+                        </template>
+                        <template v-else>
+                          <span class="tm-name">{{ t.name }}<span v-if="t.source === 'ai'" class="badge ai-src" :title="$t('detail.aiTagCleanupTip')">✨</span><span v-else-if="t.source === 'scraper'" class="badge scraper-src" :title="$t('detail.scraperSrcTip')">⇩</span></span>
+                          <span class="dim small">{{ $t('detail.usedCount', { n: t.count }) }}</span>
+                          <span class="tm-actions">
+                            <button class="link-btn" @click="editingTag = t.name; editingTagNew = t.name">{{ $t('detail.rename') }}</button>
+                            <button class="link-btn danger" @click="doDeleteTag(t.name)">{{ $t('common.delete') }}</button>
+                          </span>
+                        </template>
+                      </li>
+                    </ul>
                   </div>
                 </div>
               </div>
             </div>
+
 
             <!-- 标签页 -->
             <div class="tabs dd-tabs">
@@ -1209,6 +1312,39 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', onKey) })
                       <div class="hstack wrap">
                         <button class="btn tiny ghost" @click="scanSidecars">{{ $t('detail.scanSubs') }}</button>
                       </div>
+                    </div>
+
+                    <!-- 字幕翻译：就地生成，不必进 AI 助手；结果与 AI 助手共享（data/subs） -->
+                    <div class="ai-dialog-sec">
+                      <div class="ai-dialog-head">
+                        <b>{{ $t('detail.aiTranslate') }}</b>
+                        <span v-if="ai.aiSubs.length" class="hint">{{ $t('ai.subsTracks', { n: ai.aiSubs.length }) }}</span>
+                      </div>
+                      <div class="hstack wrap">
+                        <select v-model="ai.subs.target" class="inp tiny asr-limit">
+                          <option value="zh-Hans">{{ $t('detail.aiTargetHans') }}</option>
+                          <option value="zh-Hant">{{ $t('detail.aiTargetHant') }}</option>
+                          <option value="en">{{ $t('detail.aiTargetEn') }}</option>
+                        </select>
+                        <label class="hint" style="display:inline-flex;align-items:center;gap:4px;cursor:pointer;">
+                          <input v-model="ai.subs.bilingual" type="checkbox" />{{ $t('detail.aiBilingual') }}
+                        </label>
+                        <button class="btn tiny primary" :disabled="ai.subs.loading || !ai.hasSubtitles" @click="ai.translateSubs">
+                          {{ ai.subs.loading ? $t('ai.subsProgress', { p: ai.subs.percent }) : $t('detail.aiTranslate') }}
+                        </button>
+                        <button v-if="ai.subs.loading" class="btn tiny ghost" @click="ai.cancelTranslateSubs">
+                          {{ $t('common.cancel') }}
+                        </button>
+                        <span v-if="!ai.hasSubtitles && !ai.probing" class="hint">{{ $t('ai.subsNoSource') }}</span>
+                      </div>
+                      <div v-if="ai.aiSubs.length" class="hstack wrap">
+                        <span v-for="s in ai.aiSubs" :key="s.id" class="badge tag-removable">
+                          {{ s.lang || 'AI' }} · {{ s.filename }}
+                          <button class="tag-x" :title="$t('common.download')" @click.stop="ai.downloadSub(s)">⬇</button>
+                          <button class="tag-x" :title="$t('common.delete')" @click.stop="ai.removeAiSub(s)">×</button>
+                        </span>
+                      </div>
+                      <p v-if="ai.subs.error" class="aiq-err">{{ ai.subs.error }}</p>
                     </div>
                   </div>
 
@@ -1340,6 +1476,8 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', onKey) })
 
     <!-- 灯箱 -->
     <div v-if="lightboxSrc" class="lightbox" @click="closeLightbox">
+      <!-- 沉浸式铺底：当前图片自身放大模糊，横向/纵向填满整屏，不再是大片纯黑 -->
+      <div class="lb-bg" :style="{ backgroundImage: `url(${lightboxSrc})` }"></div>
       <!-- 关闭按钮常驻右上角：之前只能靠 Esc 或点背景，关闭区域不明显 -->
       <button class="lb-close" :title="$t('common.close')" :aria-label="$t('common.close')"
               @click.stop="closeLightbox">✕</button>
@@ -1347,11 +1485,19 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', onKey) })
         <div class="lb-main">
           <button v-if="lightboxNav" class="lb-nav" :title="$t('detail.prevImage')"
                   :aria-label="$t('detail.prevImage')" @click.stop="stepLightbox(-1)">‹</button>
-          <img :src="lightboxSrc" alt="" @click.stop />
+          <img :src="lightboxSrc" alt="" @click.stop
+               :class="{ zoomed: lbScale > 1 }"
+               :style="{ transform: `translate(${lbX}px, ${lbY}px) scale(${lbScale})` }"
+               @wheel.prevent="lbWheel" @pointerdown.prevent="lbDown"
+               @pointermove="lbMove" @pointerup="lbUp" @pointercancel="lbUp"
+               @dblclick.prevent="lbReset" />
           <button v-if="lightboxNav" class="lb-nav" :title="$t('detail.nextImage')"
                   :aria-label="$t('detail.nextImage')" @click.stop="stepLightbox(1)">›</button>
         </div>
-        <div v-if="lightboxNav" class="lb-count">{{ lightboxIndex + 1 }} / {{ lightboxList.length }}</div>
+        <div class="lb-count">
+          <template v-if="lightboxNav">{{ lightboxIndex + 1 }} / {{ lightboxList.length }} · </template>
+          {{ $t('detail.lbZoomHint') }}
+        </div>
         <div v-if="lightboxNav" class="lb-thumbs" @click.stop>
           <img v-for="(u, i) in lightboxList" :key="i" :src="u" :class="{ on: i === lightboxIndex }"
                :alt="String(i + 1)" @click="lightboxIndex = i" />
@@ -1436,16 +1582,67 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', onKey) })
 }
 .tag-suggest-item:hover, .tag-suggest-item.on { background: var(--c-primary-soft); color: var(--c-primary-text); }
 
+/* 顶部横版大图：3:2（贴近 DVD 封面 1.48 的比例，基本不裁标题带）。
+   三种布局由 .layout-* 控制：hero 整宽沉浸 / split 左图右信息 / compact 紧凑横图 */
 .dd-top { display: flex; gap: var(--sp-4); padding: var(--sp-4) var(--sp-5); }
-.dd-cover { position: relative; width: 168px; flex: none; }
-.dd-cover img {
-  width: 100%; aspect-ratio: 2/3; object-fit: cover;
-  border-radius: var(--r-md);
-  background: var(--c-surface-2);
-  cursor: zoom-in;
-  box-shadow: var(--sh-2);
+.dd-media { display: flex; flex-direction: column; gap: var(--sp-2); min-width: 0; }
+.dd-hero {
+  position: relative; width: 100%;
+  border-radius: var(--r-md); overflow: hidden;
+  background: var(--c-surface-2); box-shadow: var(--sh-2);
 }
-.cw-bar { position: absolute; left: 0; right: 0; bottom: 40px; height: 3px; background: rgba(0,0,0,.5); }
+.dd-hero img {
+  display: block; width: 100%;
+  aspect-ratio: 3 / 2;
+  object-fit: cover; object-position: center;
+  cursor: zoom-in;
+}
+/* A. 沉浸：整宽大图 + 图上信息 + 主操作在下方 */
+.layout-hero { flex-direction: column; }
+.layout-hero .dd-hero img { max-height: 380px; }
+.dd-hero-info {
+  position: absolute; left: 0; right: 0; bottom: 0;
+  padding: 48px 14px 12px; pointer-events: none;
+  background: linear-gradient(to top, rgba(0,0,0,.82) 0%, rgba(0,0,0,.45) 45%, transparent 100%);
+  color: #fff;
+}
+.dhi-title { font-size: var(--fs-md); font-weight: 600; text-shadow: 0 1px 3px rgba(0,0,0,.6);
+  overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+.dhi-meta { display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  margin-top: 4px; font-size: var(--fs-xs); opacity: .92; }
+.dhi-chip { padding: 1px 6px; border-radius: 4px; background: rgba(255,255,255,.18);
+  font-family: ui-monospace, Consolas, monospace; }
+/* 右栏标题块：两行截断，下面一行关键信息，避免右栏只有按钮显得空 */
+.dd-head { display: flex; flex-direction: column; gap: 4px; }
+.dd-name {
+  margin: 0; font-size: var(--fs-md); font-weight: 600; line-height: 1.3;
+  color: var(--c-text-1);
+  overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+}
+.dd-sub { display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  font-size: var(--fs-xs); color: var(--c-text-3); }
+.dd-code { padding: 1px 6px; border-radius: 4px; background: var(--c-surface-2);
+  font-family: ui-monospace, Consolas, monospace; color: var(--c-text-2); }
+.dd-acts-names { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
+
+/* B. 左图右信息（340 宽）/ C. 紧凑横图（420 宽） */
+.layout-split, .layout-compact { flex-direction: row; align-items: flex-start; }
+.dd-main { justify-content: flex-start; }
+.layout-split .dd-media { width: 340px; flex: none; }
+.layout-compact .dd-media { width: 420px; flex: none; }
+.layout-split .dd-main, .layout-compact .dd-main { flex: 1; min-width: 0; }
+/* 头部布局切换：三个小方块，点了立刻生效 */
+.dd-layout-switch { display: flex; gap: 2px; padding: 2px; border-radius: var(--r-sm);
+  background: var(--c-surface-2); margin-right: 4px; }
+.dd-layout-switch .ll {
+  width: 26px; height: 24px; display: grid; place-items: center;
+  border: none; border-radius: 4px; background: transparent; color: var(--c-text-3);
+  font-size: 13px; line-height: 1; cursor: pointer; transition: background var(--t-base), color var(--t-base);
+}
+.dd-layout-switch .ll:hover { color: var(--c-text-1); }
+.dd-layout-switch .ll.on { background: var(--c-primary-soft-strong); color: var(--c-primary-h); }
+
+.cw-bar { position: absolute; left: 0; right: 0; bottom: 0; height: 3px; background: rgba(0,0,0,.5); }
 .cw-bar > i { display: block; height: 100%; background: var(--c-primary); }
 .cover-src-badge {
   position: absolute; top: 6px; left: 6px; z-index: 2;
@@ -1456,9 +1653,11 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', onKey) })
   pointer-events: none;
 }
 /* 封面上的操作：一直可见（都是实在功能），紧凑排列即可 */
-.cov-acts { display: flex; gap: var(--sp-2); margin-top: var(--sp-2); flex-wrap: wrap; }
+.cov-acts { display: flex; gap: var(--sp-2); flex-wrap: wrap; }
 
 .dd-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: var(--sp-2); }
+/* 评分 / 字幕 / 信息表 / 标签：跨整宽，不再把右栏撑高造成左侧空位 */
+.dd-extra { padding: 0 var(--sp-5) var(--sp-4); display: flex; flex-direction: column; gap: var(--sp-2); }
 /* 主操作按组平铺：每行一个组，左侧小标签对齐——所有功能一级可见，不搞层级 */
 .dd-actions { display: flex; flex-direction: column; gap: 7px; }
 .dd-g { display: flex; align-items: center; gap: var(--sp-1); flex-wrap: wrap; }
@@ -1685,25 +1884,43 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', onKey) })
 
 .lightbox {
   position: fixed; inset: 0; z-index: var(--z-toast);
-  background: rgba(0,0,0,.92);
+  background: #000;
   display: flex; align-items: center; justify-content: center;
-  padding: 16px;
+  padding: 0;
   animation: fade-in var(--t-base);
+  overflow: hidden;
+}
+/* 背景层：当前图自身铺满 + 重模糊压暗，形成「沉浸式」环境光，而不是纯黑边 */
+.lb-bg {
+  position: absolute; inset: -60px;
+  background-size: cover; background-position: center;
+  filter: blur(46px) brightness(.42) saturate(1.2);
+  transform: scale(1.1);
+  pointer-events: none; z-index: 0;
 }
 /* 整组预览图：左右翻页 + 计数 + 底部缩略图，避免一次只能看一张 */
-.lb-box { display: flex; flex-direction: column; align-items: center; gap: 10px;
-  max-width: 100%; max-height: 100%; min-height: 0; }
-.lb-main { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.lb-box { position: relative; z-index: 1; display: flex; flex-direction: column;
+  align-items: center; gap: 0; max-width: 100%; max-height: 100%; min-height: 0; }
+.lb-main { display: flex; align-items: center; gap: 10px; min-width: 0; overflow: hidden; }
+/* 按图片自身比例撑满可用高度：竖图不再被塞进宽盒子导致左右大片黑边；
+   宽度给上限，超宽图（2.4:1 等）也能整幅显示 */
 .lb-main img {
-  max-width: min(88vw, 1500px); max-height: calc(100vh - 190px);
-  object-fit: contain; border-radius: 6px; cursor: default;
+  height: calc(100vh - 28px);
+  width: auto; max-width: min(98vw, 2600px);
+  object-fit: contain; border-radius: 6px; cursor: zoom-in;
+  transition: transform .12s ease-out; touch-action: none; user-select: none;
 }
+.lb-main img.zoomed { cursor: grab; transition: none; }
+.lb-main img.zoomed:active { cursor: grabbing; }
 .lb-nav {
-  flex: 0 0 auto; width: 40px; height: 40px; border-radius: 50%;
+  position: absolute; top: 50%; transform: translateY(-50%);
+  flex: 0 0 auto; width: 44px; height: 44px; border-radius: 50%; z-index: 3;
   border: 1px solid rgba(255,255,255,.28); background: rgba(0,0,0,.45);
   color: #fff; font-size: 22px; line-height: 1; cursor: pointer;
 }
 .lb-nav:hover { background: rgba(255,255,255,.16); }
+.lb-main .lb-nav:first-of-type { left: 10px; }
+.lb-main .lb-nav:last-of-type { right: 10px; }
 /* 关闭按钮：右上角常驻，任何尺寸屏幕都一眼可见 */
 .lb-close {
   position: absolute; top: 14px; right: 16px; width: 44px; height: 44px;
@@ -1712,8 +1929,23 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', onKey) })
   cursor: pointer; z-index: 2; transition: background var(--t-fast), transform var(--t-fast);
 }
 .lb-close:hover { background: rgba(255,255,255,.2); transform: scale(1.06); }
-.lb-count { color: rgba(255,255,255,.72); font-size: 12px; font-variant-numeric: tabular-nums; }
-.lb-thumbs { display: flex; gap: 6px; max-width: min(88vw, 1500px); overflow-x: auto; padding: 2px; }
+.lb-count {
+  color: rgba(255,255,255,.72); font-size: 12px; font-variant-numeric: tabular-nums;
+  position: fixed; left: 16px; top: 16px; z-index: 2;
+  background: rgba(0,0,0,.5); padding: 4px 8px; border-radius: 6px;
+  opacity: 0; transition: opacity .2s ease;
+}
+.lightbox:hover .lb-count { opacity: 1; }
+@media (hover: none) { .lb-count { opacity: 1; } }
+/* 缩略图条浮在底部，不再挤占图片高度（图片可用高度 = 视口 - 120） */
+.lb-thumbs {
+  display: flex; gap: 6px; max-width: min(90vw, 1500px); overflow-x: auto; padding: 6px 8px;
+  position: fixed; left: 50%; bottom: 14px; transform: translateX(-50%);
+  background: rgba(0,0,0,.55); border-radius: 10px; backdrop-filter: blur(6px);
+  z-index: 2; opacity: 0; transition: opacity .2s ease;
+}
+.lightbox:hover .lb-thumbs { opacity: 1; }
+@media (hover: none) { .lb-thumbs { opacity: 1; } }
 .lb-thumbs img {
   flex: 0 0 auto; width: 88px; height: 50px; object-fit: cover;
   border-radius: 4px; opacity: .55; cursor: pointer;
@@ -1725,20 +1957,21 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', onKey) })
 @media (max-width: 640px) {
   .lb-nav { width: 34px; height: 34px; font-size: 18px; }
   .lb-main { gap: 6px; }
-  .lb-main img { max-width: 82vw; max-height: calc(100vh - 210px); }
+  .lb-main img { height: calc(100vh - 140px); max-width: 94vw; }
   .lb-thumbs img { width: 64px; height: 38px; }
 }
 
 @media (max-width: 760px) {
-  .dd-top { flex-direction: column; }
-  .dd-cover { width: 160px; }
+  .layout-split, .layout-compact { flex-direction: column; }
+  .layout-split .dd-media, .layout-compact .dd-media { width: 100%; }
+  .dd-hero img { max-height: 240px; }
   .edit-form .two { grid-template-columns: 1fr; }
 }
 
 /* 极窄屏（竖屏手机）：缩小封面与内边距，播放器铺满，避免横向溢出 */
 @media (max-width: 480px) {
   .dd-top { gap: var(--sp-3); }
-  .dd-cover { width: 120px; }
+  .dd-hero img { max-height: 200px; }
   .dd-content { padding: var(--sp-3) var(--sp-3) var(--sp-10); }
   .dd-actions { gap: 5px; }
 .dd-g-lbl { min-width: 30px; }

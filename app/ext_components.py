@@ -288,6 +288,100 @@ def _detect_model(size: str) -> Dict[str, Any]:
     }
 
 
+def selftest(cid: str) -> Dict[str, Any]:
+    """组件自检：真实验证「能不能用」（ffmpeg 跑 -version、依赖真实 import、
+    模型文件逐个核对），把「面板显示就绪但功能不能用」这类问题一步定位。"""
+    if cid == "ffmpeg":
+        return _selftest_ffmpeg()
+    if cid == "asr-libs":
+        return _selftest_asr_libs()
+    if cid.startswith("asr-model-"):
+        return _selftest_model(cid.rsplit("-", 1)[-1])
+    raise ValueError("未知组件: %s" % cid)
+
+
+def _selftest_ffmpeg() -> Dict[str, Any]:
+    cfg = load_config(refresh=True)
+    checks: List[Dict[str, Any]] = []
+    exe = ffmpeg_exe(cfg)
+    ok = True
+    if os.path.isfile(exe):
+        checks.append({"name": "ffmpeg 路径", "ok": True, "detail": exe})
+    else:
+        ok = False
+        checks.append({"name": "ffmpeg 路径", "ok": False,
+                       "detail": "未找到（配置 / 组件目录 / PATH / 便携包都没命中）"})
+    if os.path.isfile(exe):
+        try:
+            r = subprocess.run([exe, "-version"], stdout=subprocess.PIPE,
+                               stderr=subprocess.STDOUT, timeout=15)
+            first = (r.stdout or b"").decode("utf-8", "replace").splitlines()[:1]
+            if r.returncode == 0:
+                checks.append({"name": "ffmpeg 可运行", "ok": True,
+                               "detail": (first[0][:120] if first else "返回码 0")})
+            else:
+                ok = False
+                checks.append({"name": "ffmpeg 可运行", "ok": False,
+                               "detail": "退出码 %d：%s" % (r.returncode, (first[0][:100] if first else "无输出"))})
+        except Exception as e:
+            ok = False
+            checks.append({"name": "ffmpeg 可运行", "ok": False, "detail": str(e)[:160]})
+    probe = ffprobe_exe(cfg)
+    pok = probe != exe and os.path.isfile(probe)
+    if not pok:
+        pok = bool(shutil.which(probe)) if os.path.dirname(probe) else bool(shutil.which("ffprobe"))
+    checks.append({"name": "ffprobe（探测时长/封装用）", "ok": pok,
+                   "detail": probe if pok else "未找到——预览图 / 智能封面 / 对白提取需要它"})
+    if not pok:
+        ok = False
+    d = _detect_ffmpeg()
+    return {"ok": ok, "version": d.get("version") or "", "source": d.get("source") or "",
+            "path": exe, "checks": checks}
+
+
+def _selftest_asr_libs() -> Dict[str, Any]:
+    import importlib
+    from . import asr
+    d = asr.libs_dir()
+    checks: List[Dict[str, Any]] = [{
+        "name": "依赖目录", "ok": bool(d) and os.path.isdir(d),
+        "detail": d or "未配置（空 = 只认 PATH 里的全局安装）",
+    }]
+    asr._ensure_libs()
+    ok = True
+    for mod in ("faster_whisper", "ctranslate2"):
+        try:
+            spec = importlib.util.find_spec(mod)
+            if spec and getattr(spec, "origin", None):
+                checks.append({"name": "import %s" % mod, "ok": True, "detail": spec.origin})
+            else:
+                ok = False
+                checks.append({"name": "import %s" % mod, "ok": False, "detail": "找不到——依赖没装或路径不对"})
+        except Exception as e:
+            ok = False
+            checks.append({"name": "import %s" % mod, "ok": False, "detail": str(e)[:140]})
+    return {"ok": ok, "checks": checks}
+
+
+def _selftest_model(size: str) -> Dict[str, Any]:
+    from . import asr
+    root = asr.model_root(size)
+    checks: List[Dict[str, Any]] = [{
+        "name": "模型目录", "ok": os.path.isdir(root), "detail": root,
+    }]
+    ok = os.path.isdir(root)
+    for f in ("model.bin", "config.json", "tokenizer.json"):
+        p = os.path.join(root, f)
+        present = os.path.isfile(p)
+        detail = p if present else "缺失"
+        if present:
+            detail += "（%.1f MB）" % (os.path.getsize(p) / 1048576.0)
+        else:
+            ok = False
+        checks.append({"name": f, "ok": present, "detail": detail})
+    return {"ok": ok, "checks": checks}
+
+
 def status() -> Dict[str, Any]:
     """全部组件状态 + 当前安装任务（前端扩展组件页就靠这一个接口）。"""
     comps = [_detect_ffmpeg(), _detect_asr_libs()]

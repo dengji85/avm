@@ -63,6 +63,9 @@ class AIConfig:
     temperature: float = 0.4
     timeout: int = DEFAULT_TIMEOUT
     max_retries: int = DEFAULT_RETRIES
+    # 单次调用的输出上限（0 = 不指定，用各调用方自己的预算）。
+    # 推理型模型先消耗额度思考，需要显式调大，否则结果会被截断成空。
+    max_tokens: int = 0
     extra_headers: Dict[str, str] = field(default_factory=dict)
     # 模型池里的身份：name 用于展示与「指定模型」，kind 只影响界面标签（cloud/local）
     name: str = "default"
@@ -81,13 +84,14 @@ class AIConfig:
             "temperature": a.get("temperature", 0.4),
             "timeout": a.get("timeout", DEFAULT_TIMEOUT),
             "max_retries": a.get("max_retries", DEFAULT_RETRIES),
+            "max_tokens": int(a.get("max_tokens") or 0),
             "extra_headers": dict(a.get("extra_headers", {}) or {}),
         }
         name = str(model or "default")
         kind = "cloud"
         if entry:
             for key in ("base_url", "api_key", "model", "temperature",
-                        "timeout", "max_retries"):
+                        "timeout", "max_retries", "max_tokens"):
                 val = entry.get(key)
                 if val not in (None, ""):
                     base[key] = val
@@ -117,6 +121,7 @@ class AIConfig:
             temperature=float(base.get("temperature", 0.4) or 0.4),
             timeout=max(5, timeout),
             max_retries=max(0, retries),
+            max_tokens=int(base.get("max_tokens") or 0),
             extra_headers=dict(base.get("extra_headers", {}) or {}),
             name=name,
             kind=kind,
@@ -337,11 +342,14 @@ def chat(cfg: AIConfig, messages: List[Dict[str, str]], *,
     for k, v in (cfg.extra_headers or {}).items():
         headers[str(k)] = str(v)
 
+    budget = int(max_tokens)
+    if int(getattr(cfg, "max_tokens", 0) or 0) > 0:
+        budget = max(budget, int(cfg.max_tokens))
     payload: Dict[str, Any] = {
         "model": cfg.model,
         "messages": messages,
         "temperature": temp,
-        "max_tokens": max_tokens,
+        "max_tokens": budget,
     }
 
     # 兼容「填到 /v1」和「把完整端点也贴进来」两种写法：
@@ -353,8 +361,9 @@ def chat(cfg: AIConfig, messages: List[Dict[str, str]], *,
     # 推理型模型（返回 reasoning_content）会把 max_tokens 全部用在思考上，
     # 结果 finish_reason=length 而 content 为空。此时把额度翻倍重试一次，
     # 而不是把空串当成功返回——空答案会让上层显示「模型没回答」。
-    bumped = False
-    for attempt in range(attempts):
+    bumps = 0
+    cap = int(getattr(cfg, "max_tokens", 0) or 0) or 16000
+    for attempt in range(attempts + 3):
         try:
             resp = requests.post(url, headers=headers, json=payload,
                                  timeout=(CONNECT_TIMEOUT, cfg.timeout))
@@ -382,14 +391,17 @@ def chat(cfg: AIConfig, messages: List[Dict[str, str]], *,
                     raise AiError("模型按内容策略拒绝返回（finish_reason=content_filter），可换个模型或调整提示词",
                                   retryable=False)
                 if finish == "length":
-                    if not bumped and attempt < attempts - 1:
-                        bumped = True
-                        payload["max_tokens"] = min(8000, max(int(payload["max_tokens"]) * 2, 1600))
+                    # 推理型模型先烧思考额度：翻倍再试，最多 3 次；上限取模型配置值
+                    cur = int(payload["max_tokens"])
+                    if bumps < 3 and cur < cap:
+                        bumps += 1
+                        payload["max_tokens"] = min(cap, max(cur * 2, 2000))
                         log.info("AI 返回被 token 上限截断（%s），max_tokens 提到 %d 重试",
                                  purpose or "chat", payload["max_tokens"])
                         continue
                     raise AiError("模型返回被 token 上限截断（finish_reason=length）："
-                                  "推理型模型会先消耗额度思考，请调大该模型的 max_tokens 或换用非推理模型",
+                                  "推理型模型会先消耗额度思考，请在 AI 中心把该模型的 max_tokens 调大"
+                                  "（例如 8000–16000），或换用非推理模型",
                                   retryable=False)
             with _STATS_LOCK:
                 _STATS["calls"] += 1

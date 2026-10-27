@@ -97,7 +97,16 @@ export const del = (p, qs) => api(p + qstr(qs), { method: 'DELETE' })
 
 /* ---------------- 静态资源地址 ---------------- */
 export const coverUrl = (id) => `${API}/cover/${id}`
-export const coverThumbUrl = (id, w = 360) => `${API}/cover/${id}?w=${w}`
+/* 卡片用竖版海报（后端没有海报时自动回退原图）：2:3 容器里显示完整竖图，不再裁中间 */
+/* 批量生成竖版海报（不重刮元数据）：force=true 强制重生成 */
+export const genPosters = (force = false, upgrade = false) =>
+  post('/covers/posters', { force, upgrade })
+/* 竖版海报批量：后台任务（启动 / 轮询进度 / 取消） */
+export const posterTaskStart = (force = false, upgrade = false) =>
+  post('/covers/posters/task', { force, upgrade })
+export const posterTaskState = () => get('/covers/posters/task')
+export const posterTaskCancel = () => post('/covers/posters/task/cancel', {})
+export const coverThumbUrl = (id, w = 360) => `${API}/cover/${id}?w=${w}&poster=1`
 export const previewUrl = (movieId, fname) => `${API}/covers/preview/${movieId}/${encodeURIComponent(fname)}`
 export const streamUrl = (id) => `${API}/stream/${id}`
 /* .strm 的 HLS 播放列表（服务端已把分片改写成同源地址，供 video.js / VHS 直接播） */
@@ -238,6 +247,8 @@ export const deleteTag = (name) => post('/tags/delete', { name })
 /* AI 建议转正：新标签以 source='ai' 入库（供后期批量清理）；返回更新后的影片详情 */
 export const aiPromoteTags = (movieId, names) => post(`/movies/${movieId}/tags/ai-promote`, { names })
 export const cleanupTags = (source) => post('/tags/cleanup', { source })
+/* 组件自检：真实验证可用性（ffmpeg 跑 -version / 依赖 import / 模型文件核对） */
+export const extSelftest = (cid) => post(`/ext/${cid}/selftest`, {})
 
 /* ---------------- 统计 / 存储 ---------------- */
 export const getProfile = () => get('/profile')
@@ -294,8 +305,11 @@ export const aiApplyPlot = (id, plot, source) => post(`/ai/plot/apply/${id}`, { 
 export const aiSuggestTags = (id) => post(`/ai/suggest-tags/${id}`, {})
 
 /* AI 字幕翻译：单部同步生成 */
+/* 单部字幕翻译：启动后台任务 → 轮询进度 → 可取消 */
 export const aiTranslate = (id, target = 'zh-Hans', bilingual = false) =>
   post(`/ai/translate/${id}?target=${encodeURIComponent(target)}&bilingual=${bilingual ? '1' : '0'}`, {})
+export const aiTranslateStatus = (id) => get(`/ai/translate/${id}`)
+export const aiTranslateCancel = (id) => post(`/ai/translate/${id}/cancel`, {})
 export const aiDeleteSubtitle = (id, subId) => del(`/movies/${id}/subtitles/${subId}`)
 
 /* ---- 模型池 ---- */
@@ -355,7 +369,7 @@ export const aiGlossarySave = (items) => put('/ai/glossary', { items })
 /* 从库里的女优 / 系列生成术语候选（只返回建议，不落库） */
 export const aiGlossarySuggest = (params = {}) => get('/ai/glossary/suggest', params)
 export const aiSearchIntent = (query) => post('/ai/search-intent', { query })
-export const aiLibraryQa = (question) => post('/ai/library-qa', { question })
+export const aiLibraryQa = (question, history = []) => post('/ai/library-qa', { question, history })
 /* 内置 agent：多步工具调用（查库字典 → 检索 → 换词重试 → 结论），返回 items/rows/steps */
 export const aiAgent = (question) => post('/ai/agent', { question })
 export const aiWebsearchStatus = () => get('/ai/websearch/status')
@@ -367,11 +381,11 @@ export const aiWebsearchCheck = (query) => post('/ai/websearch/check', { query }
  * 用 fetch + ReadableStream 而不是 EventSource——EventSource 只能 GET，发不了问题。
  * 返回 done 事件的载荷；onEvent 会收到所有事件（step / delta / answer / done）。
  */
-export async function aiAgentStream(question, onEvent, movie = null) {
+export async function aiAgentStream(question, onEvent, movie = null, history = []) {
   const res = await fetch(API + '/ai/agent/stream', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(movie ? { question, movie } : { question }),
+    body: JSON.stringify({ question, ...(movie ? { movie } : {}), history }),
   })
   if (!res.ok) {
     let msg = `HTTP ${res.status}`

@@ -18,17 +18,14 @@
             </div>
             <p class="hint">{{ $t('aiCenter.extDesc.' + c.id) }}</p>
             <p v-if="c.path && c.state === 'ready'" class="hint ext-path">{{ c.path }}</p>
-            <details v-if="c.id === 'ffmpeg'" class="ext-adv">
-              <summary class="hint">{{ $t('aiCenter.extAdvanced') }}</summary>
-              <div class="field">
-                <label>{{ $t('settings.ffmpegPath') }}</label>
-                <input v-model="ffPath" :placeholder="$t('aiCenter.extFfmpegPh')" />
-                <span class="hint">{{ $t('aiCenter.extFfmpegHint') }}</span>
-              </div>
+            <div v-if="c.id === 'ffmpeg'" class="field">
+              <label>{{ $t('settings.ffmpegPath') }}</label>
+              <input v-model="ffPath" :placeholder="$t('aiCenter.extFfmpegPh')" />
+              <span class="hint">{{ $t('aiCenter.extFfmpegHint') }}</span>
               <button class="btn tiny" :disabled="ffPath === (extFf.custom || '')" @click="saveFfPath">
                 {{ $t('common.save') }}
               </button>
-            </details>
+            </div>
             <div v-if="task.running && task.cid === c.id" class="ext-progress">
               <div class="ext-bar">
                 <div class="ext-bar-in" :style="{ width: taskPercent + '%' }"
@@ -57,6 +54,18 @@
               <span v-if="c.state === 'ready' && c.source && c.source !== 'ext'" class="hint">
                 {{ $t('aiCenter.extSource.' + c.source) }}
               </span>
+              <!-- 自检：真实验证能不能用，出问题时直接告诉你缺什么 / 从哪加载 -->
+              <span class="spacer"></span>
+              <button class="btn tiny ghost" :disabled="test.busy" @click="runTest(c.id)">
+                {{ test.busy && test.cid === c.id ? $t('aiCenter.extTestRun') : $t('aiCenter.extSelftest') }}
+              </button>
+            </div>
+            <div v-if="test.cid === c.id && test.result" class="ext-test" :class="test.result.ok ? 'ok' : 'bad'">
+              <div v-for="(chk, i) in test.result.checks" :key="i" class="ext-test-row">
+                <span class="ext-test-mark">{{ chk.ok ? '✓' : '✗' }}</span>
+                <b>{{ chk.name }}</b>
+                <span class="ext-test-detail">{{ chk.detail }}</span>
+              </div>
             </div>
           </div>
           <div v-if="imp.cid" class="aic-card">
@@ -117,6 +126,18 @@
               {{ $t('common.save') }}
             </button>
           </div>
+
+          <!-- 使用教程与常见问题：排查不求人 -->
+          <details class="ext-help">
+            <summary>📖 {{ $t('aiCenter.extHelpTitle') }}</summary>
+            <div class="ext-help-body">
+              <p><b>{{ $t('aiCenter.extHelpInstallT') }}</b>{{ $t('aiCenter.extHelpInstall') }}</p>
+              <p><b>{{ $t('aiCenter.extHelpFfmpegT') }}</b>{{ $t('aiCenter.extHelpFfmpeg') }}</p>
+              <p><b>{{ $t('aiCenter.extHelpModelT') }}</b>{{ $t('aiCenter.extHelpModel') }}</p>
+              <p><b>{{ $t('aiCenter.extHelpStrmT') }}</b>{{ $t('aiCenter.extHelpStrm') }}</p>
+              <p><b>{{ $t('aiCenter.extHelpOfflineT') }}</b>{{ $t('aiCenter.extHelpOffline') }}</p>
+            </div>
+          </details>
   </div>
 </template>
 
@@ -124,7 +145,7 @@
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 
 import {
-  extCancel, extImport, extInstall, extStatus, extTask, extUninstall, getConfig, putConfig,
+  extCancel, extImport, extInstall, extSelftest, extStatus, extTask, extUninstall, getConfig, putConfig,
 } from '../api.js'
 import { t } from '../i18n/index.js'
 import { confirmDialog, toast } from '../utils.js'
@@ -173,6 +194,22 @@ function syncTask(ts) {
     else if (ts && ts.state === 'failed') toast(t('aiCenter.extFailed', { msg: ts.message || '' }), 'err', 6000)
   }
   // 非运行状态（done/failed/cancelled 的历史残留）不弹打扰提示：组件状态以 status 为准
+}
+
+/* ---------- 组件自检：真实验证可用性，结果就地展示 ---------- */
+const test = reactive({ cid: '', busy: false, result: null })
+async function runTest(cid) {
+  if (test.busy) return
+  test.cid = cid
+  test.busy = true
+  test.result = null
+  try {
+    test.result = await extSelftest(cid)
+  } catch (e) {
+    test.result = { ok: false, checks: [{ name: t('aiCenter.extSelftest'), ok: false, detail: e.message }] }
+  } finally {
+    test.busy = false
+  }
 }
 
 async function loadExt() {
@@ -354,5 +391,25 @@ onBeforeUnmount(() => { stopExtPoll() })
 .aic-badge.ready { background: rgba(46, 160, 67, .18); color: #3fb950; }
 .aic-badge.missing { background: var(--c-surface-2); color: var(--c-text-3); }
 .aic-badge.installing { background: var(--c-primary-soft-strong); color: var(--c-primary-h); }
+/* 自检结果：✓/✗ 逐项列出，一眼定位缺什么 */
+.ext-test {
+  border: 1px solid var(--c-line); border-radius: var(--r-sm);
+  padding: 6px 10px; display: flex; flex-direction: column; gap: 4px;
+  font-size: var(--fs-sm);
+}
+.ext-test.ok { border-color: rgba(46, 160, 67, .45); }
+.ext-test.bad { border-color: rgba(229, 72, 77, .5); }
+.ext-test-row { display: flex; gap: 8px; align-items: baseline; min-width: 0; }
+.ext-test-mark { flex: 0 0 auto; font-weight: 700; }
+.ext-test.ok .ext-test-mark { color: #3fb950; }
+.ext-test.bad .ext-test-mark { color: #e5484d; }
+.ext-test-detail { color: var(--c-text-3); font-family: ui-monospace, Consolas, monospace;
+  font-size: 11px; word-break: break-all; }
+/* 教程折叠区 */
+.ext-help { margin-top: var(--sp-3); border-top: 1px dashed var(--c-line); padding-top: var(--sp-2); }
+.ext-help summary { cursor: pointer; user-select: none; color: var(--c-text-2); }
+.ext-help-body { padding: var(--sp-2) 0 0; display: flex; flex-direction: column; gap: 6px; }
+.ext-help-body p { margin: 0; }
+.ext-help-body b { color: var(--c-text-1); }
 </style>
 <!-- @@STYLE@@ -->

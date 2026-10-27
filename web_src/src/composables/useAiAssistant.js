@@ -1,7 +1,7 @@
 import { computed, reactive, ref } from 'vue'
 import {
   aiStatus, aiGenerateSynopsis, aiApplyPlot, aiSuggestTags,
-  aiTranslate, aiDeleteSubtitle, subtitleFileUrl,
+  aiTranslate, aiTranslateStatus, aiTranslateCancel, aiDeleteSubtitle, subtitleFileUrl,
   aiAsk, aiAskHistory, aiSimilar, subtitleTracks, updateMovie,
   aiPrompts, aiSavePrompt, aiResetPrompt, aiTraces,
   aiAsrStatus, movieDialog, startMovieDialog, deleteMovieDialog, exportDialogSrt,
@@ -37,6 +37,7 @@ export function useAiAssistant({ movieId, movie, toast, confirm, onChange }) {
   /* ---------------- 字幕 ---------------- */
   const subs = reactive({
     loading: false, error: '', target: 'zh-Hans', bilingual: false, tracks: [],
+    percent: 0, message: '',
   })
 
   /* ---------------- 问答 ---------------- */
@@ -188,20 +189,62 @@ export function useAiAssistant({ movieId, movie, toast, confirm, onChange }) {
     }
   }
 
-  /* ---------------- 字幕翻译 ---------------- */
+  /* ---------------- 字幕翻译（后台任务 + 进度轮询） ---------------- */
+  let subsTimer = 0
+
+  function stopSubsPoll() {
+    if (subsTimer) {
+      clearInterval(subsTimer)
+      subsTimer = 0
+    }
+  }
+
+  async function pollTransSubs() {
+    try {
+      const s = await aiTranslateStatus(movieId.value)
+      subs.percent = s.percent || 0
+      subs.message = s.message || ''
+      if (s.status === 'running') return
+      stopSubsPoll()
+      subs.loading = false
+      if (s.status === 'done') {
+        const cues = (s.result || {}).cues || 0
+        toast(t('ai.subsDone', { n: cues }), 'ok', 3000)
+        loadTrace('subs')
+        if (onChange) await onChange()
+      } else if (s.status === 'cancelled') {
+        toast(t('ai.subsCancelled'), 'ok', 2500)
+      } else if (s.status === 'error') {
+        subs.error = s.message || t('ai.failed')
+      }
+    } catch (e) {
+      stopSubsPoll()
+      subs.loading = false
+      subs.error = e.message || t('ai.failed')
+    }
+  }
+
   async function translateSubs() {
     if (subs.loading) return
     subs.loading = true
     subs.error = ''
+    subs.percent = 0
+    subs.message = ''
     try {
-      const r = await aiTranslate(movieId.value, subs.target, subs.bilingual)
-      toast(t('ai.subsDone', { n: r.cues }), 'ok', 3000)
-      loadTrace('subs')
-      if (onChange) await onChange()
+      await aiTranslate(movieId.value, subs.target, subs.bilingual)
+      stopSubsPoll()
+      subsTimer = setInterval(pollTransSubs, 1000)
+    } catch (e) {
+      subs.loading = false
+      subs.error = e.message || t('ai.failed')
+    }
+  }
+
+  async function cancelTranslateSubs() {
+    try {
+      await aiTranslateCancel(movieId.value)
     } catch (e) {
       subs.error = e.message || t('ai.failed')
-    } finally {
-      subs.loading = false
     }
   }
 
@@ -553,7 +596,7 @@ export function useAiAssistant({ movieId, movie, toast, confirm, onChange }) {
     refreshStatus, loadTracks, reset, timeToSeconds,
     generatePlot, applyPlot, discardPlot,
     suggestTags, toggleTag, pickAllTags, applyTags,
-    translateSubs, downloadSub, removeAiSub,
+    translateSubs, cancelTranslateSubs, downloadSub, removeAiSub,
     loadAskHistory, sendAsk, toggleHistory,
     loadSimilar, traceItems,
   })

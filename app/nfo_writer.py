@@ -229,7 +229,13 @@ def export_detail(movie: Dict[str, Any], cfg: Dict[str, Any] | None = None,
     if ec.get("write_cover", True):
         cover = str(movie.get("cover") or "")
         if cover and not cover.lower().startswith(("http://", "https://")):
-            poster_src = images.cover_path(cover)
+            # 优先用 2:3 竖版海报：Jellyfin / Emby 的 poster 位是竖图，横图会被裁成中间一块
+            poster_src = images.poster_path(cover)
+            if poster_src is None:
+                images.ensure_poster(cover, cfg)
+                poster_src = images.poster_path(cover)
+        if poster_src is None:
+            poster_src = images.cover_path(str(movie.get("cover") or ""))
         if poster_src is None:
             poster_src = images.find_local_cover(movie_file_of(movie), str(movie.get("code") or ""))
 
