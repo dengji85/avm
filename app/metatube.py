@@ -239,6 +239,7 @@ def to_meta(info: Dict[str, Any]) -> Dict[str, Any]:
     """MovieInfo -> 本项目元数据字段（见 providers.base.FIELDS）。"""
     label = str(info.get("label") or "").strip()
     maker = str(info.get("maker") or "").strip()
+    rating = _rating(info.get("score"))
     meta: Dict[str, Any] = {
         "title": str(info.get("title") or "").strip(),
         "code": str(info.get("number") or "").strip(),
@@ -250,12 +251,14 @@ def to_meta(info: Dict[str, Any]) -> Dict[str, Any]:
         "publisher": maker if label and maker and maker != label else "",
         "series": str(info.get("series") or "").strip(),
         "director": str(info.get("director") or "").strip(),
-        "rating": _rating(info.get("score")),
         "cover": str(info.get("cover_url") or "").strip(),
         "fanart": str(info.get("big_cover_url") or info.get("big_thumb_url") or "").strip(),
         "actresses": [str(a).strip() for a in (info.get("actors") or []) if str(a).strip()],
         "genres": [str(g).strip() for g in (info.get("genres") or []) if str(g).strip()],
     }
+    # 没有评分就不要给键：normalize 会把空 rating 折算成 0.0，进而把已有评分清零
+    if rating:
+        meta["rating"] = rating
     return meta
 
 
