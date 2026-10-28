@@ -399,6 +399,12 @@ export default {
     dragHint: '拖曳卡片左右滑動 · 雙擊封面查看詳情',
   },
   detail: {
+    fRating: '評分',
+    fFlags: '標記',
+    secRate: '評分與標記',
+    secSubs: '字幕',
+    secInfo: '作品資訊',
+    secTags: '標籤',
     layoutHero: '沉浸',
     layoutSplit: '分欄',
     layoutCompact: '緊湊',

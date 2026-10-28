@@ -400,6 +400,12 @@ export default {
     dragHint: 'Drag cards left/right · double-click cover for details',
   },
   detail: {
+    fRating: 'Rating',
+    fFlags: 'Flags',
+    secRate: 'Rating & flags',
+    secSubs: 'Subtitles',
+    secInfo: 'Details',
+    secTags: 'Tags',
     layoutHero: 'Hero',
     layoutSplit: 'Split',
     layoutCompact: 'Compact',

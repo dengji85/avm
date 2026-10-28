@@ -392,6 +392,12 @@ export default {
     dragHint: 'カードを左右にスワイプ · ダブルクリックで詳細',
   },
   detail: {
+    fRating: '評価',
+    fFlags: 'マーク',
+    secRate: '評価とマーク',
+    secSubs: '字幕',
+    secInfo: '作品情報',
+    secTags: 'タグ',
     layoutHero: 'ヒーロー',
     layoutSplit: '左右',
     layoutCompact: 'コンパクト',

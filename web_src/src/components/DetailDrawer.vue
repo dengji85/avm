@@ -901,6 +901,8 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', onKey) })
               <span class="ico">{{ LAYOUT_ICONS[l] }}</span>
             </button>
           </div>
+          <button class="btn ghost icon" :class="{ 'ai-entry-on': ai.ready }"
+                  :data-tip="$t('ai.title')" @click="openAi">✨</button>
           <button class="btn ghost icon" @click="copyText(mainFile?.path || '')" :data-tip="$t('detail.copyPath')">⧉</button>
           <button class="btn ghost icon" @click="close" :data-tip="$t('detail.closeEsc')">✕</button>
         </header>
@@ -961,6 +963,7 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', onKey) })
                 <div class="dd-actions">
                   <div class="dd-g">
                     <span class="dd-g-lbl">{{ $t('detail.grpPlay') }}</span>
+                    <div class="dd-btns flow">
                     <button
                       class="btn primary"
                       :disabled="!hasPlayable"
@@ -970,25 +973,26 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', onKey) })
                       {{ playing ? $t('detail.collapsePlayer') : (progressPct > 0 ? $t('detail.continue', { p: progressPct }) : $t('detail.onlinePlay')) }}
                     </button>
                     <button v-if="canExternal" class="btn" :disabled="!hasPlayable" @click="play">↗ {{ $t('player.external') }}</button>
-                    <button class="btn" :disabled="!hasPlayable" :title="$t('detail.castHint')" @click="openCast">
-                      📺 <span v-if="!castTo">{{ $t('detail.cast') }}</span>
-                      <span v-else class="cast-on">{{ castTo }}</span>
-                    </button>
+                    <button class="btn icon" :class="{ active: !!castTo }" :disabled="!hasPlayable"
+                            :data-tip="castTo ? castTo : $t('detail.cast')" @click="openCast">📺</button>
                     <button v-if="castTo" class="btn ghost" @click="stopCast">{{ $t('detail.castStop') }}</button>
+                    </div>
                   </div>
 
                   <div class="dd-g">
                     <span class="dd-g-lbl">{{ $t('detail.grpMark') }}</span>
+                    <div class="dd-btns icons">
                     <button class="btn icon" :class="{ active: mv.favorite }" @click="flip('favorite')" :data-tip="$t('flag.favorite')">{{ mv.favorite ? '♥' : '♡' }}</button>
                     <button class="btn icon" :class="{ active: mv.watchlist }" @click="flip('watchlist')" :data-tip="$t('flag.watchlist')">⌚</button>
                     <button class="btn icon" :class="{ active: mv.watched }" @click="flip('watched')" :data-tip="$t('flag.watched')">{{ mv.watched ? '●' : '○' }}</button>
                     <AddToCollectionBtn :movie-id="id" variant="detail" />
-                    <button v-if="canReveal" class="btn" @click="openFolder" :data-tip="$t('detail.revealFolderTip')">📁 {{ $t('detail.revealFolder') }}</button>
-                    <button class="btn" :class="{ 'ai-entry-on': ai.ready }" :title="$t('ai.entryTip')" @click="openAi">✨ {{ $t('ai.title') }}</button>
+                    <button v-if="canReveal" class="btn icon" @click="openFolder" :data-tip="$t('detail.revealFolder')">📁</button>
+                    </div>
                   </div>
 
                   <div v-if="sites.length" class="dd-g">
                     <span class="dd-g-lbl">{{ $t('detail.grpSites') }}</span>
+                    <div class="dd-btns chips">
                     <!-- 前 3 个平铺，其余进「更多」：站点行只占一行 -->
                     <button v-for="s in topSites" :key="s.id" class="btn site-flat"
                             :title="renderSiteUrl(s, (mv && mv.code) || '')" @click="openSite(s)">
@@ -1007,17 +1011,20 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', onKey) })
                         </button>
                       </div>
                     </div>
+                    </div>
                   </div>
 
                   <div class="dd-g">
                     <span class="dd-g-lbl">{{ $t('detail.grpMaint') }}</span>
+                    <div class="dd-btns flow">
                     <!-- 刮削：只补空字段；强制刮削：覆盖字段并强制换封面（含低清图） -->
-                    <button class="btn tiny ghost" @click="doScrape(false)" :disabled="loading"
+                    <button class="btn ghost" @click="doScrape(false)" :disabled="loading"
                             :title="$t('detail.scrapeTip')">⟳ {{ $t('detail.scrape') }}</button>
-                    <button class="btn tiny ghost" @click="doScrape(true)" :disabled="loading"
+                    <button class="btn ghost" @click="doScrape(true)" :disabled="loading"
                             :title="$t('detail.forceScrapeTip')">⇊ {{ $t('detail.forceScrape') }}</button>
-                    <button class="btn tiny ghost" @click="doNfo">⤓ {{ $t('detail.exportNfo') }}</button>
-                    <button class="btn tiny ghost" @click="removeCover">🖼 {{ $t('detail.clearCover') }}</button>
+                    <button class="btn icon ghost" @click="doNfo" :data-tip="$t('detail.exportNfo')">⤓</button>
+                    <button class="btn icon ghost" @click="removeCover" :data-tip="$t('detail.clearCover')">🖼</button>
+                    </div>
                   </div>
 
                   <!-- 投屏：选同网段的 DLNA 设备；扫不到就手动填电视 IP -->
@@ -1053,36 +1060,94 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', onKey) })
 
             <div class="dd-extra">
 
-              <!-- 评分 -->
-              <div class="dd-rate">
-                <div class="stars">
-                  <span v-for="i in 5" :key="i" class="s" :class="{ on: i <= (mv.rating || 0) }" @click="setRating(i)">★</span>
+              <!-- 关键信息 -->
+              <div class="dd-sec-t">{{ $t('detail.secInfo') }}</div>
+              <dl class="dd-facts">
+                <div v-if="mv.actresses && mv.actresses.length" class="dd-fact wide">
+                  <dt>{{ $t('detail.fActress') }}</dt>
+                  <dd class="chip-list actress-list">
+                    <button v-for="a in mv.actresses" :key="a" class="chip actress-chip"
+                            @click="openActress(a)"
+                            @mouseenter="actressHoverStart(a, $event)"
+                            @mouseleave="scheduleHoverEnd">{{ a }}</button>
+                  </dd>
                 </div>
-                <span class="muted">{{ mv.rating ? mv.rating + ' ' + $t('detail.star') : $t('fmt.noRating') }}</span>
-                <div class="spacer"></div>
-                <span v-if="mv.play_count" class="badge">{{ $t('detail.playCount', { n: mv.play_count }) }}</span>
-              </div>
-
-              <!-- 标记 -->
-              <div class="chip-list">
-                <span v-if="mv.subtitle" class="badge ok">{{ $t('detail.subtitle') }}</span>
-              <span v-if="mv.embed_sub_zh" class="badge ok" :title="$t('flag.embedZh')">{{ $t('flag.embedZh') }}</span>
-                <span v-if="mv.uncensored" class="badge warn">{{ $t('detail.uncensored') }}</span>
-                <span v-if="quality" class="badge accent">{{ quality }}</span>
-                <span v-if="mv.vr" class="badge">VR</span>
-                <span v-if="mv.leak" class="badge err">{{ $t('detail.leak') }}</span>
-                <span v-for="s in manualSubs" :key="s.id" class="badge sub" :title="s.path">
-                  {{ $t('detail.subFile', { lang: s.lang || '字幕' }) }}
-                </span>
-                <!-- 同目录外挂字幕登记：收进徽章行末尾，不再单独占一行 -->
-                <span class="spacer"></span>
-                <button class="btn tiny ghost" :disabled="scanningSubs"
-                        :title="$t('detail.scanSubsHint')" @click="scanSidecars">
-                  {{ scanningSubs ? $t('detail.scanningSubs') : $t('detail.scanSubs') }}
-                </button>
-              </div>
+                <div v-if="mv.genres && mv.genres.length" class="dd-fact wide">
+                  <dt>{{ $t('detail.fGenre') }}</dt>
+                  <dd class="chip-list">
+                    <button v-for="g in mv.genres" :key="g" class="chip" @click="filterBy('genre', g)">{{ g }}</button>
+                  </dd>
+                </div>
+                <div v-if="mv.studio" class="dd-fact">
+                  <dt>{{ $t('detail.fStudio') }}</dt>
+                  <dd><a @click="filterBy('studio', mv.studio)">{{ mv.studio }}</a></dd>
+                </div>
+                <div v-if="mv.series" class="dd-fact">
+                  <dt>{{ $t('detail.fSeries') }}</dt>
+                  <dd><a @click="filterBy('series', mv.series)">{{ mv.series }}</a></dd>
+                </div>
+                <div v-if="mv.director" class="dd-fact">
+                  <dt>{{ $t('detail.fDirector') }}</dt>
+                  <dd>{{ mv.director }}</dd>
+                </div>
+                <div v-if="mv.release_date" class="dd-fact">
+                  <dt>{{ $t('detail.fRelease') }}</dt>
+                  <dd>{{ fmtDate(mv.release_date) }}</dd>
+                </div>
+                <div v-if="mv.runtime" class="dd-fact">
+                  <dt>{{ $t('detail.fRuntime') }}</dt>
+                  <dd>{{ mv.runtime }} {{ $t('detail.minute') }}</dd>
+                </div>
+                <div v-if="mv.resolution" class="dd-fact">
+                  <dt>{{ $t('detail.fResolution') }}</dt>
+                  <dd>{{ mv.resolution }}</dd>
+                </div>
+                <div class="dd-fact">
+                  <dt>{{ $t('detail.fSize') }}</dt>
+                  <dd>{{ fmtSize(totalSize) }}<span v-if="mv.files && mv.files.length > 1" class="dim"> · {{ $t('detail.filesCount', { n: mv.files.length }) }}</span></dd>
+                </div>
+                <div v-if="mainFile && mainFile.strm_url" class="dd-fact">
+                  <dt>{{ $t('detail.fSource') }}</dt>
+                  <dd class="mono dim">🌐 {{ hostOf(mainFile.strm_url) }}</dd>
+                </div>
+                <div v-if="mv.added_at" class="dd-fact">
+                  <dt>{{ $t('detail.fAdded') }}</dt>
+                  <dd>{{ fmtAgo(mv.added_at) }}</dd>
+                </div>
+                <div class="dd-fact">
+                  <dt>{{ $t('detail.fRating') }}</dt>
+                  <dd class="dd-rating">
+                    <span class="stars">
+                      <span v-for="i in 5" :key="i" class="s" :class="{ on: i <= (mv.rating || 0) }"
+                            @click="setRating(i)">★</span>
+                    </span>
+                    <span class="muted">{{ mv.rating ? mv.rating + ' ' + $t('detail.star') : $t('fmt.noRating') }}</span>
+                    <span v-if="mv.play_count" class="dim">· {{ $t('detail.playCount', { n: mv.play_count }) }}</span>
+                  </dd>
+                </div>
+                <div class="dd-fact wide">
+                  <dt>{{ $t('detail.fFlags') }}</dt>
+                  <dd class="chip-list dd-flags">
+                    <span v-if="mv.subtitle" class="badge ok">{{ $t('detail.subtitle') }}</span>
+                    <span v-if="mv.embed_sub_zh" class="badge ok" :title="$t('flag.embedZh')">{{ $t('flag.embedZh') }}</span>
+                    <span v-if="mv.uncensored" class="badge warn">{{ $t('detail.uncensored') }}</span>
+                    <span v-if="quality" class="badge accent">{{ quality }}</span>
+                    <span v-if="mv.vr" class="badge">VR</span>
+                    <span v-if="mv.leak" class="badge err">{{ $t('detail.leak') }}</span>
+                    <span v-for="sub in manualSubs" :key="sub.id" class="badge sub" :title="sub.path">
+                      {{ $t('detail.subFile', { lang: sub.lang || '字幕' }) }}
+                    </span>
+                    <span class="spacer"></span>
+                    <button class="btn tiny ghost" :disabled="scanningSubs"
+                            :title="$t('detail.scanSubsHint')" @click="scanSidecars">
+                      {{ scanningSubs ? $t('detail.scanningSubs') : $t('detail.scanSubs') }}
+                    </button>
+                  </dd>
+                </div>
+              </dl>
 
               <!-- 已生成的 AI 字幕译文：下载 / 删除（生成入口统一在 AI 工作台） -->
+              <div class="dd-sec-t">{{ $t('detail.secSubs') }}</div>
               <div v-if="aiSubs.length" class="ai-subs">
                 <div v-for="s in aiSubs" :key="s.id" class="ai-sub-row">
                   <span class="mono">{{ s.lang }}{{ (s.filename || '').includes('-双语') ? ' · ' + $t('detail.aiBilingual') : '' }}</span>
@@ -1092,42 +1157,8 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', onKey) })
                 </div>
               </div>
 
-              <!-- 关键信息 -->
-              <dl class="dd-facts">
-                <template v-if="mv.actresses && mv.actresses.length">
-                  <dt>{{ $t('detail.fActress') }}</dt>
-                  <dd class="chip-list actress-list">
-                    <button
-                      v-for="a in mv.actresses"
-                      :key="a"
-                      class="chip actress-chip"
-                      @click="openActress(a)"
-                      @mouseenter="actressHoverStart(a, $event)"
-                      @mouseleave="scheduleHoverEnd"
-                    >{{ a }}</button>
-                  </dd>
-                </template>
-                <template v-if="mv.genres && mv.genres.length">
-                  <dt>{{ $t('detail.fGenre') }}</dt>
-                  <dd class="chip-list">
-                    <button v-for="g in mv.genres" :key="g" class="chip" @click="filterBy('genre', g)">{{ g }}</button>
-                  </dd>
-                </template>
-                <template v-if="mv.studio"><dt>{{ $t('detail.fStudio') }}</dt><dd><a @click="filterBy('studio', mv.studio)">{{ mv.studio }}</a></dd></template>
-                <template v-if="mv.series"><dt>{{ $t('detail.fSeries') }}</dt><dd><a @click="filterBy('series', mv.series)">{{ mv.series }}</a></dd></template>
-                <template v-if="mv.director"><dt>{{ $t('detail.fDirector') }}</dt><dd>{{ mv.director }}</dd></template>
-                <template v-if="mv.release_date"><dt>{{ $t('detail.fRelease') }}</dt><dd>{{ fmtDate(mv.release_date) }}</dd></template>
-                <template v-if="mv.runtime"><dt>{{ $t('detail.fRuntime') }}</dt><dd>{{ mv.runtime }} {{ $t('detail.minute') }}</dd></template>
-                <template v-if="mv.resolution"><dt>{{ $t('detail.fResolution') }}</dt><dd>{{ mv.resolution }}</dd></template>
-                <dt>{{ $t('detail.fSize') }}</dt><dd>{{ fmtSize(totalSize) }}<span v-if="mv.files && mv.files.length > 1" class="dim"> · {{ $t('detail.filesCount', { n: mv.files.length }) }}</span></dd>
-                <template v-if="mainFile && mainFile.strm_url">
-                  <dt>{{ $t('detail.fSource') }}</dt>
-                  <dd class="mono dim">🌐 {{ hostOf(mainFile.strm_url) }}</dd>
-                </template>
-                <template v-if="mv.added_at"><dt>{{ $t('detail.fAdded') }}</dt><dd>{{ fmtAgo(mv.added_at) }}</dd></template>
-              </dl>
-
               <!-- 自定义标签：常驻主区可见，随时增删 -->
+              <div class="dd-sec-t">{{ $t('detail.secTags') }}</div>
               <div class="dd-tags">
                 <div class="dd-tags-head">
                   <span class="lbl">{{ $t('detail.customTags') }}</span>
@@ -1600,13 +1631,16 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', onKey) })
 /* A. 沉浸：整宽大图 + 图上信息 + 主操作在下方 */
 .layout-hero { flex-direction: column; }
 .layout-hero .dd-hero img { max-height: 380px; }
+/* 沉浸式整宽下，操作面板限宽，按钮组仍按固定网格排
+.layout-hero .dd-actions { max-width: 720px; }
 .dd-hero-info {
   position: absolute; left: 0; right: 0; bottom: 0;
   padding: 48px 14px 12px; pointer-events: none;
   background: linear-gradient(to top, rgba(0,0,0,.82) 0%, rgba(0,0,0,.45) 45%, transparent 100%);
   color: #fff;
 }
-.dhi-title { font-size: var(--fs-md); font-weight: 600; text-shadow: 0 1px 3px rgba(0,0,0,.6);
+.dhi-title { font-size: 17px; font-weight: 600; letter-spacing: .01em;
+  text-shadow: 0 1px 4px rgba(0,0,0,.65);
   overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
 .dhi-meta { display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
   margin-top: 4px; font-size: var(--fs-xs); opacity: .92; }
@@ -1619,8 +1653,12 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', onKey) })
   color: var(--c-text-1);
   overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
 }
-.dd-sub { display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+.dd-sub { display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
   font-size: var(--fs-xs); color: var(--c-text-3); }
+/* 元信息之间用细点分隔，比纯空格更像成品 */
+.dd-sub > span + span:not(.dd-code)::before {
+  content: "·"; margin-right: 8px; opacity: .5;
+}
 .dd-code { padding: 1px 6px; border-radius: 4px; background: var(--c-surface-2);
   font-family: ui-monospace, Consolas, monospace; color: var(--c-text-2); }
 .dd-acts-names { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
@@ -1628,15 +1666,22 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', onKey) })
 /* B. 左图右信息（340 宽）/ C. 紧凑横图（420 宽） */
 .layout-split, .layout-compact { flex-direction: row; align-items: flex-start; }
 .dd-main { justify-content: flex-start; }
-.layout-split .dd-media { width: 340px; flex: none; }
-.layout-compact .dd-media { width: 420px; flex: none; }
+.layout-split .dd-media { width: 320px; flex: none; }
+.layout-compact .dd-media { width: 380px; flex: none; }
+/* 图列纵向铺满：图片在上、封面操作沉底，与右侧工具面板上下对齐，不留半截空档 */
+.layout-split .dd-media, .layout-compact .dd-media {
+  align-self: stretch; justify-content: space-between;
+}
 .layout-split .dd-main, .layout-compact .dd-main { flex: 1; min-width: 0; }
 /* 头部布局切换：三个小方块，点了立刻生效 */
-.dd-layout-switch { display: flex; gap: 2px; padding: 2px; border-radius: var(--r-sm);
-  background: var(--c-surface-2); margin-right: 4px; }
+.dd-layout-switch {
+  display: flex; gap: 2px; padding: 3px; border-radius: 9px;
+  background: var(--c-surface-2); margin-right: 6px;
+  border: 1px solid var(--c-line);
+}
 .dd-layout-switch .ll {
-  width: 26px; height: 24px; display: grid; place-items: center;
-  border: none; border-radius: 4px; background: transparent; color: var(--c-text-3);
+  width: 28px; height: 26px; display: grid; place-items: center;
+  border: none; border-radius: 6px; background: transparent; color: var(--c-text-3);
   font-size: 13px; line-height: 1; cursor: pointer; transition: background var(--t-base), color var(--t-base);
 }
 .dd-layout-switch .ll:hover { color: var(--c-text-1); }
@@ -1657,12 +1702,56 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', onKey) })
 
 .dd-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: var(--sp-2); }
 /* 评分 / 字幕 / 信息表 / 标签：跨整宽，不再把右栏撑高造成左侧空位 */
-.dd-extra { padding: 0 var(--sp-5) var(--sp-4); display: flex; flex-direction: column; gap: var(--sp-2); }
+.dd-extra { padding: 0 var(--sp-5) var(--sp-4); display: flex; flex-direction: column; gap: 0; }
+/* 分区标题：小字号大写、上分隔线，把评分 / 字幕 / 信息 / 标签切成清晰的块 */
+.dd-sec-t {
+  margin: 12px 0 6px; padding-top: 10px; border-top: 1px solid var(--c-line);
+  font-size: 11px; font-weight: 600; letter-spacing: .08em;
+  color: var(--c-text-3); text-transform: uppercase;
+}
+.dd-extra > .dd-sec-t:first-child { margin-top: 4px; padding-top: 0; border-top: none; }
 /* 主操作按组平铺：每行一个组，左侧小标签对齐——所有功能一级可见，不搞层级 */
-.dd-actions { display: flex; flex-direction: column; gap: 7px; }
-.dd-g { display: flex; align-items: center; gap: var(--sp-1); flex-wrap: wrap; }
-.dd-g-lbl { flex: none; min-width: 36px; font-size: 11px; color: var(--c-text-3); letter-spacing: .05em; }
-.site-flat { white-space: nowrap; font-size: 12px; padding: 5px 9px; }
+/* 操作区：一块面板内的四组工具，按钮等高、标签右对齐，避免零散按钮的锯齿感 */
+.dd-actions {
+  display: flex; flex-direction: column; gap: 8px;
+  padding: 10px 12px; border-radius: var(--r-md);
+  background: var(--c-surface-1); border: 1px solid var(--c-line);
+}
+.dd-actions .btn { height: 30px; padding: 0 11px; font-size: 12.5px; border-radius: 7px; }
+/* 行内按钮等宽铺满：不再出现『三个宽两个窄』的锯齿；长文案省略号 + tooltip */
+.dd-g > .btn { flex: 1 1 86px; min-width: 0; justify-content: center;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.dd-g > .btn.icon { flex: 0 0 30px; width: 30px; padding: 0; }
+.dd-actions .btn.icon { width: 30px; padding: 0; }
+.dd-g { display: flex; align-items: flex-start; gap: 10px; }
+.dd-g-lbl { padding-top: 8px; }
+/* 按钮区：等宽列网格——每行按钮对齐、最后一行不会被拉成整条 */
+.dd-btns {
+  flex: 1; min-width: 0;
+  /* 固定列宽 + 左对齐：按钮宽度不再随容器拉伸（沉浸式宽抽屉下尤其明显），
+     容器多宽都只按 104px 一格排列 */
+  display: grid; grid-template-columns: repeat(auto-fill, 104px);
+  justify-content: start;
+  gap: 6px; align-items: center;
+}
+.dd-btns > .btn { width: 104px; height: 30px; justify-content: center;
+  padding: 0 8px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* 图标按钮也占满单元格：与文字按钮同宽同高，形成整齐的按钮矩阵 */
+.dd-btns > .btn.icon { width: 30px; justify-self: start; padding: 0; font-size: 15px; }
+/* 纯图标行（收藏/想看/已看/片单/文件夹）：紧凑方块，不再撑成大方块 */
+/* 纯图标行用 flex：每个 32px，不被网格列宽推着换行 */
+.dd-btns.icons { display: flex; flex-wrap: wrap; gap: 6px; }
+.dd-btns.icons > .btn { width: 32px; flex: 0 0 32px; }
+/* 站点行：宽度随文字，短名字不会被拉成一格空格子 */
+.dd-btns.chips { display: flex; flex-wrap: wrap; }
+.dd-btns.chips > .btn { flex: 0 0 auto; width: auto; padding: 0 10px; }
+/* 混合行（文字 + 图标）：文字定宽、图标 30px，整体一行放下 */
+.dd-btns.flow { display: flex; flex-wrap: wrap; }
+.dd-btns.flow > .btn:not(.icon) { flex: 0 0 104px; }
+.dd-btns.flow > .btn.icon { flex: 0 0 30px; }
+.dd-g-lbl { flex: 0 0 36px; font-size: 11px; color: var(--c-text-3); letter-spacing: .04em; }
+.site-flat { white-space: nowrap; font-size: 12px; height: 26px; padding: 0 10px;
+  display: inline-flex; align-items: center; }
 /* 站点「更多」：点击展开其余站点的面板；遮罩只负责点空白关闭，不压暗整页 */
 .dd-sites-more { position: relative; z-index: 41; }
 .dd-sites-more .caret { font-size: 10px; opacity: .7; margin-left: 2px; }
@@ -1680,7 +1769,14 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', onKey) })
 
 /* 徽章行的尾部 spacer：把「登记字幕」按钮推到行尾 */
 .chip-list .spacer { flex: 1 1 12px; }
-.dd-rate { display: flex; align-items: center; gap: var(--sp-3); }
+/* 评分与标记同排：星星 + 分数 + 播放次数 + 徽章 + 扫描按钮，一行放下 */
+.dd-rate-line {
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap; min-height: 26px;
+}
+.dd-rate { display: flex; align-items: center; gap: 6px; flex: none; }
+.dd-rate .spacer { display: none; }
+.dd-rate-line .chip-list { flex: 1 1 auto; min-width: 0; gap: 4px; min-height: 24px; }
+.dd-rate-line .badge { font-size: 10.5px; padding: 1px 6px; }
 
 .coll-wrap { position: relative; }
 .coll-pop {
@@ -1697,18 +1793,25 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', onKey) })
 .cp-empty { padding: var(--sp-3); font-size: var(--fs-sm); }
 
 .dd-facts {
-  display: grid;
-  grid-template-columns: 52px 1fr;
-  gap: 6px var(--sp-2);
-  margin: 0;
+  display: flex; flex-wrap: wrap;
+  gap: 8px 28px; margin: 0;
   font-size: var(--fs-sm);
-  align-items: center;
-  padding-top: var(--sp-2);
-  border-top: 1px dashed var(--c-line);
 }
+/* 每个字段一个格子：短字段自动并排 2–3 列，长字段加 .wide 独占整行 */
+.dd-fact {
+  display: flex; align-items: baseline; gap: 8px;
+  flex: 1 1 240px; min-width: 0;
+}
+.dd-fact.wide { flex: 1 1 100%; }
+.dd-fact dt { flex: 0 0 64px; color: var(--c-text-3); font-size: var(--fs-xs); }
+.dd-fact dd { margin: 0; min-width: 0; flex: 1 1 auto; }
 .dd-facts dt { color: var(--c-text-3); font-size: var(--fs-xs); }
 .dd-facts dd { margin: 0; min-width: 0; color: var(--c-text-1); }
 .dd-facts a { cursor: pointer; }
+/* 评分与标记并进信息表：与其它行同节奏，不再单独占一块 */
+.dd-rating { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.dd-flags { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; min-height: 22px; }
+.dd-flags .badge { font-size: 10.5px; padding: 1px 6px; }
 
 /* 女优悬停预览浮层 */
 .actress-chip { position: relative; z-index: 1; }
