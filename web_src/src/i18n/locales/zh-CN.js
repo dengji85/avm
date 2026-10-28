@@ -837,6 +837,8 @@ export default {
     scanning: '正在启动扫描…',
   },
   settings: {
+    mtMovedHint: 'MetaTube 的安装与启停已移到',
+    dragSort: '按住拖动可调整顺序',
     detailLayout: '详情页布局',
     detailLayoutHero: '沉浸大图',
     detailLayoutSplit: '左图右信息',

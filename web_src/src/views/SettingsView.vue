@@ -907,6 +907,48 @@ function moveProvider(id, dir) {
   const j = i + dir
   if (i < 0 || j < 0 || j >= arr.length) return
   arr.splice(j, 0, arr.splice(i, 1)[0])
+  persistProvOrder()
+}
+
+/* ---------------- 数据源拖动排序（HTML5 DnD，触屏仍有 ↑/↓ 兜底） ---------------- */
+const provDrag = reactive({ idx: -1, over: -1 })
+
+function onProvDragStart(i, e) {
+  provDrag.idx = i
+  if (e.dataTransfer) {
+    e.dataTransfer.effectAllowed = 'move'
+    try { e.dataTransfer.setData('text/plain', String(i)) } catch { /* Firefox 需要 setData 才启动拖拽 */ }
+  }
+}
+
+function onProvDragOver(i) {
+  provDrag.over = i
+}
+
+function onProvDrop(i) {
+  const from = provDrag.idx
+  provDrag.idx = -1
+  provDrag.over = -1
+  if (from < 0 || from === i) return
+  const arr = providers.available
+  arr.splice(i, 0, arr.splice(from, 1)[0])
+  persistProvOrder()
+}
+
+function onProvDragEnd() {
+  provDrag.idx = -1
+  provDrag.over = -1
+}
+
+async function persistProvOrder() {
+  const order = providers.available.filter((p) => provOn[p.id]).map((p) => p.id)
+  if (!order.length) return
+  try {
+    await putConfig({ scraper: { order } })
+    toast(t('settings.sourceSaved'), 'ok')
+  } catch (e) {
+    toast(e.message, 'err')
+  }
 }
 
 const testCode = ref('')
@@ -1513,8 +1555,15 @@ onMounted(async () => {
         <div class="panel">
           <div class="panel-head">{{ $t('settings.dataSource') }} <span class="sub">{{ $t('settings.dataSourceSub') }}</span></div>
           <div class="panel-body">
-            <div v-for="(p, i) in providers.available" :key="p.id" class="prov">
-              <label class="toggle">
+            <div v-for="(p, i) in providers.available" :key="p.id" class="prov"
+                 :class="{ dragging: provDrag.idx === i, 'drop-target': provDrag.over === i && provDrag.idx !== -1 && provDrag.idx !== i }"
+                 draggable="true"
+                 @dragstart="onProvDragStart(i, $event)"
+                 @dragover.prevent="onProvDragOver(i)"
+                 @drop.prevent="onProvDrop(i)"
+                 @dragend="onProvDragEnd">
+              <span class="drag-dot" :title="$t('settings.dragSort')">⠿</span>
+              <label class="toggle" @dragstart.stop>
                 <input type="checkbox" v-model="provOn[p.id]" /><span class="track"></span>
               </label>
               <div class="prov-main">
@@ -2358,6 +2407,15 @@ onMounted(async () => {
   padding: var(--sp-3);
   border-radius: var(--r-md);
   background: var(--c-surface-2);
+  cursor: grab;
+  transition: opacity var(--t-base), box-shadow var(--t-base);
+}
+.prov:active { cursor: grabbing; }
+.prov.dragging { opacity: .35; }
+.prov.drop-target { box-shadow: inset 0 2px 0 var(--c-primary); }
+.drag-dot {
+  flex: none; color: var(--c-text-3); font-size: 12px; line-height: 1;
+  cursor: grab; user-select: none; padding: 2px 1px;
 }
 .prov-main { flex: 1; min-width: 0; }
 .prov-name { display: flex; align-items: center; gap: var(--sp-2); font-weight: 500; }

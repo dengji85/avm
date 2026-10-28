@@ -838,6 +838,8 @@ export default {
     scanning: '正在啟動掃描…',
   },
   settings: {
+    mtMovedHint: 'MetaTube 的安裝與啟停已移到',
+    dragSort: '按住拖動可調整順序',
     detailLayout: '詳情頁版面',
     detailLayoutHero: '沉浸大圖',
     detailLayoutSplit: '左圖右資訊',

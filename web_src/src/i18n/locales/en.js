@@ -825,6 +825,8 @@ export default {
     scanning: 'Starting scan…',
   },
   settings: {
+    mtMovedHint: 'MetaTube install & controls moved to',
+    dragSort: 'Drag to reorder',
     detailLayout: 'Detail page layout',
     detailLayoutHero: 'Immersive hero',
     detailLayoutSplit: 'Image left, info right',

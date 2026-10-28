@@ -795,6 +795,8 @@ export default {
     scanning: 'スキャンを起動中…',
   },
   settings: {
+    mtMovedHint: 'MetaTube の導入と起動は',
+    dragSort: 'ドラッグで並べ替え',
     detailLayout: '詳細ページのレイアウト',
     detailLayoutHero: '大型ヒーロー',
     detailLayoutSplit: '左画像＋右情報',
