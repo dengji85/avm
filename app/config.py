@@ -143,6 +143,22 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "strm_referer": "",
         "strm_user_agent": "",
     },
+    # MetaTube 刮削引擎（外部开源服务，Apache-2.0）：补齐自研刮削器没有的源，
+    # 主要是 FC2、无码厂、素人站与官方源（fanza / mgstage / sod）。
+    # 两种形态：external=连已有实例；managed=本程序下载二进制并托管子进程。
+    "metatube": {
+        "enabled": False,
+        "mode": "external",
+        "base_url": "http://127.0.0.1:18080",
+        # 服务端访问令牌（服务端非空即鉴权；本地托管时由本程序生成）
+        "token": "",
+        # managed 模式：程序启动时自动拉起子进程
+        "auto_start": True,
+        # managed 模式使用的端口（被占用时自动顺延）
+        "port": 18080,
+        # 单次请求超时（秒）
+        "timeout": 15,
+    },
     "scraper": {
         "enabled": True,
         # 抓取顺序，先命中的先用；可选 javbus / javdb / avwiki / local_nfo / http_json / http_html
@@ -748,6 +764,16 @@ def nfo_export_cfg(cfg: Dict[str, Any] | None = None) -> Dict[str, Any]:
     cfg = cfg or load_config()
     merged = copy.deepcopy(DEFAULT_CONFIG.get("nfo_export") or {})
     got = cfg.get("nfo_export")
+    if isinstance(got, dict):
+        merged.update({k: v for k, v in got.items() if v is not None})
+    return merged
+
+
+def metatube_cfg(cfg: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    """MetaTube 刮削引擎配置（与默认值合并）。老 config.json 没有这一节，读默认值即可。"""
+    cfg = cfg or load_config()
+    merged = copy.deepcopy(DEFAULT_CONFIG.get("metatube") or {})
+    got = cfg.get("metatube")
     if isinstance(got, dict):
         merged.update({k: v for k, v in got.items() if v is not None})
     return merged

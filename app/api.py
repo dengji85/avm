@@ -43,9 +43,11 @@ router = APIRouter(prefix="/api")
 # 按领域拆出的子路由（阶段 2）：路径与行为不变，只是文件分开。
 from .routers import covers as _covers_api          # noqa: E402
 from .routers import ext as _ext_api                # noqa: E402
+from .routers import metatube as _metatube_api      # noqa: E402
 
 router.include_router(_covers_api.router)
 router.include_router(_ext_api.router)
+router.include_router(_metatube_api.router)
 
 # 当前程序版本（单一真源见 app/__init__.__version__，与发布版本保持一致）。
 from . import __version__ as APP_VERSION
@@ -3311,6 +3313,10 @@ def get_config() -> Dict[str, Any]:
     emby_section = cfg.get("emby")
     if isinstance(emby_section, dict):
         emby_section.pop("api_key", None)
+    # metatube.token —— 本地刮削服务的访问令牌，按凭据处理，前端只知道「是否已设置」
+    mt_section = cfg.get("metatube")
+    if isinstance(mt_section, dict):
+        mt_section.pop("token", None)
     # AI 密钥：ai.api_key 与模型池里每条 models[].api_key 都不下发。
     # 前端改模型走 /ai/models（密钥用掩码回填），AI 中心改隐私开关只写 insights 字段，
     # 都不依赖这里返回明文。
@@ -3330,6 +3336,10 @@ def put_config(payload: Dict[str, Any] = Body(default={})) -> Dict[str, Any]:
     emby_patch = payload.get("emby")
     if isinstance(emby_patch, dict) and not str(emby_patch.get("api_key") or "").strip():
         emby_patch.pop("api_key", None)
+    # metatube.token 同理：不下发前端，空串 = 没有修改
+    mt_patch = payload.get("metatube")
+    if isinstance(mt_patch, dict) and not str(mt_patch.get("token") or "").strip():
+        mt_patch.pop("token", None)
     # 同理：ai.api_key 与模型条目里的 api_key 缺省 = 「没有修改」。
     # 模型列表是整体替换的，若条目里没有 api_key，按 name 沿用已保存的密钥，
     # 避免「把整份配置 PUT 回来」这种调用把密钥抹掉。

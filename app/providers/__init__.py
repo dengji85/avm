@@ -23,10 +23,12 @@ from .http_json import HttpJsonProvider
 from .javbus import JavBusProvider
 from .javdb import JavDBProvider
 from .local_nfo import LocalNfoProvider
+from .metatube import MetatubeProvider
 
 REGISTRY: Dict[str, Type[BaseProvider]] = {
     JavBusProvider.name: JavBusProvider,
     JavDBProvider.name: JavDBProvider,
+    MetatubeProvider.name: MetatubeProvider,
     AvWikiProvider.name: AvWikiProvider,
     LocalNfoProvider.name: LocalNfoProvider,
     HttpJsonProvider.name: HttpJsonProvider,
@@ -54,7 +56,12 @@ def build_providers(cfg: Dict[str, Any]) -> List[BaseProvider]:
     注意：``ALWAYS_LAST`` 里的源（avwiki）会被强制移到最后，用户在设置里
     把它拖到前面也不会生效——这是有意为之的性能保护。
     """
-    order = cfg.get("scraper", {}).get("order") or ["javbus", "javdb", "local_nfo"]
+    order = list(cfg.get("scraper", {}).get("order") or ["javbus", "javdb", "local_nfo"])
+    # 老配置里没有 metatube：一旦用户在设置里打开它，自动插到 avwiki 之前，
+    # 不需要用户手动改顺序（写入 config 是另一回事，这里只在内存里补位）。
+    if "metatube" not in order and (cfg.get("metatube") or {}).get("enabled"):
+        idx = order.index("avwiki") if "avwiki" in order else len(order)
+        order.insert(idx, "metatube")
     seen = set()
     providers: List[BaseProvider] = []
     for name in order:

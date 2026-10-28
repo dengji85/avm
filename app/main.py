@@ -489,6 +489,23 @@ def _startup() -> None:
             print("  已加载 %d 个 API Key（设置 → 访问 可管理）" % keys)
         print("=" * 60)
     _start_auto_scan()
+    # MetaTube 托管进程：仅在「已启用 + managed + 自动启动」时拉起，
+    # 失败不影响主服务（它只是一个可选数据源）。
+    try:
+        from . import metatube
+        metatube.autostart()
+    except Exception:
+        pass
+
+
+@app.on_event("shutdown")
+def _shutdown() -> None:
+    """退出时回收托管子进程，避免 MetaTube 残留占用端口。"""
+    try:
+        from . import metatube
+        metatube.shutdown()
+    except Exception:
+        pass
 
 
 def _start_auto_scan() -> None:
