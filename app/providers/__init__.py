@@ -88,6 +88,18 @@ def build_providers(cfg: Dict[str, Any]) -> List[BaseProvider]:
         tail = [p for p in providers if p.name in ALWAYS_LAST]
         if tail:
             providers = [p for p in providers if p.name not in ALWAYS_LAST] + tail
+    # 兜底：已启用却不在 order 里的源（历史上拖动排序只保存启用中的源，会把
+    # 当时关闭的源挤出顺序）追加到末尾，避免「开关开着却永远不跑」的静默失效。
+    listed = {p.name for p in providers}
+    for name, cls in REGISTRY.items():
+        if name in listed or name in ALWAYS_LAST:
+            continue
+        try:
+            inst = cls(cfg)
+        except Exception:
+            continue
+        if inst.enabled():
+            providers.append(inst)
     return providers
 
 

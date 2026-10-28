@@ -835,8 +835,9 @@ async function saveScraper() {
   try { hj = JSON.parse(jsonText.value || '{}') } catch (e) { toast(t('settings.jsonInvalid') + e.message, 'err'); return }
   try { hh = JSON.parse(htmlText.value || '{}') } catch (e) { toast(t('settings.htmlInvalid') + e.message, 'err'); return }
 
-  const order = providers.available.filter((p) => provOn[p.id]).map((p) => p.id)
-  if (!order.length) { toast(t('settings.atLeastOneSource'), 'err'); return }
+  const order = providers.available.map((p) => p.id)
+  const enabledOrder = providers.available.filter((p) => provOn[p.id]).map((p) => p.id)
+  if (!enabledOrder.length) { toast(t('settings.atLeastOneSource'), 'err'); return }
 
   saving.value = true
   try {
@@ -941,7 +942,8 @@ function onProvDragEnd() {
 }
 
 async function persistProvOrder() {
-  const order = providers.available.filter((p) => provOn[p.id]).map((p) => p.id)
+  // 全量保存（含未启用的）：否则当时关闭的源会被挤出 order，之后打开开关也不生效
+  const order = providers.available.map((p) => p.id)
   if (!order.length) return
   try {
     await putConfig({ scraper: { order } })

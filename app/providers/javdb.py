@@ -53,15 +53,20 @@ class JavDBProvider(BaseProvider):
         if cookie:
             headers["Cookie"] = cookie
 
-        # 1) 搜索
+        # 1) 搜索：取所有结果卡，只接受番号精确匹配的那张（模糊结果会张冠李戴）
         surl = f"{self.base_url}/search?q={code}&f=all"
         shtml = self.http_get(surl, headers=headers)
         if not shtml:
             return None
         ssoup = BeautifulSoup(shtml, "html.parser")
-        box = ssoup.select_one("a.box")
-        if not box:
+        boxes = ssoup.select("a.box")
+        if not boxes:
             # 可能已被 CF 拦截或无结果
+            self.last_error = "搜索无结果或被 Cloudflare 拦截（可尝试配置 Cookie）"
+            return None
+        box, card_meta = self._pick_card(boxes, code)
+        if box is None:
+            self.last_error = "JavDB 无此番号的精确结果（搜索返回的是相邻/相似番号）"
             return None
         detail_path = box.get("href")
         if not detail_path:
@@ -71,11 +76,59 @@ class JavDBProvider(BaseProvider):
         else:
             detail_path = self.base_url + "/" + detail_path.lstrip("/")
 
-        # 2) 详情
+        # 2) 详情：详情页需登录（JavDB 2024 起对匿名关闭），失败时退回搜索卡
         dhtml = self.http_get(detail_path, headers=headers)
-        if not dhtml:
+        if dhtml:
+            meta = self._parse(dhtml)
+            if meta:
+                return meta
+            self.last_error = "详情页需登录（JavDB 匿名只开放搜索卡），已用搜索卡补基础信息"
+        if not (card_meta.get("title") or card_meta.get("cover")):
             return None
-        return self._parse(dhtml)
+        card_meta["source"] = self.name
+        return self.normalize(card_meta, self.name)
+
+    def _pick_card(self, boxes, code: str):
+        """按番号严格匹配选卡；无精确匹配返回 (None, {})，绝不用近似卡。
+
+        FC2 的番号写法不一（FC2-PPV-xxx / FC2-xxx），按数字段比对；
+        普通番号按字母数字全等比对。
+        """
+        want = re.sub(r"[^a-z0-9]", "", (code or "").lower())
+        want_digits = re.sub(r"\D", "", code or "")
+        for b in boxes:
+            t = b.select_one(".video-title strong")
+            txt = (t.get_text(strip=True) if t else "") or b.get_text(" ", strip=True)
+            norm = re.sub(r"[^a-z0-9]", "", txt.lower())
+            if want and norm == want:
+                return b, self._parse_card(b)
+            if (want_digits and "fc2" in norm) and re.sub(r"\D", "", norm) == want_digits:
+                return b, self._parse_card(b)
+        return None, {}
+
+    def _parse_card(self, box) -> Dict[str, Any]:
+        """从公开的搜索结果卡抽基础信息：标题 / 封面 / 日期 / 评分。"""
+        meta: Dict[str, Any] = {}
+        t = box.select_one(".video-title strong")
+        if t and t.get_text(strip=True):
+            meta["title"] = t.get_text(" ", strip=True)
+        img = box.select_one(".cover img") or box.select_one("img.cover") or box.select_one("img")
+        if img:
+            src = (img.get("src") or img.get("data-src") or "").strip()
+            if src and not src.startswith("data:"):
+                meta["cover"] = src
+        for m in box.select(".meta"):
+            txt = m.get_text(" ", strip=True)
+            d = re.search(r"\d{4}-\d{2}-\d{2}", txt)
+            if d and "release_date" not in meta:
+                meta["release_date"] = d.group(0)
+            sc = re.search(r"([\d.]+)\s*分", txt)
+            if sc and "rating" not in meta:
+                try:
+                    meta["rating"] = float(sc.group(1))
+                except ValueError:
+                    pass
+        return meta
 
     def _parse(self, html: str) -> Optional[Dict[str, Any]]:
         soup = BeautifulSoup(html, "html.parser")
