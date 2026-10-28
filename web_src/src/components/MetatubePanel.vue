@@ -120,6 +120,15 @@ async function save(notify = false) {
   saving.value = true
   try {
     await putConfig({ metatube: { ...mt } })
+    // 托管模式：启用后如果二进制已就绪但服务没跑，直接拉起，省掉一次手动点击
+    if (mt.enabled && mt.mode === 'managed') {
+      try {
+        const s = await mtStatus()
+        if (!s.running && s.installed) await mtStart()
+      } catch {
+        /* 启动失败留给状态行显示 */
+      }
+    }
     if (notify) toast(t('settings.mtSaved'))
     await refresh()
   } catch (e) {

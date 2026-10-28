@@ -25,6 +25,7 @@ import threading
 import time
 import zipfile
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import urlparse
 
 from .config import DATA_DIR, load_config, metatube_cfg
 
@@ -147,13 +148,18 @@ def _request(cfg: Dict[str, Any], path: str, params: Optional[Dict[str, Any]] = 
     from .config import outbound_verify_tls
 
     scfg = cfg.get("_scraper") or load_config().get("scraper") or {}
-    proxy = scfg.get("proxy") or ""
+    proxy = str(scfg.get("proxy") or "").strip()
     url = _base_url(cfg) + path
+    # 本机地址绝不能走 scraper.proxy：用户常把代理设成 127.0.0.1:10808，
+    # 代理连不上本地端口就回 503，看起来像「MetaTube 挂了」，实际是绕了一圈。
+    host = (urlparse(url).hostname or "").lower()
+    local = host in ("127.0.0.1", "localhost", "::1", "0.0.0.0")
+    proxies = {"http": proxy, "https": proxy} if (proxy and not local) else None
     try:
         resp = requests.get(
             url, params=params, headers=_headers(str(cfg.get("token") or "")),
             timeout=timeout or float(cfg.get("timeout") or 15),
-            proxies={"http": proxy, "https": proxy} if proxy else None,
+            proxies=proxies,
             verify=outbound_verify_tls(),
         )
     except Exception as e:  # 连接拒绝 / DNS / 超时 / TLS
@@ -163,7 +169,11 @@ def _request(cfg: Dict[str, Any], path: str, params: Optional[Dict[str, Any]] = 
     if resp.status_code == 404:
         raise RuntimeError("MetaTube 没有命中（404）")
     if resp.status_code >= 400:
-        raise RuntimeError("MetaTube 返回 HTTP %d" % resp.status_code)
+        body = (resp.text or "").strip().replace("\n", " ")[:160]
+        hint = ""
+        if resp.status_code in (502, 503, 504):
+            hint = "（若填的是本机地址，请确认服务已启动且未被代理拦截）"
+        raise RuntimeError("MetaTube 返回 HTTP %d%s %s" % (resp.status_code, hint, body))
     try:
         payload = resp.json()
     except Exception:
@@ -180,6 +190,10 @@ def health(base_url: str = "", token: str = "") -> Dict[str, Any]:
         cfg["base_url"] = base_url
     if token:
         cfg["token"] = token
+    # 托管模式且进程没起来时，先给可操作的提示，而不是让用户看到连接被拒/503
+    if (not base_url and str(cfg.get("mode")) == "managed" and installed() and not running()):
+        return {"ok": False, "app": "", "version": "",
+                "error": "托管服务未启动：请点击「启动服务」"}
     try:
         data = _request(cfg, "/", timeout=6)
         return {"ok": True, "app": (data or {}).get("app", ""),
@@ -304,6 +318,17 @@ def start() -> Dict[str, Any]:
     if not installed():
         return {"ok": False, "port": 0, "version": "", "error": "MetaTube 未安装，请先下载"}
     token = str(cfg.get("token") or "").strip()
+    if not token:
+        # 托管模式首次启动生成随机令牌并落盘：服务虽然只绑 127.0.0.1，
+        # 但任意本地页面仍能发请求，加个令牌成本极低。
+        import secrets
+        token = secrets.token_urlsafe(24)
+        try:
+            from .config import update_config
+            update_config({"metatube": {"token": token}})
+            cfg["token"] = token
+        except Exception:
+            pass
     port = _free_port(int(cfg.get("port") or 18080))
     exe = binary_path()
     log_path = os.path.join(component_dir(), "metatube.log")
