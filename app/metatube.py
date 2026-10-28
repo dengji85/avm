@@ -3,39 +3,34 @@
 
 MetaTube（https://github.com/metatube-community，Apache-2.0）是一个 Go 写的
 刮削服务，覆盖 30+ 个数据源，正好补上本项目没有的 FC2 / 无码厂 / 素人站 /
-官方源（fanza、mgstage、sod）。这里只做两件事：
+官方源（fanza、mgstage、sod）。
 
-1. HTTP 客户端：把它的 ``/v1/movies/search``、``/v1/movies/:provider/:id``
-   翻译成本项目的数据源结果；
-2. 可选的进程托管：在 Windows/Linux/macOS 上下载官方二进制并拉起子进程，
-   让用户不必自己装 Docker。
+职责划分：
+* 二进制的下载 / 解压 / 登记 / 自检 → ``ext_components``（cid=metatube），
+  与 ffmpeg、ASR 组件同一套框架（断点续传、进度轮询、卸载、导入）；
+* 服务客户端与子进程托管 → 本模块（search / movie / start / stop / 自启）。
 
-设计原则与 ``ext_components`` 保持一致：下载任务放后台线程 + 轮询状态字典，
-不引入新依赖，不阻塞主流程；任何一步失败都只影响 MetaTube 这一个数据源。
+注意：源站解析规则常变，安装走官方 Release 并锁定版本。
 """
 from __future__ import annotations
 
 import json
 import os
 import platform
-import shutil
 import socket
 import subprocess
-import threading
 import time
-import zipfile
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
 
-from .config import DATA_DIR, load_config, metatube_cfg
+from .config import load_config, metatube_cfg
 
 #: 锁定版本：源站解析规则常变，跟随 latest 容易被打断
 VERSION = "v1.4.0"
 _RELEASE = "https://github.com/metatube-community/metatube-server-releases/releases/download/%s"
-#: 国内直连 GitHub 常常失败，按顺序尝试镜像前缀
+#: 实测国内直连 GitHub 约 80KB/s 且中途容易断（16MB 要数分钟），
+#: 镜像通常 300KB/s 一分钟内完成，所以镜像优先、官方兜底。
 _MIRRORS = (
-    # 实测国内直连 GitHub 约 80KB/s 且中途容易断（16MB 要数分钟），
-    # 镜像通常 300KB/s 一分钟内完成，所以镜像优先、官方兜底。
     "https://ghfast.top/",
     "https://gh-proxy.com/",
     "",
@@ -51,27 +46,31 @@ _ASSETS = {
     ("Darwin", "arm64"): "metatube-server-darwin-arm64.zip",
 }
 
-# 下载/安装任务状态（前端 1.5s 轮询，与 ext_components 同构）
-_TASK: Dict[str, Any] = {"running": False, "phase": "", "percent": 0, "message": "", "log": []}
-_LOCK = threading.Lock()
 _PROC: Optional[subprocess.Popen] = None
 _PROC_PORT = 0
 
 
-# ---------------------------------------------------------------- 路径与状态
+# ---------------------------------------------------------------- 路径与安装状态
 
 
-def ext_root() -> str:
-    """组件根目录，与扩展组件保持一致（data/ext）。"""
-    root = os.path.join(str(DATA_DIR), "ext")
-    os.makedirs(root, exist_ok=True)
-    return root
+def asset_name() -> str:
+    key = (platform.system(), platform.machine())
+    name = _ASSETS.get(key)
+    if not name:
+        raise RuntimeError("当前平台不受支持：%s/%s" % key)
+    return name
+
+
+def asset_urls() -> List[str]:
+    """按「镜像优先、官方兜底」给出完整下载地址列表。"""
+    base = _RELEASE % VERSION + "/" + asset_name()
+    return [m + base for m in _MIRRORS]
 
 
 def component_dir() -> str:
-    d = os.path.join(ext_root(), "metatube")
-    os.makedirs(d, exist_ok=True)
-    return d
+    """组件目录：跟 ext_components 的 ext_root 约定走（可被 env / 配置改位置）。"""
+    from .ext_components import component_dir as _cid_dir
+    return _cid_dir("metatube")
 
 
 def _exe_name() -> str:
@@ -90,37 +89,30 @@ def installed() -> bool:
     return os.path.isfile(binary_path())
 
 
-def _meta_path() -> str:
-    return os.path.join(component_dir(), "version.json")
-
-
 def installed_version() -> str:
+    """已安装版本（登记在 ext_components 的 manifest 里）。"""
     try:
-        with open(_meta_path(), "r", encoding="utf-8") as f:
-            return str((json.load(f) or {}).get("version") or "")
+        from .ext_components import _load_manifest
+        info = (_load_manifest().get("components") or {}).get("metatube") or {}
+        return str(info.get("version") or "")
     except Exception:
         return ""
 
 
-def task_state() -> Dict[str, Any]:
-    """安装任务快照（供路由层轮询；与 ext_components.task_state 同名同义）。"""
-    with _LOCK:
-        return dict(_TASK, log=list(_TASK.get("log") or []))
-
-
-_task_state = task_state  # 兼容内部旧调用
-
-
-def _set(**fields: Any) -> None:
-    with _LOCK:
-        _TASK.update(fields)
-
-
-def _log(line: str) -> None:
-    with _LOCK:
-        log = list(_TASK.get("log") or [])
-        log.append(str(line))
-        _TASK["log"] = log[-6:]
+def probe_version(exe: str) -> str:
+    """运行 ``--version`` 取版本号（安装后自检用）。"""
+    flags = 0x08000000 if os.name == "nt" else 0  # CREATE_NO_WINDOW
+    try:
+        out = subprocess.run([exe, "--version"], capture_output=True, timeout=15,
+                             creationflags=flags)
+        text = (out.stdout or b"").decode("utf-8", "ignore") + \
+            (out.stderr or b"").decode("utf-8", "ignore")
+        for tok in text.replace("\n", " ").split():
+            if tok.startswith("v") and tok[1:2].isdigit():
+                return tok.strip()
+    except Exception:
+        pass
+    return ""
 
 
 # ---------------------------------------------------------------- HTTP 客户端
@@ -319,7 +311,7 @@ def start() -> Dict[str, Any]:
     if running():
         return {"ok": True, "port": _PROC_PORT, "version": installed_version(), "error": ""}
     if not installed():
-        return {"ok": False, "port": 0, "version": "", "error": "MetaTube 未安装，请先下载"}
+        return {"ok": False, "port": 0, "version": "", "error": "MetaTube 未安装，请先在扩展组件里下载"}
     token = str(cfg.get("token") or "").strip()
     if not token:
         # 托管模式首次启动生成随机令牌并落盘：服务虽然只绑 127.0.0.1，
@@ -388,7 +380,6 @@ def stop() -> Dict[str, Any]:
 
 def status() -> Dict[str, Any]:
     cfg = metatube_cfg()
-    task = _task_state()
     st: Dict[str, Any] = {
         "enabled": bool(cfg.get("enabled")),
         "mode": str(cfg.get("mode") or "external"),
@@ -400,7 +391,6 @@ def status() -> Dict[str, Any]:
         "pid": _PROC.pid if running() else 0,
         "port": _PROC_PORT,
         "target_version": VERSION,
-        "task": task,
         "error": "",
     }
     if bool(cfg.get("enabled")):
@@ -414,144 +404,6 @@ def status() -> Dict[str, Any]:
             st["reachable"] = False
             st["error"] = str(e)
     return st
-
-
-# ---------------------------------------------------------------- 安装（下载二进制）
-
-
-def _asset_name() -> str:
-    key = (platform.system(), platform.machine())
-    name = _ASSETS.get(key)
-    if not name:
-        raise RuntimeError("当前平台不受支持：%s/%s" % key)
-    return name
-
-
-def install() -> Dict[str, Any]:
-    """后台下载并解压官方二进制（幂等：已安装则直接返回）。"""
-    if installed():
-        return {"ok": True, "already": True}
-    with _LOCK:
-        if _TASK.get("running"):
-            return {"ok": False, "error": "已有安装任务在进行"}
-        _TASK.update({"running": True, "phase": "准备", "percent": 0, "message": "", "log": []})
-    t = threading.Thread(target=_run_install, name="metatube-install", daemon=True)
-    t.start()
-    return {"ok": True}
-
-
-def _run_install() -> None:
-    tmp = os.path.join(component_dir(), "download.zip")
-    try:
-        asset = _asset_name()
-        base = _RELEASE % VERSION + "/" + asset
-        urls = [(m + base) for m in _MIRRORS]
-        _set(phase="下载", percent=0, message=asset)
-        ok = False
-        last = ""
-        for url in urls:
-            try:
-                if os.path.isfile(tmp):
-                    os.remove(tmp)  # 上一源留下的半截文件不能续，必须删掉重下
-                _download(url, tmp)
-                ok = True
-                break
-            except Exception as e:
-                last = str(e)
-                _log("下载失败，换下一个源：%s" % last)
-        if not ok:
-            raise RuntimeError("所有下载源都失败：%s" % last)
-        _set(phase="解压", percent=92)
-        _extract(tmp, component_dir())
-        os.remove(tmp)
-        exe = binary_path()
-        if not os.path.isfile(exe):
-            raise RuntimeError("压缩包里没有找到 %s" % _exe_name())
-        if os.name != "nt":
-            os.chmod(exe, 0o755)
-        _set(phase="校验", percent=96)
-        ver = _probe_version(exe)
-        with open(_meta_path(), "w", encoding="utf-8") as f:
-            json.dump({"version": ver or VERSION, "target": VERSION, "installed_at": int(time.time())},
-                      f, ensure_ascii=False)
-        _set(running=False, phase="完成", percent=100, message="已安装 %s" % (ver or VERSION))
-    except Exception as e:
-        _set(running=False, phase="失败", message=str(e))
-        _log(str(e))
-    finally:
-        try:
-            if os.path.isfile(tmp):
-                os.remove(tmp)
-        except Exception:
-            pass
-
-
-def _probe_version(exe: str) -> str:
-    flags = 0x08000000 if os.name == "nt" else 0
-    try:
-        out = subprocess.run([exe, "--version"], capture_output=True, timeout=15,
-                             creationflags=flags)
-        text = (out.stdout or b"").decode("utf-8", "ignore") + (out.stderr or b"").decode("utf-8", "ignore")
-        for tok in text.replace("\n", " ").split():
-            if tok.startswith("v") and tok[1:2].isdigit():
-                return tok.strip()
-    except Exception:
-        pass
-    return ""
-
-
-def _download(url: str, dest: str) -> None:
-    """流式下载到 dest。失败即抛异常（调用方负责删除半截文件换下一个源）。"""
-    import requests
-    from .config import outbound_verify_tls
-
-    # 连接 15s、读 120s：GitHub 直连常在读到一半时卡住，读超时太短会白下载
-    with requests.get(url, stream=True, timeout=(15, 120), verify=outbound_verify_tls()) as resp:
-        if resp.status_code >= 400:
-            raise RuntimeError("HTTP %d" % resp.status_code)
-        total = int(resp.headers.get("Content-Length") or 0)
-        done = 0
-        with open(dest, "wb") as f:
-            for chunk in resp.iter_content(256 * 1024):
-                if not chunk:
-                    continue
-                f.write(chunk)
-                done += len(chunk)
-                if total:
-                    _set(percent=min(90, int(done * 90 / total)))
-    size = os.path.getsize(dest)
-    if size < 1024 * 1024:
-        raise RuntimeError("下载内容异常（文件过小）")
-    if total and size != total:
-        raise RuntimeError("下载不完整（%d/%d 字节）" % (size, total))
-    # zip 完整性：末段被截断时 Central Directory 会读不出来
-    try:
-        with zipfile.ZipFile(dest) as z:
-            bad = z.testzip()
-        if bad:
-            raise RuntimeError("压缩包校验失败：%s" % bad)
-    except zipfile.BadZipFile:
-        raise RuntimeError("下载的压缩包已损坏")
-
-
-def _extract(archive: str, dest: str) -> None:
-    """只解压需要的二进制，防 zip-slip。
-
-    压缩包内的文件名带平台后缀（metatube-server-windows-amd64.exe），
-    所以按前缀匹配，统一改名成本程序约定的 ``metatube-server[.exe]``。
-    """
-    with zipfile.ZipFile(archive) as z:
-        for info in z.infolist():
-            name = os.path.basename(info.filename).lower()
-            if not name.startswith("metatube-server"):
-                continue
-            if not (name.endswith(".exe") or "." not in name):
-                continue
-            target = os.path.join(dest, _exe_name())
-            with z.open(info) as src, open(target, "wb") as out:
-                shutil.copyfileobj(src, out)
-            return
-    raise RuntimeError("压缩包结构异常：未找到可执行文件")
 
 
 # ---------------------------------------------------------------- 启动钩子

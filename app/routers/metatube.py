@@ -21,17 +21,17 @@ def metatube_status() -> Dict[str, Any]:
 
 @router.get("/metatube/task")
 def metatube_task() -> Dict[str, Any]:
-    """安装（下载）任务进度，前端 1.5s 轮询。"""
-    from .. import metatube
-    return metatube.task_state()
+    """安装（下载）任务进度，前端 1.5s 轮询。安装已归入扩展组件体系。"""
+    from .. import ext_components
+    return ext_components.task_state()
 
 
 @router.post("/metatube/install")
 def metatube_install() -> Dict[str, Any]:
-    """下载官方二进制并解压到 data/ext/metatube。"""
-    from .. import metatube
+    """下载官方二进制并解压到 data/ext/metatube（扩展组件体系托管）。"""
+    from .. import ext_components
     try:
-        return metatube.install()
+        return ext_components.install("metatube")
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e.args[0] if e.args else str(e)))
 

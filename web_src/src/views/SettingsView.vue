@@ -2,7 +2,6 @@
 import { ref, reactive, computed, onBeforeUnmount, onMounted, watch } from 'vue'
 import { state } from '../state.js'
 import ExtPanel from '../components/ExtPanel.vue'
-import MetatubePanel from '../components/MetatubePanel.vue'
 import {
   API, getConfig, putConfig, listProviders, testScraper as apiTest, aiAsrStatus,
   parsePreview as apiParse, fsList, sniffCovers, extractAllCovers, csvUrl, cacheAvatars,
@@ -1532,11 +1531,12 @@ onMounted(async () => {
               </div>
             </div>
             <p v-if="!providers.available.length" class="muted">{{ $t('settings.noSource') }}</p>
+            <p class="muted">
+              {{ $t('settings.mtMovedHint') }}
+              <button class="link-btn" @click="state.settingsTab = 'ext'">{{ $t('settings.tab.ext') }} →</button>
+            </p>
           </div>
         </div>
-
-        <!-- MetaTube 刮削引擎：补齐自研源没有的 FC2 / 无码 / 素人 / 官方源 -->
-        <MetatubePanel />
 
         <div class="panel">
           <div class="panel-head">{{ $t('settings.reqSettings') }}</div>

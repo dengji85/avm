@@ -8,7 +8,9 @@
               </button>
             </div>
           </div>
-          <div v-for="c in ext.components" :key="c.id" class="aic-card">
+          <template v-for="g in groups" :key="g.key">
+            <div class="ext-group-head">{{ $t('aiCenter.extGroup.' + g.key) }}</div>
+            <div v-for="c in g.items" :key="c.id" class="aic-card">
             <div class="aic-card-head">
               <strong>{{ $t('aiCenter.extName.' + c.id) }}</strong>
               <span class="aic-badge" :class="c.state">{{ extStateText(c) }}</span>
@@ -18,6 +20,50 @@
             </div>
             <p class="hint">{{ $t('aiCenter.extDesc.' + c.id) }}</p>
             <p v-if="c.path && c.state === 'ready'" class="hint ext-path">{{ c.path }}</p>
+
+            <!-- MetaTube：服务配置与启停（安装/卸载走通用按钮） -->
+            <div v-if="c.id === 'metatube'" class="ext-mt">
+              <div class="field-row checkbox">
+                <label>{{ $t('aiCenter.mtEnable') }}</label>
+                <label class="toggle">
+                  <input type="checkbox" v-model="mt.enabled" /><span class="track"></span>
+                </label>
+              </div>
+              <div class="field-row">
+                <label>{{ $t('aiCenter.mtMode') }}</label>
+                <select v-model="mt.mode" class="aic-sel-sm" style="width: 200px">
+                  <option value="external">{{ $t('aiCenter.mtModeExternal') }}</option>
+                  <option value="managed">{{ $t('aiCenter.mtModeManaged') }}</option>
+                </select>
+              </div>
+              <div class="field">
+                <label>{{ $t('aiCenter.mtUrl') }}</label>
+                <input v-model="mt.base_url" placeholder="http://127.0.0.1:18080" />
+              </div>
+              <div class="field">
+                <label>{{ $t('aiCenter.mtToken') }}</label>
+                <input v-model="mt.token" type="password" autocomplete="new-password"
+                       :placeholder="c.token_set ? $t('aiCenter.mtTokenSet') : $t('aiCenter.mtTokenPh')" />
+              </div>
+              <p v-if="c.error" class="hint">{{ c.error }}</p>
+              <div class="aic-bar-ops">
+                <button class="btn tiny primary" :disabled="mtBusy" @click="saveMt">
+                  {{ $t('common.save') }}
+                </button>
+                <button class="btn tiny" :disabled="mtBusy" @click="doMtTest">
+                  {{ $t('settings.testBtn') }}
+                </button>
+                <button v-if="!c.running && c.installed" class="btn tiny"
+                        :disabled="mtBusy" @click="doMtStart">
+                  {{ $t('aiCenter.mtStart') }}
+                </button>
+                <button v-if="c.running" class="btn tiny ghost" @click="doMtStop">
+                  {{ $t('aiCenter.mtStop') }}
+                </button>
+                <span v-if="mtMsg" class="hint">{{ mtMsg }}</span>
+              </div>
+            </div>
+
             <div v-if="c.id === 'ffmpeg'" class="field">
               <label>{{ $t('settings.ffmpegPath') }}</label>
               <input v-model="ffPath" :placeholder="$t('aiCenter.extFfmpegPh')" />
@@ -68,6 +114,7 @@
               </div>
             </div>
           </div>
+          </template>
           <div v-if="imp.cid" class="aic-card">
             <div class="aic-card-head">
               <strong>{{ $t('aiCenter.extImportTitle', { name: $t('aiCenter.extName.' + imp.cid) }) }}</strong>
@@ -146,6 +193,7 @@ import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 
 import {
   extCancel, extImport, extInstall, extSelftest, extStatus, extTask, extUninstall, getConfig, putConfig,
+  mtStart, mtStop, mtTest,
 } from '../api.js'
 import { t } from '../i18n/index.js'
 import { confirmDialog, toast } from '../utils.js'
@@ -160,6 +208,20 @@ const task = reactive({
 const imp = reactive({ cid: '', dir: '', busy: false })
 let extTimer = null
 
+/* ---------- 组件分组：新增组件只要在组件对象上带 group 字段就会归组 ---------- */
+const GROUP_ORDER = ['basic', 'speech', 'scraper']
+const groups = computed(() => GROUP_ORDER
+  .map((key) => ({ key, items: ext.components.filter((c) => (c.group || 'basic') === key) }))
+  .filter((g) => g.items.length))
+
+/* ---------- MetaTube 服务配置（安装/卸载走上面的通用按钮） ---------- */
+const mt = reactive({
+  enabled: false, mode: 'external',
+  base_url: 'http://127.0.0.1:18080', token: '',
+})
+const mtBusy = ref(false)
+const mtMsg = ref('')
+
 function fmtSize(n) {
   const v = Number(n) || 0
   if (v >= 1073741824) return (v / 1073741824).toFixed(1) + ' GB'
@@ -170,6 +232,12 @@ function fmtSize(n) {
 
 function extStateText(c) {
   if (task.running && task.cid === c.id) return t('aiCenter.extState.installing')
+  if (c.id === 'metatube') {
+    if (c.running) return t('aiCenter.mtStateRunning')
+    if (c.reachable) return t('aiCenter.mtStateReachable')
+    if (c.installed) return t('aiCenter.mtStateStopped')
+    return t('aiCenter.extState.missing')
+  }
   if (c.state === 'ready') return t('aiCenter.extState.ready')
   return t('aiCenter.extState.missing')
 }
@@ -222,6 +290,15 @@ async function loadExt() {
     ext.pip = !!r.pip_available
     const ff = ext.components.find((c) => c.id === 'ffmpeg')
     if (ff) ffPath.value = ff.custom || ''
+    const mtc = ext.components.find((c) => c.id === 'metatube')
+    if (mtc) {
+      Object.assign(mt, {
+        enabled: !!mtc.enabled,
+        mode: mtc.mode || 'external',
+        base_url: mtc.base_url || 'http://127.0.0.1:18080',
+        token: '',
+      })
+    }
     syncTask(r.task)
     if (r.task && r.task.running) startExtPoll()
   } catch (e) {
@@ -345,6 +422,77 @@ async function saveSpeech() {
   }
 }
 
+/* ---------- MetaTube：保存配置 / 连接测试 / 启停 ---------- */
+async function saveMt() {
+  mtBusy.value = true
+  try {
+    await putConfig({
+      metatube: {
+        enabled: !!mt.enabled,
+        mode: mt.mode || 'external',
+        base_url: (mt.base_url || '').trim(),
+        token: (mt.token || '').trim(),
+      },
+    })
+    toast(t('aiCenter.mtSaved'), 'ok')
+    // 托管模式：启用后若已安装但没跑，顺手拉起
+    const c = ext.components.find((x) => x.id === 'metatube')
+    if (mt.enabled && mt.mode === 'managed' && c && c.installed && !c.running) {
+      try { await mtStart() } catch { /* 失败让状态行显示 */ }
+    }
+    await loadExt()
+  } catch (e) {
+    toast(e.message, 'err')
+  } finally {
+    mtBusy.value = false
+  }
+}
+
+async function doMtTest() {
+  mtBusy.value = true
+  mtMsg.value = ''
+  try {
+    await putConfig({
+      metatube: {
+        enabled: !!mt.enabled,
+        mode: mt.mode || 'external',
+        base_url: (mt.base_url || '').trim(),
+        token: (mt.token || '').trim(),
+      },
+    })
+    const r = await mtTest({ base_url: mt.base_url, token: mt.token })
+    mtMsg.value = r.ok
+      ? `${t('aiCenter.mtTestOk')}: ${r.app} ${r.version || ''}`
+      : `${t('aiCenter.mtTestFail')}: ${r.error || ''}`
+  } catch (e) {
+    mtMsg.value = e.message
+  } finally {
+    mtBusy.value = false
+    await loadExt()
+  }
+}
+
+async function doMtStart() {
+  mtBusy.value = true
+  try {
+    await mtStart()
+    await loadExt()
+  } catch (e) {
+    toast(e.message, 'err')
+  } finally {
+    mtBusy.value = false
+  }
+}
+
+async function doMtStop() {
+  try {
+    await mtStop()
+    await loadExt()
+  } catch (e) {
+    toast(e.message, 'err')
+  }
+}
+
 onMounted(() => { loadExt(); loadSpeech() })
 onBeforeUnmount(() => { stopExtPoll() })
 </script>
@@ -371,6 +519,15 @@ onBeforeUnmount(() => { stopExtPoll() })
   font-size: 11px; background: var(--c-primary-soft); color: var(--c-primary-h);
 }
 .aic-sel-sm { width: 130px; }
+.ext-group-head {
+  margin: 14px 0 8px; padding-top: 10px; border-top: 1px solid var(--c-line);
+  font-size: 11px; font-weight: 600; letter-spacing: .08em;
+  color: var(--c-text-3); text-transform: uppercase;
+}
+.ext-group-head:first-child { margin-top: 0; padding-top: 0; border-top: none; }
+.ext-mt { margin-top: 8px; padding-top: 8px; border-top: 1px dashed var(--c-line); }
+.ext-mt .field { margin-bottom: 6px; }
+.ext-mt .hint { color: var(--c-text-3); }
 .ext-path { font-family: ui-monospace, Consolas, monospace; font-size: 11px; word-break: break-all; }
 .ext-progress { margin-top: 8px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .ext-bar { flex: 1 1 220px; height: 8px; border-radius: 999px; background: var(--c-bg-sunken); overflow: hidden; }

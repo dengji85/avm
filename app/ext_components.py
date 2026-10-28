@@ -89,6 +89,8 @@ def component_dir(cid: str) -> str:
         return os.path.join(ext_root(), "ffmpeg", "bin")
     if cid == "asr-libs":
         return os.path.join(ext_root(), "asr-libs")
+    if cid == "metatube":
+        return os.path.join(ext_root(), "metatube")
     if cid.startswith("asr-model-"):
         size = cid.rsplit("-", 1)[-1]
         return os.path.join(str(DATA_DIR), "models", "faster-whisper-%s" % size)
@@ -234,7 +236,7 @@ def _detect_ffmpeg() -> Dict[str, Any]:
     if exe and src == "ext" and not size:
         size = _dir_size(os.path.dirname(exe))
     return {
-        "id": "ffmpeg", "state": "ready" if exe else "missing",
+        "id": "ffmpeg", "group": "basic", "state": "ready" if exe else "missing",
         "version": ver, "path": exe, "source": src, "size": size,
         "custom": custom,   # 用户显式配置的路径（可能不存在，前端编辑框回显用）
     }
@@ -271,7 +273,7 @@ def _detect_asr_libs() -> Dict[str, Any]:
     if src == "ext" and not size:
         size = _dir_size(ext_d)
     return {
-        "id": "asr-libs", "state": "ready" if ok else "missing",
+        "id": "asr-libs", "group": "speech", "state": "ready" if ok else "missing",
         "version": m.get("version") or "", "path": path if ok else "",
         "source": src, "size": size,
     }
@@ -282,7 +284,7 @@ def _detect_model(size: str) -> Dict[str, Any]:
     root = asr.model_root(size)
     ok = os.path.isfile(os.path.join(root, "model.bin"))
     return {
-        "id": "asr-model-%s" % size, "state": "ready" if ok else "missing",
+        "id": "asr-model-%s" % size, "group": "speech", "state": "ready" if ok else "missing",
         "version": "CTranslate2", "path": root, "source": "dir",
         "size": _dir_size(root) if ok else 0,
     }
@@ -295,6 +297,8 @@ def selftest(cid: str) -> Dict[str, Any]:
         return _selftest_ffmpeg()
     if cid == "asr-libs":
         return _selftest_asr_libs()
+    if cid == "metatube":
+        return _selftest_metatube()
     if cid.startswith("asr-model-"):
         return _selftest_model(cid.rsplit("-", 1)[-1])
     raise ValueError("未知组件: %s" % cid)
@@ -363,6 +367,42 @@ def _selftest_asr_libs() -> Dict[str, Any]:
     return {"ok": ok, "checks": checks}
 
 
+def _selftest_metatube() -> Dict[str, Any]:
+    """MetaTube 自检：二进制能跑 + 服务可达 + 已启用为数据源。"""
+    from . import metatube
+    checks: List[Dict[str, Any]] = []
+    ok = True
+    exe = metatube.binary_path()
+    if os.path.isfile(exe):
+        checks.append({"name": "二进制", "ok": True, "detail": exe})
+    else:
+        ok = False
+        checks.append({"name": "二进制", "ok": False,
+                       "detail": "未安装：点击上方「安装」下载官方包"})
+    if os.path.isfile(exe):
+        ver = metatube.probe_version(exe)
+        if ver:
+            checks.append({"name": "可运行", "ok": True, "detail": ver})
+        else:
+            ok = False
+            checks.append({"name": "可运行", "ok": False,
+                           "detail": "--version 执行失败（可能被杀软拦截）"})
+    try:
+        pv = metatube.providers() or {}
+        movies = pv.get("movie_providers") or {}
+        checks.append({"name": "数据源", "ok": True,
+                       "detail": "影片源 %d 个 / 演员源 %d 个" % (
+                           len(movies), len(pv.get("actor_providers") or {}))})
+    except Exception as e:
+        ok = False
+        checks.append({"name": "服务", "ok": False, "detail": str(e)[:160]})
+    mt_cfg = load_config().get("metatube") or {}
+    enabled = bool(mt_cfg.get("enabled"))
+    checks.append({"name": "启用为数据源", "ok": True,
+                   "detail": "已启用" if enabled else "未启用（设置 → 刮削数据源 里开启）"})
+    return {"ok": ok, "checks": checks}
+
+
 def _selftest_model(size: str) -> Dict[str, Any]:
     from . import asr
     root = asr.model_root(size)
@@ -382,6 +422,38 @@ def _selftest_model(size: str) -> Dict[str, Any]:
     return {"ok": ok, "checks": checks}
 
 
+def _detect_metatube() -> Dict[str, Any]:
+    """MetaTube 刮削引擎：安装状态 + 运行状态一起给前端。"""
+    from . import metatube
+    st = metatube.status()
+    m = (_load_manifest().get("components") or {}).get("metatube") or {}
+    installed = bool(st.get("installed"))
+    if installed and not st.get("reachable"):
+        state = "ready"
+    elif installed:
+        state = "ready"
+    else:
+        state = "missing"
+    return {
+        "id": "metatube", "group": "scraper",
+        "state": state,
+        "installed": installed,
+        "version": st.get("installed_version") or "",
+        "path": metatube.binary_path() if installed else "",
+        "source": "ext" if installed else "",
+        "size": m.get("size") or (_dir_size(metatube.component_dir()) if installed else 0),
+        # 服务态（扩展组件页的专属操作按钮要用）
+        "running": bool(st.get("running")),
+        "reachable": bool(st.get("reachable")),
+        "enabled": bool(st.get("enabled")),
+        "mode": st.get("mode"),
+        "token_set": bool(st.get("token_set")),
+        "base_url": st.get("base_url"),
+        "server_version": st.get("server_version") or "",
+        "error": st.get("error") or "",
+    }
+
+
 def status() -> Dict[str, Any]:
     """全部组件状态 + 当前安装任务（前端扩展组件页就靠这一个接口）。"""
     comps = [_detect_ffmpeg(), _detect_asr_libs()]
@@ -391,6 +463,7 @@ def status() -> Dict[str, Any]:
         c = _detect_model(s)
         c["active"] = (s == size)
         comps.append(c)
+    comps.append(_detect_metatube())
     with _LOCK:
         task = dict(_TASK)
     return {
@@ -650,8 +723,56 @@ def _install_model(size: str) -> Dict[str, Any]:
 
 
 # ------------------------------------------------------------------ 任务入口
+def _install_metatube(source: str) -> Dict[str, Any]:
+    """下载官方 Release（镜像优先），解压出单文件服务端并登记。"""
+    from . import metatube
+    if metatube.running():
+        metatube.stop()
+    dest = metatube.component_dir()
+    os.makedirs(dest, exist_ok=True)
+    tmp = os.path.join(ext_root(), "_tmp", "metatube.zip")
+    _fetch_archive(metatube.asset_urls(), tmp, "MetaTube %s" % metatube.VERSION)
+    work = os.path.join(ext_root(), "_tmp", "metatube-x")
+    shutil.rmtree(work, ignore_errors=True)
+    os.makedirs(work, exist_ok=True)
+    _extract(tmp, work)
+    # 压缩包里的名字带平台后缀（metatube-server-windows-amd64.exe），按前缀找
+    exe = ""
+    for root, _dirs, files in os.walk(work):
+        for f in files:
+            lf = f.lower()
+            if lf.startswith("metatube-server") and (lf.endswith(".exe") or "." not in lf):
+                exe = os.path.join(root, f)
+                break
+        if exe:
+            break
+    if not exe:
+        raise ValueError("压缩包里没有 MetaTube 可执行文件")
+    final = metatube.binary_path()
+    shutil.copy2(exe, final)
+    if os.name != "nt":
+        os.chmod(final, 0o755)
+    ver = metatube.probe_version(final)
+    if not ver:
+        raise ValueError("MetaTube 无法运行（可能被杀软拦截，请加白名单后重试）")
+    _record("metatube", version=ver, size=_dir_size(dest), source="ext")
+    shutil.rmtree(work, ignore_errors=True)
+    try:
+        os.remove(tmp)
+    except OSError:
+        pass
+    # 已启用 + 托管模式：装完顺手拉起，省一次点击
+    try:
+        cfgm = load_config().get("metatube") or {}
+        if cfgm.get("enabled") and str(cfgm.get("mode")) == "managed":
+            metatube.start()
+    except Exception:
+        pass
+    return {"version": ver}
+
+
 def install(cid: str, source: str = "auto", target: str = "") -> Dict[str, Any]:
-    if cid not in ("ffmpeg", "asr-libs", "asr-model-small", "asr-model-medium"):
+    if cid not in ("ffmpeg", "asr-libs", "asr-model-small", "asr-model-medium", "metatube"):
         raise ValueError("未知组件：%s" % cid)
     with _LOCK:
         if _TASK.get("running"):
@@ -672,6 +793,8 @@ def _run_install(cid: str, source: str) -> None:
             info = _install_ffmpeg(source)
         elif cid == "asr-libs":
             info = _install_asr_libs(source)
+        elif cid == "metatube":
+            info = _install_metatube(source)
         else:
             info = _install_model(cid.rsplit("-", 1)[-1])
         _set(running=False, state="done", percent=100,
@@ -712,6 +835,36 @@ def import_component(cid: str, src: str) -> Dict[str, Any]:
             raise ValueError("ffmpeg 无法运行（缺系统依赖？）")
         _record("ffmpeg", version=ver, size=_dir_size(final_bin), source="import")
         return {"version": ver}
+    if cid == "metatube":
+        from . import metatube
+        if zipfile.is_zipfile(src) or tarfile.is_tarfile(src):
+            tmp = os.path.join(ext_root(), "_tmp", "metatube-import")
+            shutil.rmtree(tmp, ignore_errors=True)
+            os.makedirs(tmp, exist_ok=True)
+            _extract(src, tmp)
+            src = tmp
+        exe = ""
+        for root, _dirs, files in os.walk(src):
+            for f in files:
+                lf = f.lower()
+                if lf.startswith("metatube-server") and (lf.endswith(".exe") or "." not in lf):
+                    exe = os.path.join(root, f)
+                    break
+            if exe:
+                break
+        if not exe:
+            raise ValueError("目录里没有 MetaTube 可执行文件")
+        dest = metatube.component_dir()
+        os.makedirs(dest, exist_ok=True)
+        shutil.copy2(exe, metatube.binary_path())
+        if os.name != "nt":
+            os.chmod(metatube.binary_path(), 0o755)
+        ver = metatube.probe_version(metatube.binary_path())
+        if not ver:
+            raise ValueError("MetaTube 无法运行（可能被杀软拦截）")
+        _record("metatube", version=ver, size=_dir_size(dest), source="import")
+        return {"version": ver}
+
     if cid == "asr-libs":
         if zipfile.is_zipfile(src):
             tmp = os.path.join(ext_root(), "_tmp", "asr-import")
@@ -761,6 +914,10 @@ def uninstall(cid: str) -> Dict[str, Any]:
     if cid == "ffmpeg":
         shutil.rmtree(os.path.dirname(component_dir(cid)), ignore_errors=True)
     elif cid == "asr-libs":
+        shutil.rmtree(component_dir(cid), ignore_errors=True)
+    elif cid == "metatube":
+        from . import metatube
+        metatube.stop()
         shutil.rmtree(component_dir(cid), ignore_errors=True)
     elif cid.startswith("asr-model-"):
         # 只删默认位置的模型；用户自定义 model_dir 里的东西不属于组件系统管
