@@ -49,21 +49,32 @@ FFMPEG_SOURCES: Dict[str, List[str]] = {
     ],
 }
 
-# 语音识别依赖的预打包 zip（pip install --target 产物，发布页提供）。
-# 镜像前缀优先：GitHub 直连对国内用户常常 <100KB/s 甚至失败，ghfast.top 实测快得多；
-# 没发布 / 链接失效时走手动导入，UI 会给出明确提示。
-ASR_LIBS_URLS = [
-    "https://ghfast.top/https://github.com/dengji85/avm/releases/latest/download/asr-libs-cp311-win64.zip",
-    "https://github.com/dengji85/avm/releases/latest/download/asr-libs-cp311-win64.zip",
-]
+# ---------------------------------------------------------------- 下载源
+# 组件资产统一放在 **固定 tag 的 Release**（ext-bundle）里，与应用版本解耦：
+# 上传一次长期有效，组件更新时在该 Release 里替换资产即可，不需要随应用发版重传。
+# 不能用 releases/latest：它会随应用发版漂移，一旦最新 Release 没带组件资产
+# 就会 404。
+_ASSET_BASE = "https://github.com/dengji85/avm/releases/download/ext-bundle"
+_GH_MIRRORS = ("https://ghfast.top/", "https://gh-proxy.com/", "")
 
-# opencv 运行库的预打包 zip（pip install --target 的产物，tools/build_opencv_zip.py 打包）。
-# 打包版 exe 里没有 pip，「人脸定位」组件靠下载这个 zip 安装，机制与 asr-libs 相同。
-# 同样镜像优先（ghfast.top 对 GitHub Releases 直链有效）。
-FACEDET_LIBS_URLS = [
-    "https://ghfast.top/https://github.com/dengji85/avm/releases/latest/download/opencv-libs-cp311-win64.zip",
-    "https://github.com/dengji85/avm/releases/latest/download/opencv-libs-cp311-win64.zip",
-]
+
+def _asset_urls(name: str) -> List[str]:
+    """镜像前缀优先（国内直连 GitHub 常 <100KB/s 甚至失败），直连兜底。"""
+    base = "%s/%s" % (_ASSET_BASE, name)
+    return [m + base for m in _GH_MIRRORS]
+
+
+# 语音识别依赖的预打包 zip（pip install --target 产物，tools/build_asr_zip.py 打包）。
+ASR_LIBS_URLS = _asset_urls("asr-libs-cp311-win64.zip")
+
+# opencv 运行库的预打包 zip（tools/build_opencv_zip.py 打包）。打包版 exe 里没有
+# pip，「人脸定位」组件靠下载这个 zip 安装，机制与 asr-libs 相同。
+FACEDET_LIBS_URLS = _asset_urls("opencv-libs-cp311-win64.zip")
+
+# 整合离线包的**指针文件**（几百字节）：内容是当前整合包的文件名 / SHA256 / 大小。
+# 组件更新时只需向 ext-bundle Release 传新 zip 并替换这个 json，应用端无需改代码。
+# 未来做「应用内一键下载整合包」就用它。
+BUNDLE_INFO_URLS = _asset_urls("bundle-latest.json")
 
 # 模型走 ModelScope 镜像（国内直连 HuggingFace 常超时；与 tools/fetch_asr_model.py 同源）
 MODEL_REPOS = {

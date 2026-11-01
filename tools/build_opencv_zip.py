@@ -106,8 +106,8 @@ def main():
     args = ap.parse_args()
     dest = build(Path(args.out), args.mirror)
     print("")
-    print("发布：把 %s 与 .sha256 一起传到 GitHub Release" % dest.name)
-    print("（应用端 FACEDET_LIBS_URLS 已指向 releases/latest/download/%s）" % dest.name)
+    print("发布：把 %s 与 .sha256 传到 ext-bundle 固定 tag 的 Release" % dest.name)
+    print("（应用端 FACEDET_LIBS_URLS 指向 releases/download/ext-bundle/%s，与应用发版解耦）" % dest.name)
     return 0
 
 
