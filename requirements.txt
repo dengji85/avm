@@ -7,3 +7,6 @@ qrcode>=7.0
 # qrcode 生成 PNG 需要 Pillow（二维码接口）；封面亮度分析也用到
 pillow>=10.0
 Send2Trash>=1.8.0
+# 可选：竖版海报的「智能裁切」（人脸定位）。不装也能用，只是自动退回固定裁切；
+# 装上后还需要一个 227KB 的 YuNet 模型（首次运行自动下载到 data/models/）。
+# opencv-python-headless>=4.5.4

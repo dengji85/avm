@@ -319,9 +319,12 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         # 是否从刮削源下载并落盘；关闭则仅保留远程 URL，不占本地空间
         "avatar_download": False,
         "fanart_download": True,
-        # 竖版海报（poster）取图策略：right = 取右侧（默认，人物主视觉常见位置）
-        # center = 居中裁切；fit = 整图缩进 2:3 画布，空白用模糊背景填充
-        "poster_strategy": "right",
+        # 竖版海报（poster）取图策略：
+        #   face   = 智能定位主体（人脸优先，肤色重心兜底），定位不到退回右侧（默认）
+        #   right  = 固定取右侧（人物主视觉常见位置）
+        #   center = 居中裁切
+        #   fit    = 整图缩进 2:3 画布，空白用模糊背景填充
+        "poster_strategy": "face",
         # 是否向 DMM 抓官方竖版海报（真海报，比裁横图清晰）；关掉则只用本地裁切
         "poster_dmm": True,
     },

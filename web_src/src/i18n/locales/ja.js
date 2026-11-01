@@ -880,6 +880,7 @@ export default {
     posterTitle: '縦型ポスター',
     posterSub: '横長カバーから 2:3 を自動生成',
     posterStrategy: '切り出し位置',
+    posterFace: 'スマート裁切（顔検出・推奨）',
     posterRight: '右側（既定・人物が右に多い）',
     posterCenter: '中央',
     posterFit: '全体を縮小＋ぼかし背景',

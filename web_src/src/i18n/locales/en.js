@@ -849,6 +849,7 @@ export default {
     posterTitle: 'Vertical posters',
     posterSub: 'Auto-crop 2:3 posters from landscape covers',
     posterStrategy: 'Crop anchor',
+    posterFace: 'Smart crop (face detection, recommended)',
     posterRight: 'Right (default, subject usually there)',
     posterCenter: 'Center',
     posterFit: 'Fit whole image + blurred fill',

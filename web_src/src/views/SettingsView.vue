@@ -1476,6 +1476,7 @@ onMounted(async () => {
             <div class="field-row">
               <label>{{ $t('settings.posterStrategy') }}</label>
               <select v-model="cfg.media.poster_strategy" class="aic-sel-sm">
+                <option value="face">{{ $t('settings.posterFace') }}</option>
                 <option value="right">{{ $t('settings.posterRight') }}</option>
                 <option value="center">{{ $t('settings.posterCenter') }}</option>
                 <option value="fit">{{ $t('settings.posterFit') }}</option>

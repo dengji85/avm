@@ -857,6 +857,7 @@ export default {
     posterTitle: '豎版海報（Poster）',
     posterSub: '橫版封面自動裁出 2:3 豎圖',
     posterStrategy: '取圖位置',
+    posterFace: '智慧裁切（人臉定位，推薦）',
     posterRight: '右側（預設，人物主視覺）',
     posterCenter: '置中',
     posterFit: '完整縮放 + 模糊補邊',

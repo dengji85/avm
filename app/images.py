@@ -53,8 +53,9 @@ def cover_path(filename: str) -> Optional[Path]:
 
 POSTER_SUFFIX = "_poster.jpg"
 POSTER_META_SUFFIX = "_poster.json"
-# right = 取右侧（默认，人物主视觉常见位置）；center = 居中；fit = 完整缩放+模糊背景补边
-POSTER_STRATEGIES = ("right", "center", "fit")
+# face = 智能定位主体（人脸 → 肤色重心，定位不到退回右侧）；
+# right = 取右侧（人物主视觉常见位置）；center = 居中；fit = 完整缩放+模糊背景补边
+POSTER_STRATEGIES = ("face", "right", "center", "fit")
 _POSTER_MAX_H = 1400          # 上限：DMM 官方竖版通常 1032–1534 宽，控制在一倍屏够用且体积可控
 
 
@@ -141,8 +142,12 @@ def _fit_canvas(im: Any) -> Any:
 POSTER_CROP_MIN_W = 520
 
 
-def _render_poster(im: Any, strategy: str) -> Any:
-    """把任意比例的图渲染成精确 2:3 竖版（不裁主体、不放大）。"""
+def _render_poster(im: Any, strategy: str, focus_x: Optional[float] = None) -> Any:
+    """把任意比例的图渲染成精确 2:3 竖版（不裁主体、不放大）。
+
+    ``focus_x`` 是主体水平中心（0–1，由 ``faces.subject_center`` 给出）：
+    ``face`` 策略下用它把窗口对准人物，没给就退回右侧裁。
+    """
     w, h = im.size
     if h >= w * 1.15:
         # 原生竖版：只裁掉两侧多余的 1–2 像素级边，绝不裁内容区
@@ -153,7 +158,14 @@ def _render_poster(im: Any, strategy: str) -> Any:
         # 方形 / 接近方形的封面裁 2:3 会切掉 1/3 宽，主体必断——直接补边
         return _fit_canvas(im)
     crop_w = min(w, max(1, round(h * 2 / 3)))
-    x0 = (w - crop_w) // 2 if strategy == "center" else (w - crop_w)
+    if strategy == "face" and focus_x is not None:
+        # 窗口以主体为中心，左右贴身不越界；人物太靠边时仍保证窗口完整
+        x0 = int(round(focus_x * w - crop_w / 2.0))
+        x0 = max(0, min(w - crop_w, x0))
+    elif strategy == "center":
+        x0 = (w - crop_w) // 2
+    else:
+        x0 = w - crop_w
     return im.crop((x0, 0, x0 + crop_w, h))
 
 
@@ -194,11 +206,25 @@ def make_poster(src: Path, dst: Path, strategy: str = "right",
     im = _open_image(src)
     if im is None or im.width < 40 or im.height < 40:
         return False
+
+    focus_x: Optional[float] = None
+    focus_src = ""
+    if strategy == "face":
+        # 智能定位：人脸 → 肤色重心。返回 None 表示这张图判断不了主体，
+        # 下面会退化成「右侧裁」，和旧行为一致，不会更差。
+        from . import faces
+
+        focus_x, focus_src = faces.subject_center(im)
+
     effective = _effective_strategy(im, strategy)
-    out = _render_poster(im, strategy)
+    if effective == "face" and focus_x is None:
+        # 记下降级原因，便于排查「为什么这张还是右边裁的」
+        effective = "face:right"
+
+    out = _render_poster(im, strategy, focus_x=focus_x)
     if not _save_poster(out, dst):
         return False
-    info = {"from": "cover", "strategy": effective,
+    info = {"from": "cover", "strategy": effective, "focus": focus_src,
             "src_w": im.width, "src_h": im.height,
             "src_mtime": src.stat().st_mtime}
     if meta:
@@ -342,6 +368,13 @@ def _poster_strategy(cfg: Optional[Dict[str, Any]]) -> str:
     return val if val in POSTER_STRATEGIES else "right"
 
 
+def _strategy_changed(saved: Any, want: str) -> bool:
+    """策略是否变了。元信息里可能带降级后缀（``face:right`` = 没定位到主体退回右侧），
+    按前缀比较——否则这类图每次都被判成过期，白白反复重生成。"""
+    s = str(saved or "")
+    return s != want and s.split(":")[0] != want
+
+
 def ensure_poster(cover_file: str, cfg: Optional[Dict[str, Any]] = None,
                   code: str = "", allow_network: bool = False) -> Optional[str]:
     """确保竖版海报存在（必要时重生成）。返回海报文件名，失败返回 None。
@@ -361,7 +394,7 @@ def ensure_poster(cover_file: str, cfg: Optional[Dict[str, Any]] = None,
     stale = (
         not dst.exists()
         or float(meta.get("src_mtime") or 0) < src.stat().st_mtime
-        or (not from_dmm and meta.get("strategy") != strategy)
+        or (not from_dmm and _strategy_changed(meta.get("strategy"), strategy))
         or (allow_network and bool(code) and not from_dmm)
     )
     if not stale:

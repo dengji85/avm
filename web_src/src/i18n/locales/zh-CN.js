@@ -850,6 +850,7 @@ export default {
     posterTitle: '竖版海报（Poster）',
     posterSub: '横版封面自动裁出 2:3 竖图',
     posterStrategy: '取图位置',
+    posterFace: '智能裁切（人脸定位，推荐）',
     posterRight: '右侧（默认，人物主视觉）',
     posterCenter: '居中',
     posterFit: '完整缩放 + 模糊补边',
