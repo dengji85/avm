@@ -1871,6 +1871,7 @@ export default {
       'asr-model-medium': 'Speech model (medium)',
       'metatube': 'MetaTube scraper engine',
 
+      facedet: 'Face detection (smart crop)',
     },
     extDesc: {
       'ffmpeg': 'Needed for cover frames, previews, embedded-subtitle detection and browser playback (~100MB).',

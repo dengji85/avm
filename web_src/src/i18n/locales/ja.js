@@ -1914,6 +1914,7 @@ export default {
       'asr-model-medium': '音声モデル medium',
       'metatube': 'MetaTube スクレイパー',
 
+      facedet: '顔検出（スマート裁切）',
     },
     extDesc: {
       'ffmpeg': 'カバー抽出・プレビュー・埋め込み字幕検出・ブラウザ再生に必要（約 100MB）。',

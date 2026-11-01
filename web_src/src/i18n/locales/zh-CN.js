@@ -1872,6 +1872,7 @@ export default {
       'asr-model-medium': '语音模型 medium',
       'metatube': 'MetaTube 刮削引擎',
 
+      facedet: '人脸定位（智能裁切）',
     },
     extDesc: {
       'ffmpeg': '封面抽帧、预览图、内嵌字幕探测、浏览器播放转封装都依赖它（约 100MB）。',
