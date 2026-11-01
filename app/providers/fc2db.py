@@ -102,7 +102,10 @@ class Fc2dbProvider(BaseProvider):
         if resp.status_code >= 500:
             raise NetError("FC2DB 返回 HTTP %d（站点暂时不稳定）" % resp.status_code)
         if resp.status_code == 404:
-            return []  # 作品不存在：按未收录处理
+            return []  # 作品不存在：按未收录处理（不是故障）
+        # 403 / 429 是站点明确的「你太快了」信号：区别于 404，属于可重试的临时限流
+        if resp.status_code in (403, 429):
+            raise NetError("FC2DB 限流（HTTP %d），稍后重试即可" % resp.status_code)
         if resp.status_code >= 400:
             raise NetError("FC2DB 返回 HTTP %d" % resp.status_code)
         text = resp.text or ""
@@ -121,23 +124,35 @@ class Fc2dbProvider(BaseProvider):
             return None
         pid = self._post_id(num)
         if not pid:
+            # 具体原因（站内无结果 / 只有相邻编号）已由 _post_id 写进 last_error
             if not self.last_error:
                 self.last_error = "FC2DB 未收录 FC2-PPV-%s" % num
             return None
         data = self._get_json("/wp-json/wp/v2/work/%s?_embed=1" % pid)
         if not isinstance(data, dict):
+            # 搜索能查到、详情却空了：条目刚被下架，或接口返回体异常
+            self.last_error = "FC2DB 条目已失效（作品页为空）"
             return None
         meta = self._to_meta(data, num)
         if not meta.get("title"):
+            self.last_error = "FC2DB 页面缺少标题字段"
             return None
         return self.normalize(meta, self.name)
 
     def _post_id(self, num: str) -> str:
-        """按商品编号定位作品 post id，返回空串表示没收录。"""
+        """按商品编号定位作品 post id，返回空串表示没收录。
+
+        没收录有两种成因，分别写进 ``last_error``：站内搜索完全没结果、
+        或者只有相邻编号（FC2 编号连号很常见，搜索会带回一大串邻居）。
+        这两种都属「确实没有」，不该重试，但原因说清楚才好判断。
+        """
         data = self._get_json(
             "/wp-json/wp/v2/search?search=%s&per_page=10&subtype=work" % quote(num)
         )
         if not isinstance(data, list):
+            return ""
+        if not data:
+            self.last_error = "FC2DB 未收录 FC2-PPV-%s（站内搜索无结果）" % num
             return ""
         for item in data:
             if not isinstance(item, dict):
@@ -146,6 +161,7 @@ class Fc2dbProvider(BaseProvider):
             # 只认 /work/<同一个编号>/：搜索会把相邻编号也带回来
             if url.endswith("/work/" + num):
                 return str(item.get("id") or "")
+        self.last_error = "FC2DB 未收录 FC2-PPV-%s（只有相邻编号）" % num
         return ""
 
     # ---------------------------------------------------------- 字段映射
