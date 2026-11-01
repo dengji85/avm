@@ -225,7 +225,14 @@ def cmd_serve(args) -> int:
     # 不重载（只在 stderr 留一条 WARNING）。所以 --reload 走 "app.main:app"，
     # reloader 会在子进程里重新导入模块，模块级初始化照样执行。
     if args.reload:
+        # 只监听代码目录。默认监听整个工作目录时，data/ 下的 library.db、访问令牌、
+        # 日志、封面任一变化都会触发整进程重启 —— 一边用一边刮削/改设置就会不断重启，
+        # 而 Windows 上子进程若没有可用的控制台句柄，reloader 发 CTRL_C_EVENT 会直接
+        # 以 `OSError: [WinError 6] 句柄无效` 崩掉整个服务（实测可复现）。
+        _root = Path(__file__).resolve().parent.parent
+        _dirs = [d for d in (_root / "app", _root / "web_src" / "src") if d.is_dir()]
         uvicorn.run("app.main:app", host=args.host, port=args.port, reload=True,
+                    reload_dirs=[str(d) for d in _dirs] or None,
                     log_level="info", proxy_headers=True, forwarded_allow_ips=_trusted)
     else:
         uvicorn.run(app, host=args.host, port=args.port, log_level="info",
