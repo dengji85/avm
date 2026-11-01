@@ -216,12 +216,13 @@ Open it from any page; once a movie detail is open, the assistant carries that m
 
 ### Extension components (Settings → Components)
 
-FFmpeg and speech recognition are installed on demand, fully in the UI — no command line:
+Installed on demand, fully in the UI — no command line. Components can also be grabbed in one go from the **[ext-bundle offline pack](https://github.com/dengji85/avm/releases/tag/ext-bundle)** (good for slow networks or offline machines):
 
 1. **FFmpeg** (~100MB): cover frames, previews, embedded-subtitle detection and browser-playback remux depend on it → one-click install.
-2. **Speech recognition** (~170MB components + ~460MB small model): both ready → "Extract dialogue" on a movie detail → AI understands the plot from dialogue.
-3. Cannot download / offline: **manually import** official zips or existing folders; relocate the component root to another drive.
-4. The Docker image ships FFmpeg preinstalled; speech components install the same way in containers (on the mounted volume, survives image upgrades).
+2. **Face detection** (~54MB runtime): **smart poster cropping** — landscape covers are cropped to 2:3 around the subject; after installing, set the poster strategy to "Smart crop" under Settings → Posters.
+3. **Speech recognition** (~170MB components + ~460MB small model): both ready → "Extract dialogue" on a movie detail → AI understands the plot from dialogue.
+4. **MetaTube** (optional): extra FC2 / uncensored / amateur scraping sources; enable under Settings → Scraping sources.
+5. Cannot download / offline: grab the all-in-one pack from ext-bundle and use "Import all-in-one pack"; single components can be imported manually. The Docker image ships FFmpeg preinstalled.
 
 Platform-by-platform guide (Windows portable / source / Docker NAS / offline) in **[docs/扩展组件手册.md](docs/扩展组件手册.md)**.
 
