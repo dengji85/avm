@@ -1,5 +1,7 @@
 # 更新日志
 
+## [v1.15.1]（2026-11-01）
+
 ## [未发布]
 * * * **智能裁切：模型随包内置，运行库按需安装**：YuNet 人脸模型（227KB）随安装包内置（`app/assets/`），解压即用、不依赖联网。opencv / numpy 运行库不随包（会多 50MB），需要时在 扩展组件 → 人脸定位 一键安装——打包版（内无 pip）自动下载预打包 `opencv-libs-cp311-win64.zip`（由 `tools/build_opencv_zip.py` 生成、发布到 GitHub Releases），源码版走 pip；离线机器可手动导入运行库 zip 或模型 onnx。未就绪时智能裁切自动退回右侧裁，其余功能不受影响。安装包体积 22.1MB → 23.4MB。
 * **为什么选 YuNet**：227KB 的轻量人脸检测器（OpenCV Zoo 官方维护），专为 CPU 实时推理设计，WIDER FACE 难集 AP≈0.79，对封面这种「有一张大而清晰的脸」的场景足够；对比 MTCNN（≈2MB）与 Haar（≈10MB XML 且误检率高）是更优的精度/体积比。
