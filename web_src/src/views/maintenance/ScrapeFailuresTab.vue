@@ -1,7 +1,7 @@
 <script setup>
 import { ref, reactive, onMounted, computed } from 'vue'
 import { state } from '../../state.js'
-import { scrapeFailures, scrapeRetryNeterr, scrapeRetryWithProvider, listProviders, scrapeOne, openFile } from '../../api.js'
+import { scrapeFailures, scrapeRetryNeterr, scrapeRetryWithProvider, listProviders, scrapeOne, openFile, providersHealth } from '../../api.js'
 import { toast } from '../../utils.js'
 import { t } from '../../i18n/index.js'
 
@@ -28,6 +28,32 @@ async function load() {
 
 async function loadProviders() {
   try { const r = await listProviders(); providers.value = (r.providers || []).map(p => p.name) } catch (e) {}
+}
+
+/* 数据源健康：从真实刮削日志聚合，回答「刮不到是哪个源的问题」。
+   一个源长期没被调用时显示「未使用过」，而不是伪造一个「正常」。 */
+const health = ref([])
+async function loadHealth() {
+  try { const r = await providersHealth(30); health.value = r.items || [] } catch (e) { health.value = [] }
+}
+function pHue(p) {
+  if (!p.active) return 'idle'
+  if (!p.total) return 'idle'
+  if (p.last_status === 'error') return 'err'
+  if (p.rate >= 80) return 'ok'
+  return 'warn'
+}
+function pText(p) {
+  if (p.total) return t('maint.phRate', { n: p.rate, c: p.total })
+  // 窗口内没调用过：显示上次成功的日期（可能几个月前），比「未使用过」有用
+  return p.last_ok_at ? p.last_ok_at.slice(0, 10) : t('maint.phNoLog')
+}
+function pTitle(p) {
+  const bits = []
+  if (!p.active) bits.push(t('maint.phInactive'))
+  if (p.last_ok_at) bits.push(t('maint.phLastOk', { t: p.last_ok_at }))
+  if (p.last_reason) bits.push(t('maint.phLastErr', { r: p.last_reason }))
+  return bits.join(' · ')
 }
 
 const groupDefs = [
@@ -85,7 +111,7 @@ async function viewMovie(it) {
 // 由 diagnosis.summary_kind 决定整行配色
 function rowClass(d) { return 'k-' + (d && d.summary_kind || 'miss') }
 
-onMounted(() => { load(); loadProviders() })
+onMounted(() => { load(); loadProviders(); loadHealth() })
 </script>
 
 <template>
@@ -104,6 +130,15 @@ onMounted(() => { load(); loadProviders() })
     </div>
 
     <div class="panel-body">
+    <!-- 数据源健康：悬停看最后成功时间与最近失败原因 -->
+    <div v-if="health.length" class="ph-row">
+      <div v-for="p in health" :key="p.name" class="ph" :class="pHue(p)" :title="pTitle(p)">
+        <span class="ph-dot"></span>
+        <b class="ph-name">{{ p.label }}</b>
+        <span class="ph-val">{{ pText(p) }}</span>
+      </div>
+    </div>
+
     <!-- 分组计数卡 -->
     <div class="grp-cards">
       <button class="grp" :class="{ on: filter === '' }" @click="filter = ''; load()">
@@ -172,6 +207,18 @@ onMounted(() => { load(); loadProviders() })
 .sf-head .sub { margin: 0; }
 .sf-acts { display: flex; gap: var(--sp-2); align-items: center; }
 .chk { font-size: var(--fs-sm); color: var(--c-text-2); display: flex; align-items: center; gap: 4px; }
+
+/* 数据源健康胶囊：绿=正常，橙=成功率低，红=最近一次失败，灰=未使用/已停用 */
+.ph-row { display: flex; flex-wrap: wrap; gap: var(--sp-2); }
+.ph { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: var(--r-full); border: 1px solid var(--c-line); background: var(--c-surface-2); font-size: var(--fs-xs); color: var(--c-text-2); cursor: default; }
+.ph-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--c-text-3); flex: none; }
+.ph.ok .ph-dot { background: var(--c-ok); }
+.ph.warn .ph-dot { background: var(--c-warn); }
+.ph.err .ph-dot { background: var(--c-err); }
+.ph.err { border-color: var(--c-err-line); }
+.ph.idle { opacity: .6; }
+.ph-name { font-weight: 600; color: var(--c-text); }
+.ph-val { color: var(--c-text-3); }
 
 .grp-cards { display: flex; gap: var(--sp-2); flex-wrap: wrap; }
 .grp {

@@ -1616,6 +1616,8 @@ export default {
     failHeadline: 'Diagnosis', failSources: 'Per-source detail', failProvider: 'Source', failKind: 'Kind', failReason: 'Reason',
     failRecommend: 'Recommendation', failActionManual: 'Add nfo manually', failActionCookie: 'Fill Cookie', failActionFix: 'Fix ID',
     failRetryProvider: 'Retry with source', failProviderSel: 'Select source', failRetrySel: 'Retry with selected source', failDoing: 'Retrying…',
+    phNoLog: 'never used', phRate: '{n}% success ({c} runs)',
+    phLastOk: 'last success {t}', phLastErr: 'last error: {r}', phInactive: 'disabled',
     failViewMovie: 'View movie', failElapsed: 'Elapsed', failGroupLabel: 'Group by cause',
     failOpenFolder: 'Open folder', failNoAction: 'Not added', failOpenErr: 'Failed to open folder', failNoMovie: 'This movie is not in the library',
     confirmRetrySkips: 'Force re-scrape the skip list (ignore skip, do not overwrite existing data)?',

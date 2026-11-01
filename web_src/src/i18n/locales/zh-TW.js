@@ -1625,6 +1625,8 @@ export default {
     failHeadline: '診斷', failSources: '逐源明細', failProvider: '資料源', failKind: '歸類', failReason: '原因',
     failRecommend: '建議', failActionManual: '手動補 nfo', failActionCookie: '填寫 Cookie', failActionFix: '修正番號',
     failRetryProvider: '換源重抓', failProviderSel: '選擇資料源', failRetrySel: '用選中源重試', failDoing: '正在重試…',
+    phNoLog: '未使用過', phRate: '{n}% 成功（{c} 次）',
+    phLastOk: '最後成功 {t}', phLastErr: '最近失敗：{r}', phInactive: '已停用',
     failViewMovie: '檢視影片', failElapsed: '耗時', failGroupLabel: '按原因分組',
     failOpenFolder: '開啟資料夾', failNoAction: '未入庫', failOpenErr: '開啟資料夾失敗', failNoMovie: '該影片尚未入庫',
     confirmRetrySkips: '對跳過名單裡的影片強制重新刮削一次（忽略跳過、不覆蓋已有資料）？',

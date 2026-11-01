@@ -297,6 +297,7 @@ export const resolveMissing = (body = {}) => post('/maintenance/missing/resolve'
 export const archiveList = (qs = {}) => get('/archive', qs)
 export const restoreArchived = (movieId) => post(`/archive/${movieId}/restore`, {})
 export const getArchiveStats = () => get('/archive/stats')
+export const providersHealth = (days = 30) => get('/maintenance/providers-health', { days })
 export const getOrphans = () => get('/maintenance/orphans')
 export const cleanOrphans = (body = {}) => post('/maintenance/orphans/clean', body)
 export const reparseCodes = (body = {}) => post('/reparse-codes', body)

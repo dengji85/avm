@@ -1617,6 +1617,8 @@ export default {
     failHeadline: '诊断', failSources: '逐源明细', failProvider: '数据源', failKind: '归类', failReason: '原因',
     failRecommend: '建议', failActionManual: '手动补 nfo', failActionCookie: '填写 Cookie', failActionFix: '修正番号',
     failRetryProvider: '换源重抓', failProviderSel: '选择数据源', failRetrySel: '用选中源重试', failDoing: '正在重试…',
+    phNoLog: '未使用过', phRate: '{n}% 成功（{c} 次）',
+    phLastOk: '最后成功 {t}', phLastErr: '最近失败：{r}', phInactive: '已停用',
     failViewMovie: '查看影片', failElapsed: '耗时', failGroupLabel: '按原因分组',
     failOpenFolder: '打开文件夹', failNoAction: '未入库', failOpenErr: '打开文件夹失败', failNoMovie: '该影片尚未入库',
     confirmRetrySkips: '对跳过名单里的影片强制重新刮削一次（忽略跳过、不覆盖已有数据）？',

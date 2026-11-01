@@ -1659,6 +1659,8 @@ export default {
     failHeadline: '診断', failSources: 'ソース別明細', failProvider: 'データソース', failKind: '分類', failReason: '原因',
     failRecommend: '推奨', failActionManual: 'nfo 手動補完', failActionCookie: 'Cookie 入力', failActionFix: '番号修正',
     failRetryProvider: '別ソース再取得', failProviderSel: 'データソース選択', failRetrySel: '選択ソースで再試行', failDoing: '再試行中…',
+    phNoLog: '未使用', phRate: '{n}% 成功（{c} 回）',
+    phLastOk: '最終成功 {t}', phLastErr: '最近の失敗：{r}', phInactive: '停止中',
     failViewMovie: '影片を表示', failElapsed: '所要', failGroupLabel: '原因別グループ',
     failOpenFolder: 'フォルダを開く', failNoAction: '未登録', failOpenErr: 'フォルダを開けません', failNoMovie: 'この影片は未登録です',
     confirmRetrySkips: 'スキップリストの動画を強制再スクレイプしますか（スキップ無視・既存データ上書きなし）？',

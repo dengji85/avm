@@ -1061,6 +1061,42 @@ def check_missing() -> Dict[str, Any]:
     return {"ok": True, **result}
 
 
+@router.get("/maintenance/providers-health")
+def providers_health(days: int = 30) -> Dict[str, Any]:
+    """数据源健康总览：按源聚合最近 N 天的真实刮削结果。
+
+    只列出**当前启用**的源（外加有历史记录但已停用的），每个都带成功率、最后一次
+    成功时间与最后一次失败原因，用来回答「刮不到是哪个源的问题」。
+    """
+    from . import providers
+
+    cfg = load_config()
+    active = providers.build_providers(cfg)
+    with db() as conn:
+        stat = {r["name"]: r for r in store.provider_health(conn, days)}
+
+    items: List[Dict[str, Any]] = []
+    for p in active:
+        s = stat.pop(p.name, None)
+        item = {
+            "name": p.name,
+            "label": getattr(p, "label", "") or p.name,
+            "active": True,
+            "total": 0, "ok": 0, "miss": 0, "error": 0, "rate": 0,
+            "last_ok_at": "", "last_at": "", "last_status": "", "last_reason": "",
+            "avg_ms": 0,
+        }
+        if s:
+            item.update({k: s[k] for k in
+                         ("total", "ok", "miss", "error", "rate", "last_ok_at",
+                          "last_at", "last_status", "last_reason", "avg_ms")})
+        items.append(item)
+    # 已停用但历史有记录的源：留在列表里，免得用户以为「这个源从没坏过」
+    for name, s in stat.items():
+        items.append({**s, "label": name, "active": False})
+    return {"ok": True, "days": days, "items": items}
+
+
 @router.get("/maintenance/missing")
 def missing_overview() -> Dict[str, Any]:
     """缺失文件明细（按影片聚合）：每部的缺失次数、缺失起始时间、宽限剩余、

@@ -2582,6 +2582,60 @@ def archive_stats(conn: sqlite3.Connection, limit: int = 12) -> Dict[str, Any]:
     }
 
 
+def provider_health(conn: sqlite3.Connection, days: int = 30) -> List[Dict[str, Any]]:
+    """按数据源聚合最近 N 天的真实刮削结果。
+
+    失败面板逐条看日志很费劲，这里回答的是「哪个源长期不行」：成功率、最后一次
+    成功时间、最后一次失败原因。数据来自真实刮削（scrape_logs），不需要额外发请求；
+    这也意味着一个源若长期没被调用，这里会显示 0 次，而不是伪造一个「正常」。
+    """
+    days = max(1, min(365, int(days or 30)))
+    since = "-%d days" % days
+    # 先取「历史上有过调用的全部源」，再逐源算窗口内统计 + 全表最近状态。
+    # 不能只按窗口分组：偶发使用的源（素人、FC2）可能 30 天里一次都没跑，
+    # 那样会整条消失，用户看不到「上次成功是几个月前」这个关键信息。
+    names = [str(r["provider"]) for r in query_all(
+        conn, "SELECT DISTINCT provider FROM scrape_logs "
+              "WHERE COALESCE(provider,'') <> '' ORDER BY provider")]
+    out: List[Dict[str, Any]] = []
+    for name in names:
+        w = query_one(
+            conn,
+            "SELECT COUNT(*) AS total, "
+            "SUM(CASE WHEN status='ok' THEN 1 ELSE 0 END) AS ok, "
+            "SUM(CASE WHEN status='miss' THEN 1 ELSE 0 END) AS miss, "
+            "SUM(CASE WHEN status='error' THEN 1 ELSE 0 END) AS err, "
+            "CAST(AVG(elapsed_ms) AS INTEGER) AS avg_ms "
+            "FROM scrape_logs WHERE provider = ? AND started_at >= datetime('now', ?)",
+            (name, since),
+        ) or {}
+        last = query_one(
+            conn,
+            "SELECT status, reason, started_at FROM scrape_logs "
+            "WHERE provider = ? ORDER BY id DESC LIMIT 1", (name,)) or {}
+        last_ok = query_one(
+            conn,
+            "SELECT started_at FROM scrape_logs WHERE provider = ? AND status = 'ok' "
+            "ORDER BY id DESC LIMIT 1", (name,)) or {}
+        total = int(w.get("total") or 0)
+        ok = int(w.get("ok") or 0)
+        out.append({
+            "name": name,
+            "total": total,
+            "ok": ok,
+            "miss": int(w.get("miss") or 0),
+            "error": int(w.get("err") or 0),
+            "rate": round(ok * 100.0 / total) if total else 0,
+            "last_ok_at": str(last_ok.get("started_at") or ""),
+            "last_at": str(last.get("started_at") or ""),
+            "last_status": str(last.get("status") or ""),
+            "last_reason": str(last.get("reason") or ""),
+            "avg_ms": int(w.get("avg_ms") or 0),
+        })
+    out.sort(key=lambda x: (-x["total"], x["name"]))
+    return out
+
+
 # ----------------------------------------------------------------- 孤儿数据
 
 def dangling_stats(conn: sqlite3.Connection) -> Dict[str, int]:
