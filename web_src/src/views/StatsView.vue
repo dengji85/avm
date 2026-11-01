@@ -1,7 +1,7 @@
 <script setup>
 import { ref, reactive, computed, onMounted, watch } from 'vue'
 import { state } from '../state.js'
-import { getStats, getStatsEnhanced, getRankings, listMovies, getStorage, getWatchHistory, getWatchAnalytics, getTasteProfile } from '../api.js'
+import { getStats, getStatsEnhanced, getRankings, listMovies, getStorage, getWatchHistory, getWatchAnalytics, getTasteProfile, getArchiveStats } from '../api.js'
 import { fmtMin, fmtSize, fmtDuration, fmtDate } from '../utils.js'
 import { t } from '../i18n/index.js'
 import { toast } from '../utils.js'
@@ -13,6 +13,8 @@ import YearReviewView from './YearReviewView.vue'
 const loading = ref(true)
 const error = ref('')
 const activeTab = ref('overview')
+/* 已离库：删除影片前写入的历史快照，统计用（影片不在库也仍然成立） */
+const archived = ref(null)
 
 /* ===== 观看明细（watchlog） ===== */
 const wlQuery = reactive({ from: '', to: '', method: '', q: '' })
@@ -250,14 +252,17 @@ async function loadAll() {
   loading.value = true
   error.value = ''
   try {
-    const [s, se, rPlay, rRate, ml, st] = await Promise.all([
+    const [s, se, rPlay, rRate, ml, st, arch] = await Promise.all([
       getStats(),
       getStatsEnhanced(),
       getRankings('play', 30),
       getRankings('rating', 30),
       listMovies({ limit: 1000 }),
       getStorage(),
+      // 已离库：读 history_archive 快照，影片删了统计依然成立
+      getArchiveStats().catch(() => null),
     ])
+    archived.value = arch
 
     overview.totalMovies = s.movies || 0
     overview.actresses = s.actresses || 0
@@ -729,6 +734,29 @@ function insightText(it) {
             <span class="fl">{{ c.label }}</span>
           </span>
         </button>
+      </div>
+
+      <!-- ===== 已离库：文件删了、历史还在（读删除前的快照） ===== -->
+      <div v-if="archived && archived.movies" class="arch-box">
+        <div class="arch-head">
+          <span class="arch-ico">🗄️</span>
+          <div class="arch-text">
+            <div class="arch-title">{{ $t('stats.archivedTitle', { n: archived.movies }) }}</div>
+            <div class="arch-sub">
+              {{ $t('stats.archivedSub', {
+                h: fmtRuntime(Math.round((archived.watched_sec || 0) / 60)),
+                p: archived.plays || 0,
+              }) }}
+            </div>
+          </div>
+        </div>
+        <div class="arch-list">
+          <div v-for="(a, i) in (archived.items || []).slice(0, 6)" :key="i" class="arch-item">
+            <code>{{ a.code || '—' }}</code>
+            <span class="ellipsis">{{ a.title || $t('maint.missNoTitle') }}</span>
+            <span class="arch-meta">{{ (a.archived_at || '').slice(0, 10) }}</span>
+          </div>
+        </div>
       </div>
 
       <!-- ===== Tab 分区：按"你想看什么"组织（总览 / 收藏 / 口味 / 观看 / 年度回顾） ===== -->
@@ -1451,6 +1479,19 @@ function insightText(it) {
 .sub { font-size: 13px; font-weight: 700; color: var(--c-text-2); margin: 18px 0 10px; padding-left: 9px; position: relative; }
 .sub::before { content: ''; position: absolute; left: 0; top: 2px; bottom: 2px; width: 3px; border-radius: 2px; background: var(--c-primary); }
 
+
+/* 已离库：删除影片的历史快照（影片不在库，记录仍在） */
+.arch-box { margin-top: 16px; padding: 12px 14px; border-radius: var(--r-md); border: 1px dashed var(--c-line-strong); background: var(--c-surface-2); }
+.arch-head { display: flex; align-items: center; gap: 10px; }
+.arch-ico { font-size: 18px; }
+.arch-text { display: flex; flex-direction: column; gap: 2px; }
+.arch-title { font-weight: 650; font-size: var(--fs-md); }
+.arch-sub { font-size: var(--fs-xs); color: var(--c-text-3); }
+.arch-list { margin-top: 10px; display: flex; flex-direction: column; gap: 4px; }
+.arch-item { display: flex; align-items: center; gap: 8px; font-size: var(--fs-sm); color: var(--c-text-2); }
+.arch-item code { flex: none; font-family: var(--font-mono, monospace); font-size: var(--fs-xs); color: var(--c-text-3); }
+.arch-item .ellipsis { flex: 1; min-width: 0; }
+.arch-meta { flex: none; font-size: var(--fs-xs); color: var(--c-text-3); }
 
 /* 收藏情况总览卡（横向紧凑，与 KPI 等高） */
 .filter-cards { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin-top: 16px; }

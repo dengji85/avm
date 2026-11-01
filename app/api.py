@@ -1120,6 +1120,39 @@ def archive_restore(movie_id: int) -> Dict[str, Any]:
     return {"ok": True, "restored": n}
 
 
+@router.get("/archive/stats")
+def archive_stats() -> Dict[str, Any]:
+    """已离库影片的汇总（读历史快照）：统计页展示「曾经看过、文件已不在」的部分。"""
+    with db() as conn:
+        return {"ok": True, **store.archive_stats(conn)}
+
+
+@router.get("/maintenance/orphans")
+def orphans() -> Dict[str, Any]:
+    """孤儿数据体检：数据库里指向已删影片的悬空行 + 磁盘上无主的封面 / 背景文件。"""
+    with db() as conn:
+        return {"ok": True, **store.orphan_media_stats(conn)}
+
+
+@router.post("/maintenance/orphans/clean")
+def clean_orphans(payload: Dict[str, Any] = Body(default={})) -> Dict[str, Any]:
+    """清理孤儿数据。targets 可取 db / covers / fanarts，默认只清数据库悬空行。
+
+    磁盘文件的清理会**按当前库内引用重新判定一遍**再删，不依赖前端传来的清单，
+    避免界面数据过期时误删。
+    """
+    targets = [str(t) for t in (payload.get("targets") or ["db"]) if str(t)]
+    result: Dict[str, Any] = {}
+    with db() as conn:
+        if "db" in targets:
+            result["db"] = store.clean_dangling(conn)
+        media = [t for t in targets if t in ("covers", "fanarts")]
+        if media:
+            result.update(store.clean_orphan_media(conn, media))
+        conn.commit()
+    return {"ok": True, **result}
+
+
 @router.get("/maintenance/storage-roots")
 def storage_roots() -> Dict[str, Any]:
     """各存储位置当前是否可用。
@@ -1792,6 +1825,10 @@ def _ai_scope_ids(kind: str, payload: Dict[str, Any]) -> List[int]:
     except (TypeError, ValueError):
         n = 200
     n = max(1, min(500, n))
+
+    # 归档影片已从正常视图隐藏，批量任务也不该再选中它们：没有文件，
+    # 翻译 / 简介跑起来只会失败，白白消耗额度。
+    clauses.append("COALESCE(m.archived_at,'') = ''")
 
     sql = "SELECT m.id FROM movies m"
     if clauses:

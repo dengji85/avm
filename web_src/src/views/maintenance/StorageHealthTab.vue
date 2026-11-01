@@ -1,7 +1,7 @@
 <script setup>
 import { ref, reactive, computed, onMounted } from 'vue'
 import { state } from '../../state.js'
-import { getStorage, getIntegrity, getHealthCheck, getDedup, resolveDedup, getQuality, sniffCovers, getSoftwareStorage, cleanSoftwareStorage, checkMissing, storageRoots } from '../../api.js'
+import { getStorage, getIntegrity, getHealthCheck, getDedup, resolveDedup, getQuality, sniffCovers, getSoftwareStorage, cleanSoftwareStorage, checkMissing, storageRoots, getOrphans, cleanOrphans } from '../../api.js'
 import { toast, confirmDialog, fmtSize } from '../../utils.js'
 import { t } from '../../i18n/index.js'
 import PageHead from '../../components/PageHead.vue'
@@ -52,6 +52,40 @@ async function runCheckMissing() {
     if (r.roots) rootStates.value = r.roots
     await load()
   } catch (e) { toast(e.message, 'err') } finally { checkMissingLoading.value = false }
+}
+
+/* 孤儿数据：数据库里指向已删影片的悬空行 + 磁盘上无主的封面 / 背景。
+   磁盘文件在删除前会按库内引用重新核对一遍，不依赖前端这份统计。 */
+const orphans = ref(null)
+const orphanBusy = ref(false)
+async function loadOrphans() {
+  try { orphans.value = await getOrphans() } catch (e) { orphans.value = null }
+}
+function orphanCount(kind) {
+  const o = orphans.value
+  if (!o) return 0
+  if (kind === 'db') {
+    const d = o.dangling || {}
+    return (d.ai_qa || 0) + (d.ai_jobs || 0) + (d.scrape_skip || 0) + (d.collection_cover || 0)
+  }
+  return ((o[kind] && o[kind].files) || 0)
+}
+async function cleanOrph(kind) {
+  const n = orphanCount(kind)
+  if (!n) return
+  const ok = await confirmDialog(t('maint.orphanCleanTitle'),
+    t('maint.orphanCleanDesc', { n }), { danger: true })
+  if (!ok) return
+  orphanBusy.value = true
+  try {
+    const r = await cleanOrphans({ targets: [kind] })
+    const done = kind === 'db'
+      ? Object.values(r.db || {}).reduce((a, b) => a + (Number(b) || 0), 0)
+      : (Number(r[kind]) || 0)
+    toast(t('maint.orphanCleaned', { n: done }), 'ok')
+    await loadOrphans()
+    if (kind !== 'db') await loadSoftware()
+  } catch (e) { toast(e.message, 'err') } finally { orphanBusy.value = false }
 }
 
 /* 存储位置健康：外接盘 / NAS 掉线时，这些位置下的影片不会被判缺失，
@@ -173,7 +207,7 @@ const yearBars = computed(() => bars(st.by_year, 'bytes', 'year'))
 const healthCount = (k) => (health.value && health.value.counts && health.value.counts[k]) || 0
 const healthList = (k) => (health.value && health.value[k]) || []
 
-onMounted(() => { load(); loadSoftware(); loadRoots() })
+onMounted(() => { load(); loadSoftware(); loadRoots(); loadOrphans() })
 </script>
 
 <template>
@@ -347,6 +381,41 @@ onMounted(() => { load(); loadSoftware(); loadRoots() })
       </div>
     </div>
 
+    <!-- 孤儿数据 -->
+    <div class="panel">
+      <div class="panel-head">
+        {{ $t('maint.orphanTitle') }}
+        <span class="sub">{{ $t('maint.orphanSub') }}</span>
+        <div class="spacer"></div>
+        <button class="btn tiny" :disabled="orphanBusy" @click="loadOrphans">
+          {{ orphanBusy ? $t('maint.checking') : $t('maint.missRefresh') }}
+        </button>
+      </div>
+      <div class="panel-body">
+        <div v-if="!orphans" class="empty compact"><div class="desc">{{ $t('maint.orphanHint') }}</div></div>
+        <template v-else>
+          <div class="orph-row">
+            <button class="orph-card" :class="{ zero: !orphanCount('db') }"
+                    :disabled="orphanBusy || !orphanCount('db')" @click="cleanOrph('db')">
+              <b class="tabular">{{ orphanCount('db') }}</b>
+              <span>{{ $t('maint.orphanDb') }}</span>
+            </button>
+            <button class="orph-card" :class="{ zero: !orphanCount('covers') }"
+                    :disabled="orphanBusy || !orphanCount('covers')" @click="cleanOrph('covers')">
+              <b class="tabular">{{ orphanCount('covers') }}</b>
+              <span>{{ $t('maint.orphanCovers', { s: fmtSize((orphans.covers || {}).bytes) }) }}</span>
+            </button>
+            <button class="orph-card" :class="{ zero: !orphanCount('fanarts') }"
+                    :disabled="orphanBusy || !orphanCount('fanarts')" @click="cleanOrph('fanarts')">
+              <b class="tabular">{{ orphanCount('fanarts') }}</b>
+              <span>{{ $t('maint.orphanFanarts', { s: fmtSize((orphans.fanarts || {}).bytes) }) }}</span>
+            </button>
+          </div>
+          <p class="muted sm orph-tip">{{ $t('maint.orphanTip') }}</p>
+        </template>
+      </div>
+    </div>
+
     <!-- 劣质片 -->
     <div class="panel">
       <div class="panel-head">
@@ -405,6 +474,15 @@ onMounted(() => { load(); loadSoftware(); loadRoots() })
 .sw-clean-item { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-2); font-size: var(--fs-sm); color: var(--c-text-2); }
 .sw-clean-row { display: flex; gap: var(--sp-2); flex-wrap: wrap; margin-top: var(--sp-1); }
 .empty.compact { padding: var(--sp-6) var(--sp-4); }
+/* 孤儿数据卡片 */
+.orph-row { display: flex; gap: var(--sp-2); flex-wrap: wrap; }
+.orph-card { display: flex; flex-direction: column; align-items: center; gap: 2px; min-width: 130px; padding: var(--sp-2) var(--sp-3); border-radius: var(--r-md); border: 1px solid var(--c-line); background: var(--c-surface-2); color: var(--c-text); cursor: pointer; }
+.orph-card:hover:not(:disabled) { border-color: var(--c-primary); background: var(--c-primary-soft); }
+.orph-card.zero { opacity: .5; cursor: default; }
+.orph-card b { font-size: var(--fs-xl); font-weight: 650; }
+.orph-card span { font-size: var(--fs-xs); color: var(--c-text-3); text-align: center; }
+.orph-tip { margin-top: var(--sp-2); }
+
 /* 存储位置不可用提示条 */
 .root-warn { display: flex; gap: var(--sp-3); align-items: flex-start; padding: var(--sp-3); margin-bottom: var(--sp-3); border-radius: var(--r-md); border: 1px solid var(--c-warn); background: color-mix(in srgb, var(--c-warn) 10%, transparent); }
 .rw-ico { color: var(--c-warn); font-size: 16px; line-height: 1.3; }

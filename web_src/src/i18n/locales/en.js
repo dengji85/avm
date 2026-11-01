@@ -601,6 +601,7 @@ export default {
     unmatchedTitle: 'Unmatched (needs manual handling)',
   },
   stats: {
+    archivedTitle: '{n} title(s) no longer in library (history kept)', archivedSub: 'watched {h} in total · {p} plays',
     title: 'Stats',
     sub: 'Collection overview of {n} movies',
     refresh: 'Refresh',
@@ -1653,6 +1654,12 @@ export default {
     missArchived: '{n} archived', missForgot: '{n} file records removed, {a} archived',
     missPurged: '{n} deleted, {s} history snapshots saved', missRestore: 'Restore',
     missRestored: '{n} restored', missArchivedAt: 'Archived at',
+    orphanTitle: 'Orphaned data', orphanSub: 'Records pointing at deleted titles and unreferenced images',
+    orphanHint: 'Click Refresh to scan', orphanDb: 'dangling DB rows',
+    orphanCovers: 'orphan covers {s}', orphanFanarts: 'orphan fanart {s}',
+    orphanTip: 'Only entries with no matching title are removed; disk images are re-checked against library references before deletion.',
+    orphanCleanTitle: 'Clean orphaned data', orphanCleanDesc: 'Removes {n} orphaned item(s). No title in the library is affected.',
+    orphanCleaned: '{n} cleaned',
 
     checking: 'Checking…', rerunHealth: 'Re-check', runHealth: 'Start check', clickToHealth: 'Click "Start check" to scan for potential issues',
     onlyShow: 'Showing first {n} of {total}',

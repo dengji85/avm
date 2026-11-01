@@ -593,6 +593,7 @@ export default {
     unmatchedTitle: '自動マッチ不可（手動対応が必要）',
   },
   stats: {
+    archivedTitle: 'ライブラリ外 {n} 件（履歴は保持）', archivedSub: '累計視聴 {h} · 再生 {p} 回',
     title: '統計',
     sub: '{n} 作品のコレクション全景',
     refresh: '更新',
@@ -1612,6 +1613,12 @@ export default {
     missArchived: '{n} 件をアーカイブしました', missForgot: '{n} 件のファイル記録を削除し、{a} 件をアーカイブしました',
     missPurged: '{n} 件を削除し、{s} 件の履歴スナップショットを保存しました', missRestore: '復元',
     missRestored: '{n} 件を復元しました', missArchivedAt: 'アーカイブ日時',
+    orphanTitle: '孤立データ', orphanSub: '削除済み作品を指す記録と参照のない画像',
+    orphanHint: '「再読み込み」で一度スキャンします', orphanDb: 'DB の孤立レコード',
+    orphanCovers: '参照のないカバー {s}', orphanFanarts: '参照のない背景 {s}',
+    orphanTip: '対応する作品が本当にない項目だけを削除します。画像は削除前にライブラリの参照と照合します。',
+    orphanCleanTitle: '孤立データを整理', orphanCleanDesc: '{n} 件の孤立データを削除します。ライブラリ内の作品には影響しません。',
+    orphanCleaned: '{n} 件を整理しました',
 
     checking: '検出中…', rerunHealth: '再診断', runHealth: '診断開始', clickToHealth: '「診断開始」をクリックして潜在的問題をスキャン',
     onlyShow: '最初の {n} 件のみ表示（全 {total} 件）',

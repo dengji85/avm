@@ -611,6 +611,7 @@ export default {
     unmatchedTitle: '未能自动匹配（需手动处理）',
   },
   stats: {
+    archivedTitle: '已离库 {n} 部（历史保留）', archivedSub: '累计观看 {h} · 播放 {p} 次',
     title: '统计',
     sub: '{n} 部影片的收藏全景',
     refresh: '刷新',
@@ -1665,6 +1666,12 @@ export default {
     missArchived: '已归档 {n} 部', missForgot: '移除 {n} 条文件记录，归档 {a} 部',
     missPurged: '已删除 {n} 部，写入 {s} 条历史快照', missRestore: '恢复',
     missRestored: '已恢复 {n} 部', missArchivedAt: '归档于',
+    orphanTitle: '孤儿数据', orphanSub: '指向已删影片的记录与无主图片',
+    orphanHint: '点「刷新」扫描一次', orphanDb: '数据库悬空记录',
+    orphanCovers: '无主封面 {s}', orphanFanarts: '无主背景 {s}',
+    orphanTip: '只删除确实没有对应影片的条目；磁盘图片在删除前会按库内引用重新核对一遍。',
+    orphanCleanTitle: '清理孤儿数据', orphanCleanDesc: '将删除 {n} 项无主数据，不影响任何在库影片。',
+    orphanCleaned: '已清理 {n} 项',
 
     checking: '检测中…', rerunHealth: '重新体检', runHealth: '开始体检', clickToHealth: '点击「开始体检」扫描潜在问题',
     onlyShow: '仅显示前 {n} 条，共 {total} 条',

@@ -2555,6 +2555,166 @@ def missing_overview(conn: sqlite3.Connection) -> Dict[str, Any]:
     }
 
 
+def archive_stats(conn: sqlite3.Connection, limit: int = 12) -> Dict[str, Any]:
+    """已离库影片的汇总（读 history_archive 快照）：统计页用它展示
+    「曾经看过、但文件已不在库里」的那部分，删除影片后数据依然成立。"""
+    row = query_one(
+        conn,
+        "SELECT COUNT(*) AS n, COALESCE(SUM(watched_sec),0) AS secs, "
+        "COALESCE(SUM(play_count),0) AS plays FROM history_archive") or {}
+    items = query_all(
+        conn,
+        "SELECT code, title, cover, watched_sec, play_count, rating, favorite, "
+        "archived_at, reason FROM history_archive ORDER BY archived_at DESC, id DESC LIMIT ?",
+        (max(1, min(50, int(limit or 12))),))
+    return {
+        "movies": int(row.get("n") or 0),
+        "watched_sec": float(row.get("secs") or 0),
+        "plays": int(row.get("plays") or 0),
+        "items": items,
+    }
+
+
+# ----------------------------------------------------------------- 孤儿数据
+
+def dangling_stats(conn: sqlite3.Connection) -> Dict[str, int]:
+    """数据库里指向「已不存在影片」的悬空行。
+
+    这几张表当初没建外键（ai_qa / ai_jobs / scrape_skip），
+    `collections.cover_movie_id` 也是裸 id，删片后会留下永远指向空气的记录。
+    """
+    def n(sql: str) -> int:
+        return int(scalar(conn, sql) or 0)
+
+    return {
+        "ai_qa": n("SELECT COUNT(*) FROM ai_qa WHERE movie_id NOT IN (SELECT id FROM movies)"),
+        "ai_jobs": n("SELECT COUNT(*) FROM ai_jobs WHERE movie_id NOT IN (SELECT id FROM movies)"),
+        "scrape_skip": n("SELECT COUNT(*) FROM scrape_skip "
+                         "WHERE movie_id NOT IN (SELECT id FROM movies)"),
+        "collection_cover": n(
+            "SELECT COUNT(*) FROM collections WHERE COALESCE(cover_movie_id,0) <> 0 "
+            "AND cover_movie_id NOT IN (SELECT id FROM movies)"),
+    }
+
+
+def clean_dangling(conn: sqlite3.Connection) -> Dict[str, int]:
+    """清理悬空行。只删「指向已删影片」的那些，不动任何有效数据。"""
+    out = {
+        "ai_qa": conn.execute(
+            "DELETE FROM ai_qa WHERE movie_id NOT IN (SELECT id FROM movies)").rowcount,
+        "ai_jobs": conn.execute(
+            "DELETE FROM ai_jobs WHERE movie_id NOT IN (SELECT id FROM movies)").rowcount,
+        "scrape_skip": conn.execute(
+            "DELETE FROM scrape_skip WHERE movie_id NOT IN (SELECT id FROM movies)").rowcount,
+        "collection_cover": conn.execute(
+            "UPDATE collections SET cover_movie_id = NULL "
+            "WHERE COALESCE(cover_movie_id,0) <> 0 "
+            "AND cover_movie_id NOT IN (SELECT id FROM movies)").rowcount,
+    }
+    return {k: int(v or 0) for k, v in out.items()}
+
+
+def _orphan_files(dir_path: Path, valid_stems: set, samples: int = 8) -> Dict[str, Any]:
+    """目录下「主文件名不在库里」的文件（海报 / 海报元信息跟着主封面一起算）。
+
+    只统计不删：covers 目录里可能有人手动放图，交给用户显式点按钮。
+    """
+    n = 0
+    total = 0
+    found: List[str] = []
+    try:
+        entries = list(dir_path.iterdir())
+    except OSError:
+        entries = []
+    for f in entries:
+        try:
+            if not f.is_file():
+                continue
+            name = f.name
+            if name.startswith(("_extract_", "_cand_", "_dbg_", ".")):
+                continue
+            stem = name
+            for suffix in ("_poster.json", "_poster.jpg"):
+                if stem.endswith(suffix):
+                    stem = stem[: -len(suffix)]
+                    break
+            else:
+                stem = Path(stem).stem
+            if stem in valid_stems:
+                continue
+            n += 1
+            total += f.stat().st_size
+            if len(found) < samples:
+                found.append(name)
+        except OSError:
+            continue
+    return {"files": n, "bytes": total, "samples": found}
+
+
+def orphan_media_stats(conn: sqlite3.Connection) -> Dict[str, Any]:
+    """磁盘上无主的封面 / 背景文件（预览目录的孤儿另由 software_storage_stats 统计）。"""
+    from .config import COVER_DIR, fanart_dir
+
+    cover_stems = {Path(str(r["cover"])).stem for r in query_all(
+        conn, "SELECT DISTINCT cover FROM movies WHERE COALESCE(cover,'') <> ''")}
+    fanart_stems = {Path(str(r["fanart"])).stem for r in query_all(
+        conn, "SELECT DISTINCT fanart FROM movies WHERE COALESCE(fanart,'') <> ''")}
+    return {
+        "covers": _orphan_files(COVER_DIR, cover_stems),
+        "fanarts": _orphan_files(fanart_dir(), fanart_stems),
+        "dangling": dangling_stats(conn),
+    }
+
+
+def clean_orphan_media(conn: sqlite3.Connection, targets: Sequence[str]) -> Dict[str, Any]:
+    """删除无主封面 / 背景文件。targets 取 'covers' / 'fanarts'。
+
+    先按库内引用集合重新判定一遍（而不是用前端传来的清单），避免界面数据过期误删。
+    """
+    from .config import COVER_DIR, fanart_dir
+
+    done: Dict[str, int] = {}
+    freed = 0
+    for target in targets or []:
+        if target == "covers":
+            dir_path, sql = COVER_DIR, "SELECT DISTINCT cover FROM movies WHERE COALESCE(cover,'') <> ''"
+        elif target == "fanarts":
+            dir_path, sql = fanart_dir(), "SELECT DISTINCT fanart FROM movies WHERE COALESCE(fanart,'') <> ''"
+        else:
+            continue
+        stems = {Path(str(r[0])).stem for r in conn.execute(sql).fetchall()}
+        removed = 0
+        try:
+            entries = list(dir_path.iterdir())
+        except OSError:
+            entries = []
+        for f in entries:
+            try:
+                if not f.is_file():
+                    continue
+                name = f.name
+                if name.startswith(("_extract_", "_cand_", "_dbg_", ".")):
+                    continue
+                stem = name
+                for suffix in ("_poster.json", "_poster.jpg"):
+                    if stem.endswith(suffix):
+                        stem = stem[: -len(suffix)]
+                        break
+                else:
+                    stem = Path(stem).stem
+                if stem in stems:
+                    continue
+                sz = f.stat().st_size
+                f.unlink()
+                removed += 1
+                freed += sz
+            except OSError:
+                continue
+        done[target] = removed
+    done["bytes"] = freed
+    return done
+
+
 def list_archived(conn: sqlite3.Connection, page: int = 1, size: int = 60) -> Dict[str, Any]:
     """已归档影片列表（保留记录与历史，只是不在正常视图里）。"""
     page = max(1, int(page or 1))
