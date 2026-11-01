@@ -194,6 +194,13 @@ DEFAULT_CONFIG: Dict[str, Any] = {
             "name": "AV-Wiki (素人)",
             "base_url": "https://av-wiki.net",
         },
+        # FC2-PPV 专用元数据源（MetaTube 内置的 FC2 源失效后的替代）：
+        # 只对 FC2 番号发请求，其它番号在 can_handle 阶段就跳过，零开销。
+        "fc2db": {
+            "enabled": True,
+            "name": "FC2DB",
+            "base_url": "https://fc2db.net",
+        },
         "http_json": {
             "enabled": False,
             "name": "自定义 JSON 接口",

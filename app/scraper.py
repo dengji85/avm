@@ -25,7 +25,7 @@ from .config import load_config, avatar_dir, nfo_export_cfg
 from .db import connect, query_all
 from .jobs import SCRAPE
 from .providers import build_providers
-from .providers.base import NetBlocked
+from .providers.base import NetBlocked, NetError
 
 # 抓取结果里可以直接写回影片表的文本字段
 _TEXT_FIELDS = ("title", "original_title", "plot", "release_date", "director")
@@ -56,6 +56,10 @@ def _classify_error(exc: BaseException) -> str:
     - 'miss'    : 明确无此片（HTTP 4xx）。数据源稳定没有，跳过可省时间。
     - 'parse_err': 其它异常（解析崩溃、字段错误等）。通常稳定失败，计入跳过更省心。
     """
+    if isinstance(exc, NetError):
+        # 数据源临时故障：源站抽风、本地刮削服务没启动、鉴权失败等。
+        # 明确不是「这部片不存在」，不能写进跳过名单。
+        return "neterr"
     if not _HAS_REQ:
         return "parse_err"
     if isinstance(exc, NetBlocked):
@@ -417,11 +421,15 @@ def scrape_one(conn, movie_id: int, providers: List[Any], cfg: Dict[str, Any],
     primary_name = None
     best_cover = None       # (rank, url, provider)
     covers_all: List[tuple] = []   # 所有封面候选，重刮时按实际像素挑最大
+    provider_errors: List[str] = []  # 逐源失败原因（单源异常不再中断整部刮削）
     for provider in run_providers:
         try:
             meta = provider.fetch(movie)
         except Exception as exc:
-            return {"ok": False, "reason": f"{provider.name} 出错: {exc}"}
+            # 以前这里直接 return，等于「第一个源网络抖一下，后面的源全不跑」。
+            # 与批量版保持一致：单源失败隔离，继续下一个源。
+            provider_errors.append(f"{provider.name}: {getattr(provider, 'last_error', '') or exc}")
+            continue
         if not meta:
             continue
         if primary_meta is None:
@@ -446,6 +454,9 @@ def scrape_one(conn, movie_id: int, providers: List[Any], cfg: Dict[str, Any],
                 best_cover = (rank, url, provider.name)
 
     if primary_meta is None:
+        if provider_errors:
+            return {"ok": False,
+                    "reason": "所有数据源均未命中（" + "；".join(provider_errors)[:300] + "）"}
         return {"ok": False, "reason": "所有数据源均未命中"}
     # 重刮（overwrite）：多个候选时实际下载比像素面积，取最大的一张
     if overwrite and len(covers_all) > 1:

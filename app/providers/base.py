@@ -26,6 +26,15 @@ class NetBlocked(Exception):
     """
 
 
+class NetError(Exception):
+    """数据源临时故障：连接失败 / 超时 / 5xx / 服务未启动 / 鉴权失败。
+
+    与 NetBlocked 一样属「下次可能成功」，调度层据此**不**把影片写进跳过名单。
+    没有这个区分时，源站抽风或本地服务没启动一次，就会让影片被永久判为
+    「刮不到」——用户再点刮削也永远不会重试它。
+    """
+
+
 class BaseProvider:
     name: str = "base"
     label: str = "基础数据源"

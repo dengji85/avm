@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import os
 import platform
+import re
 import socket
 import subprocess
 import time
@@ -48,6 +49,23 @@ _ASSETS = {
 
 _PROC: Optional[subprocess.Popen] = None
 _PROC_PORT = 0
+
+#: 搜索是「一次请求扇出到 30+ 个源」，实测 8–22s 才返回；沿用 15s 的普通请求
+#: 超时会被误判成「连接失败」（然后整部片被判未命中）。搜索单独给一个下限。
+_SEARCH_MIN_TIMEOUT = 25.0
+
+
+class MetaTubeError(RuntimeError):
+    """MetaTube 请求失败，带 ``kind`` 供调度层区分「确实没有」与「临时故障」。
+
+    * ``miss``   —— 服务端 404：这次确实没有命中，可以当作无此片；
+    * ``neterr`` —— 连接失败 / 超时 / 5xx / 鉴权失败 / 响应不是 JSON：属临时
+      故障，绝不能把影片写进「跳过名单」永久放弃（服务没启动一次就永久失效）。
+    """
+
+    def __init__(self, message: str, kind: str = "neterr") -> None:
+        super().__init__(message)
+        self.kind = kind
 
 
 # ---------------------------------------------------------------- 路径与安装状态
@@ -155,23 +173,25 @@ def _request(cfg: Dict[str, Any], path: str, params: Optional[Dict[str, Any]] = 
             verify=outbound_verify_tls(),
         )
     except Exception as e:  # 连接拒绝 / DNS / 超时 / TLS
-        raise RuntimeError("连接 MetaTube 失败：%s" % e)
+        raise MetaTubeError("连接 MetaTube 失败：%s" % e, "neterr")
     if resp.status_code == 401:
-        raise RuntimeError("MetaTube 拒绝了令牌（401），请检查 token")
+        raise MetaTubeError("MetaTube 拒绝了令牌（401），请检查 token", "neterr")
+    # 只有 404 才是「这次确实没有这部片」；其它状态码一律当临时故障，
+    # 否则一次服务端抽风就会把影片钉进跳过名单，再也不会重试。
     if resp.status_code == 404:
-        raise RuntimeError("MetaTube 没有命中（404）")
+        raise MetaTubeError("MetaTube 没有命中（404）", "miss")
     if resp.status_code >= 400:
         body = (resp.text or "").strip().replace("\n", " ")[:160]
         hint = ""
         if resp.status_code in (502, 503, 504):
             hint = "（若填的是本机地址，请确认服务已启动且未被代理拦截）"
-        raise RuntimeError("MetaTube 返回 HTTP %d%s %s" % (resp.status_code, hint, body))
+        raise MetaTubeError("MetaTube 返回 HTTP %d%s %s" % (resp.status_code, hint, body), "neterr")
     try:
         payload = resp.json()
     except Exception:
-        raise RuntimeError("MetaTube 返回的不是 JSON")
+        raise MetaTubeError("MetaTube 返回的不是 JSON", "neterr")
     if isinstance(payload, dict) and payload.get("error"):
-        raise RuntimeError(str(payload["error"]))
+        raise MetaTubeError(str(payload["error"]), "neterr")
     return payload.get("data") if isinstance(payload, dict) else payload
 
 
@@ -199,7 +219,9 @@ def providers() -> Dict[str, Any]:
 
 
 def search(code: str) -> List[Dict[str, Any]]:
-    data = _request(metatube_cfg(), "/v1/movies/search", {"q": code, "fallback": "true"})
+    cfg = metatube_cfg()
+    timeout = max(float(cfg.get("timeout") or 15), _SEARCH_MIN_TIMEOUT)
+    data = _request(cfg, "/v1/movies/search", {"q": code, "fallback": "true"}, timeout=timeout)
     return data if isinstance(data, list) else []
 
 
@@ -212,6 +234,35 @@ def movie(provider: str, movie_id: str) -> Dict[str, Any]:
 
 def _num(s: str) -> str:
     return "".join(ch for ch in (s or "").lower() if ch.isalnum())
+
+
+def _digits(s: str) -> str:
+    """取番号里的编号段（最长的一段连续数字）。
+
+    不能把所有数字字符拼起来：``FC2`` 自己就带一个 2，
+    ``FC2-PPV-4740638`` 拼出来会变成 ``24740638``，反而匹配不上。
+    """
+    runs = re.findall(r"\d+", str(s or ""))
+    return max(runs, key=len) if runs else ""
+
+
+def _same_number(have: str, want: str) -> bool:
+    """判断命中项与目标是不是同一部片（番号比对）。
+
+    先按「去掉标点后全等」比对；FC2 番号在各源写法不统一
+    （``FC2-PPV-1234567`` / ``FC2-1234567`` / 纯数字 ``1234567``），再按数字段
+    兜底 —— FC2 的编号段全局唯一，按它比对不会误配到别的番号；非 FC2 番号
+    仍按严格全等，避免 ``139`` 与 ``SSIS-139`` 这类近似结果被误收。
+    """
+    a, b = _num(have), _num(want)
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    if "fc2" in a or "fc2" in b:
+        da, db = _digits(have), _digits(want)
+        return bool(da) and da == db
+    return False
 
 
 def _rating(score: Any) -> str:
@@ -259,11 +310,15 @@ def pick_exact(hits: List[Dict[str, Any]], code: str) -> Optional[Dict[str, Any]
     want = _num(code)
     if not want:
         return hits[0] if hits else None
-    exact = [h for h in hits if _num(str(h.get("number") or "")) == want]
+    # number 缺失时退回 id：部分源（如 FC2PPVDB）只在 id 里带编号。
+    exact = [h for h in hits
+             if _same_number(str(h.get("number") or h.get("id") or ""), code)]
     if exact:
-        # 官方源优先（fanza/mgstage/sod 的字段质量高于第三方站）
-        official = ("fanza", "mgstage", "sod", "faleno", "duga")
-        exact.sort(key=lambda h: 0 if str(h.get("provider") or "") in official else 1)
+        # 官方源 / FC2 专用库优先（字段质量高于第三方聚合站）。
+        # 注意 provider 名是 ``FANZA`` / ``FC2PPVDB`` 这种大写，必须归一化，
+        # 否则整条优先级规则永远不生效。
+        official = ("fanza", "mgstage", "sod", "faleno", "duga", "fc2ppvdb", "fc2hub")
+        exact.sort(key=lambda h: 0 if str(h.get("provider") or "").lower() in official else 1)
         return exact[0]
     return None
 

@@ -6,6 +6,8 @@
 * ``javbus``    在线抓取 JavBus 详情页（封面走 DMM 图床直连，主源）
 * ``javdb``     在线抓取 JavDB（数据更全，需代理/ Cookie，备选）
 * ``avwiki``    av-wiki.net 素人片源（化名→真名映射，无封面，封面回退其它源）
+* ``fc2db``     fc2db.net 的 FC2-PPV 专用元数据（只处理 FC2 番号）
+* ``metatube``  外部刮削引擎（官方源 / 无码 / 素人聚合，需配套服务）
 * ``local_nfo``  读取影片同目录下的 .nfo / .json 元数据（离线，推荐）
 * ``http_json``  调用用户配置的 JSON 接口
 * ``http_html``  按用户配置的 CSS 选择器解析用户指定的网页
@@ -18,6 +20,7 @@ from typing import Any, Dict, List, Optional, Type
 
 from .avwiki import AvWikiProvider
 from .base import BaseProvider, MetaResult
+from .fc2db import Fc2dbProvider
 from .http_html import HttpHtmlProvider
 from .http_json import HttpJsonProvider
 from .javbus import JavBusProvider
@@ -28,6 +31,7 @@ from .metatube import MetatubeProvider
 REGISTRY: Dict[str, Type[BaseProvider]] = {
     JavBusProvider.name: JavBusProvider,
     JavDBProvider.name: JavDBProvider,
+    Fc2dbProvider.name: Fc2dbProvider,
     MetatubeProvider.name: MetatubeProvider,
     AvWikiProvider.name: AvWikiProvider,
     LocalNfoProvider.name: LocalNfoProvider,
@@ -41,7 +45,10 @@ REGISTRY: Dict[str, Type[BaseProvider]] = {
 #: nfo 时它直接未命中并落到在线源，没有任何额外成本。置顶可保证本地整理
 #: 的元数据不被在线源覆盖（早期实现里本地 nfo 排在在线源之后，读到的标题 /
 #: 女优 / 类型会被整体丢弃，只在缺封面时补图）。
-ALWAYS_FIRST = ("local_nfo",)
+#: fc2db 是 FC2 专用源，只对 FC2 番号发请求（其余番号 can_handle 直接跳过，
+#: 零开销）；排在前面是为了抢在 javdb 搜索卡之前当主源 —— 搜索卡对 FC2 只
+#: 给「标题=番号」的占位值，一旦它先命中，后面源的真实标题就补不进来了。
+ALWAYS_FIRST = ("local_nfo", "fc2db")
 
 #: 固定沉底的数据源：无论用户在设置里怎么排序，都强制放到最后执行。
 #: av-wiki 只收录素人片，且抓取开销大（走 CDP）。若排在前面，普通番号也要
@@ -78,16 +85,6 @@ def build_providers(cfg: Dict[str, Any]) -> List[BaseProvider]:
             continue
         if inst.enabled():
             providers.append(inst)
-    if len(providers) > 1:
-        # 稳定置顶：保持其余源的相对顺序，只把 ALWAYS_FIRST 提到最前
-        head = [p for p in providers if p.name in ALWAYS_FIRST]
-        if head:
-            rest = [p for p in providers if p.name not in ALWAYS_FIRST]
-            providers = head + rest
-        # 稳定沉底：保持其余源的相对顺序，只把 ALWAYS_LAST 移到末尾
-        tail = [p for p in providers if p.name in ALWAYS_LAST]
-        if tail:
-            providers = [p for p in providers if p.name not in ALWAYS_LAST] + tail
     # 兜底：已启用却不在 order 里的源（历史上拖动排序只保存启用中的源，会把
     # 当时关闭的源挤出顺序）追加到末尾，避免「开关开着却永远不跑」的静默失效。
     listed = {p.name for p in providers}
@@ -100,6 +97,18 @@ def build_providers(cfg: Dict[str, Any]) -> List[BaseProvider]:
             continue
         if inst.enabled():
             providers.append(inst)
+    # 重排放在兜底追加之后：新源（如 fc2db）通常是靠兜底才进链的，若先重排，
+    # 它在列表里还不存在，ALWAYS_FIRST 就对它不生效（FC2 片的占位标题会抢主源）。
+    if len(providers) > 1:
+        # 稳定置顶：保持其余源的相对顺序，只把 ALWAYS_FIRST 提到最前
+        head = [p for p in providers if p.name in ALWAYS_FIRST]
+        if head:
+            rest = [p for p in providers if p.name not in ALWAYS_FIRST]
+            providers = head + rest
+        # 稳定沉底：保持其余源的相对顺序，只把 ALWAYS_LAST 移到末尾
+        tail = [p for p in providers if p.name in ALWAYS_LAST]
+        if tail:
+            providers = [p for p in providers if p.name not in ALWAYS_LAST] + tail
     return providers
 
 

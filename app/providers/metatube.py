@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional
 
-from .base import BaseProvider, MetaResult
+from .base import BaseProvider, MetaResult, NetError
 
 
 class MetatubeProvider(BaseProvider):
@@ -36,6 +36,15 @@ class MetatubeProvider(BaseProvider):
         if not code:
             return None
         from .. import metatube
+        from ..config import metatube_cfg
+
+        # 托管模式但服务没起来：直接给可操作提示。以前是每部片都去撞一次连接
+        # 失败（约 2s），批量几百部就是分钟级白等，而且失败还被当成「无此片」。
+        cfg = metatube_cfg(self.cfg)
+        if str(cfg.get("mode") or "external") == "managed":
+            if metatube.installed() and not metatube.running():
+                self.last_error = "MetaTube 托管服务未启动：请到「扩展组件」页点击启动"
+                raise NetError(self.last_error)
 
         try:
             hits = metatube.search(code)
@@ -47,6 +56,13 @@ class MetatubeProvider(BaseProvider):
             if not meta.get("title"):
                 return None
             return self.normalize(meta, self.name)
-        except Exception as e:  # 连接失败 / 401 / 超时：只记录，不影响其它源
+        except metatube.MetaTubeError as e:
+            self.last_error = str(e)
+            if getattr(e, "kind", "") == "miss":
+                return None  # 服务端明确 404：这次确实没有，算未命中
+            # 连接失败 / 超时 / 5xx / 鉴权失败：临时故障，抛出去让调度层
+            # 记成 neterr（不进跳过名单、可重试），而不是静默当成「无此片」。
+            raise NetError(str(e)) from e
+        except Exception as e:  # 其它异常（字段解析等）：只记录，不影响其它源
             self.last_error = str(e)
             return None
