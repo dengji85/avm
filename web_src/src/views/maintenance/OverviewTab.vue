@@ -21,6 +21,10 @@ async function loadTasks() {
   try { tasks.value = (await scrapeTasks(8)).items || [] } catch { tasks.value = [] }
 }
 
+/* 不可用的存储位置（外接盘 / NAS 没插）：概览页先说明原因，
+   否则用户看到「缺失文件 200+」会以为库坏了 */
+const downRoots = computed(() => (summary.value && summary.value.roots_down) || [])
+
 const todos = computed(() => {
   const s = summary.value || {}
   return [
@@ -154,6 +158,11 @@ onMounted(() => { loadSummary(); loadTasks() })
       <section class="panel">
         <div class="panel-head">{{ $t('maint.ovTodoTitle') }}</div>
         <div class="panel-body">
+          <div v-if="downRoots.length" class="ov-roots">
+            <span>⚠ {{ $t('maint.rootsDown', { n: downRoots.length }) }}</span>
+            <span class="ov-roots-hint">{{ $t('maint.rootsDownHint') }}</span>
+            <button class="link-btn" @click="state.view = 'maintenance'; state.maintTab = 'storage'">{{ $t('maint.rootRecheck') }} →</button>
+          </div>
           <div class="todo-grid">
             <button v-for="t in todos" :key="t.key" class="todo" :class="{ zero: !t.n }" @click="goTodo(t)">
               <span class="ti">{{ t.icon }}</span>
@@ -208,6 +217,9 @@ onMounted(() => { loadSummary(); loadTasks() })
 .prog-stats { display: flex; gap: var(--sp-3); flex-wrap: wrap; }
 .ps { display: flex; flex-direction: column; } .ps b { font-size: var(--fs-lg); } .ps span { font-size: var(--fs-xs); color: var(--c-text-3); }
 .last-scan { margin-top: var(--sp-2); font-size: var(--fs-sm); color: var(--c-text-2); border-top: 1px dashed var(--c-line); padding-top: var(--sp-2); }
+/* 存储位置不可用提示：先说明原因，再看待办数字 */
+.ov-roots { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-2); margin-bottom: var(--sp-3); padding: var(--sp-2) var(--sp-3); border-radius: var(--r-sm); border: 1px solid var(--c-warn); background: color-mix(in srgb, var(--c-warn) 10%, transparent); font-size: var(--fs-sm); }
+.ov-roots-hint { color: var(--c-text-3); font-size: var(--fs-xs); flex: 1; min-width: 200px; }
 .todo-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: var(--sp-2); }
 .todo { display: flex; flex-direction: column; align-items: center; gap: 1px; padding: var(--sp-2); border-radius: var(--r-sm); border: 1px solid var(--c-line); background: var(--c-surface-2); cursor: pointer; color: var(--c-text); }
 .todo:hover:not(.zero) { border-color: var(--c-primary); background: var(--c-primary-soft); }

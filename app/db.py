@@ -222,6 +222,39 @@ CREATE TABLE IF NOT EXISTS ai_qa (
     created_at TEXT DEFAULT (datetime('now','localtime'))
 );
 CREATE INDEX IF NOT EXISTS idx_aiqa_movie ON ai_qa(movie_id, id);
+
+-- 影片被清理前的历史快照：与 movies 解耦，删片后仍能统计「看过多少」。
+-- 清理动作的顺序必须是「先写快照 → 再删影片」，否则观看历史不可重建。
+CREATE TABLE IF NOT EXISTS history_archive (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    code           TEXT DEFAULT '',
+    title          TEXT DEFAULT '',
+    cover          TEXT DEFAULT '',
+    runtime        INTEGER DEFAULT 0,
+    play_count     INTEGER DEFAULT 0,
+    watched_sec    REAL DEFAULT 0,
+    finished       INTEGER DEFAULT 0,
+    progress       REAL DEFAULT 0,
+    rating         REAL DEFAULT 0,
+    favorite       INTEGER DEFAULT 0,
+    genres_json    TEXT DEFAULT '',
+    actresses_json TEXT DEFAULT '',
+    files_json     TEXT DEFAULT '',   -- 原文件路径与大小，日后找回有据可查
+    reason         TEXT DEFAULT '',   -- file_deleted / user_purge
+    archived_at    TEXT DEFAULT (datetime('now','localtime'))
+);
+CREATE INDEX IF NOT EXISTS idx_ha_code ON history_archive(code);
+
+-- 存储根状态：外接盘 / NAS 掉线时的保护依据。
+-- 只有状态 ok 的根才允许把文件判为「缺失」并进入清理，其余根的记录原样保留。
+CREATE TABLE IF NOT EXISTS storage_roots (
+    path       TEXT PRIMARY KEY,
+    state      TEXT DEFAULT 'ok',      -- ok / offline / suspicious
+    reason     TEXT DEFAULT '',
+    entries    INTEGER DEFAULT 0,
+    checked_at TEXT DEFAULT '',
+    last_ok_at TEXT DEFAULT ''         -- 最近一次可用的时间，UI 用来提示「上次可用」
+);
 """
 
 
@@ -284,6 +317,13 @@ def _migrate(conn: sqlite3.Connection) -> None:
     if "tags_ai" not in movie_cols:
         conn.execute("ALTER TABLE movies ADD COLUMN tags_ai TEXT DEFAULT ''")
     # 片头/片尾跳过点（秒）：详情页播放器里一键标记，播放时自动跳过
+    # 归档：保留影片记录与观看历史，但从浏览/检索/待办里隐藏（可随时恢复）。
+    # 与「删除」的区别是 data 还在，只是不再出现在正常视图里。
+    if "archived_at" not in movie_cols:
+        conn.execute("ALTER TABLE movies ADD COLUMN archived_at TEXT DEFAULT ''")
+    if "archive_reason" not in movie_cols:
+        conn.execute("ALTER TABLE movies ADD COLUMN archive_reason TEXT DEFAULT ''")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_movies_archived ON movies(archived_at)")
     if "skip_intro" not in movie_cols:
         conn.execute("ALTER TABLE movies ADD COLUMN skip_intro REAL DEFAULT 0")
     if "skip_outro" not in movie_cols:

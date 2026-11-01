@@ -3,6 +3,7 @@ import { state } from '../state.js'
 import PageHead from '../components/PageHead.vue'
 import OverviewTab from './maintenance/OverviewTab.vue'
 import StorageHealthTab from './maintenance/StorageHealthTab.vue'
+import MissingTab from './maintenance/MissingTab.vue'
 import ScrapeLogsTab from './maintenance/ScrapeLogsTab.vue'
 import SubtitleTab from './maintenance/SubtitleTab.vue'
 import ScrapeFailuresTab from './maintenance/ScrapeFailuresTab.vue'
@@ -11,6 +12,7 @@ import NfoExportTab from './maintenance/NfoExportTab.vue'
 // 维护中心子标签：直接绑定全局 state.maintTab，便于跨视图/重渲染保持位置
 const TABS = [
   { id: 'overview', label: 'maint.overview', icon: '🏠' },
+  { id: 'missing', label: 'maint.missingTab', icon: '⛔' },
   { id: 'storage', label: 'maint.storage', icon: '🩺' },
   { id: 'subtitle', label: 'maint.subtitle', icon: '💬' },
   { id: 'failures', label: 'maint.failTitle', icon: '🔎' },
@@ -37,6 +39,7 @@ const setTab = (id) => { state.maintTab = id }
     <!-- v-show 保留组件实例，避免重复请求与切换闪烁；onMounted 内的 fetch 只跑一次 -->
     <div class="view-body tab-body">
       <OverviewTab v-show="state.maintTab === 'overview'" />
+      <MissingTab v-show="state.maintTab === 'missing'" />
       <StorageHealthTab v-show="state.maintTab === 'storage'" />
       <SubtitleTab v-show="state.maintTab === 'subtitle'" />
       <ScrapeFailuresTab v-show="state.maintTab === 'failures'" />

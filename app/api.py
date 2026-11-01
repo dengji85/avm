@@ -1050,11 +1050,90 @@ def check_missing() -> Dict[str, Any]:
     """快速核对缺失：只检查库里已入库的路径是否还存在（不遍历目录）。
 
     比全盘扫描快得多，可随手点一次；发现消失的文件即标记缺失并开始宽限期计时。
+
+    安全前提：先探测存储根。位于不可用根（外接盘 / NAS 掉线、盘符变了）下的
+    文件会被跳过并计入 skipped_offline，不会因为「盘没插」把整盘影片标成缺失。
+    返回值里的 roots 给出每个存储位置的当前状态。
     """
     with db() as conn:
         result = store.check_missing_files(conn)
         conn.commit()
     return {"ok": True, **result}
+
+
+@router.get("/maintenance/missing")
+def missing_overview() -> Dict[str, Any]:
+    """缺失文件明细（按影片聚合）：每部的缺失次数、缺失起始时间、宽限剩余、
+    是否有观看历史，以及各存储位置状态。前端据此逐部/批量处置。"""
+    with db() as conn:
+        return {"ok": True, **store.missing_overview(conn)}
+
+
+@router.post("/maintenance/missing/resolve")
+def missing_resolve(payload: Dict[str, Any] = Body(default={})) -> Dict[str, Any]:
+    """处置缺失影片。三种方式，语义不同，界面要说清：
+
+    * ``archive`` —— 归档：文件记录保持原样，影片从列表/待办隐藏，历史保留，可恢复
+    * ``forget``  —— 移除文件记录：确认文件确实不会回来了，删掉缺失记录；影片一并
+      转入归档（否则会变成没有文件的空壳，下次扫描还会被清掉），历史同样保留
+    * ``purge``   —— 彻底删除：**先写历史快照**，再删影片与级联数据，不可恢复
+    """
+    ids = [int(x) for x in (payload.get("ids") or []) if str(x).strip().isdigit()]
+    action = str(payload.get("action") or "").strip().lower()
+    if not ids:
+        raise HTTPException(400, "请先选择要处理的影片")
+    if action not in ("archive", "forget", "purge"):
+        raise HTTPException(400, "未知的处理方式")
+
+    with db() as conn:
+        if action == "archive":
+            result = {"archived": store.archive_movies(conn, ids, reason="missing")}
+        elif action == "forget":
+            ph = ",".join("?" * len(ids))
+            # 只删「缺失」的记录，同片还存活的分卷不动
+            cur = conn.execute(
+                "DELETE FROM movie_files WHERE movie_id IN (" + ph + ") "
+                "AND COALESCE(missing,0) = 1", ids)
+            result = {"removed_files": int(cur.rowcount or 0),
+                      "archived": store.archive_movies(conn, ids, reason="file_removed")}
+        else:
+            result = store.purge_movies(conn, ids, reason="file_deleted")
+        conn.commit()
+    return {"ok": True, "action": action, **result}
+
+
+@router.get("/archive")
+def archive_list(page: int = 1, size: int = 60) -> Dict[str, Any]:
+    """已归档影片：记录与观看历史都还在，只是不在正常列表里。"""
+    with db() as conn:
+        return {"ok": True, **store.list_archived(conn, page, size)}
+
+
+@router.post("/archive/{movie_id}/restore")
+def archive_restore(movie_id: int) -> Dict[str, Any]:
+    """取消归档，重新出现在列表里。"""
+    with db() as conn:
+        n = store.restore_movies(conn, [movie_id])
+        conn.commit()
+    if not n:
+        raise HTTPException(404, "影片不存在或未归档")
+    return {"ok": True, "restored": n}
+
+
+@router.get("/maintenance/storage-roots")
+def storage_roots() -> Dict[str, Any]:
+    """各存储位置当前是否可用。
+
+    维护页用它解释「为什么这次没判缺失」：盘没挂载时列出离线根 + 上次可用时间，
+    让用户先去插盘，而不是对着一堆「文件缺失」乱点清理。
+    """
+    from . import roots as roots_mod
+    from .config import load_config, roots_to_scan
+
+    with db() as conn:
+        states = roots_mod.probe_roots(roots_to_scan(load_config()), conn)
+        conn.commit()
+    return {"ok": True, "roots": roots_mod.states_as_list(states)}
 
 
 @router.get("/maintenance/summary")
@@ -1071,8 +1150,15 @@ def maintenance_summary() -> Dict[str, Any]:
         total = query_one(conn, "SELECT COUNT(*) AS c FROM movies")["c"]
         last_scan = query_one(conn,
             "SELECT started_at, added, updated, removed FROM scan_logs ORDER BY id DESC LIMIT 1")
+        # 存储位置健康：让概览页能解释「为什么缺失数看着吓人」——多半是外接盘没插
+        from . import roots as roots_mod
+        from .config import roots_to_scan
+
+        _states = roots_mod.probe_roots(roots_to_scan(load_config()))
+        roots_down = [s.to_dict() for s in _states.values() if not s.usable]
         return {
             "ok": True,
+            "roots_down": roots_down,
             "total": total,
             "noscrape": noscrape,
             "watchlist": watchlist,

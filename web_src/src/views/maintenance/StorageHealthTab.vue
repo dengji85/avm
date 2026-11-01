@@ -1,7 +1,7 @@
 <script setup>
 import { ref, reactive, computed, onMounted } from 'vue'
 import { state } from '../../state.js'
-import { getStorage, getIntegrity, getHealthCheck, getDedup, resolveDedup, getQuality, sniffCovers, getSoftwareStorage, cleanSoftwareStorage, checkMissing } from '../../api.js'
+import { getStorage, getIntegrity, getHealthCheck, getDedup, resolveDedup, getQuality, sniffCovers, getSoftwareStorage, cleanSoftwareStorage, checkMissing, storageRoots } from '../../api.js'
 import { toast, confirmDialog, fmtSize } from '../../utils.js'
 import { t } from '../../i18n/index.js'
 import PageHead from '../../components/PageHead.vue'
@@ -43,9 +43,26 @@ async function runCheckMissing() {
   checkMissingLoading.value = true
   try {
     const r = await checkMissing()
-    toast(t('maint.checkMissingDone', { n: r.checked || 0, m: r.marked || 0 }), 'ok')
+    // 后端会跳过「离线存储位置」下的文件，并顺手复活插回来的盘上的记录
+    const extra = []
+    if (r.restored) extra.push(t('maint.checkMissingRestored', { n: r.restored }))
+    if (r.skipped_offline) extra.push(t('maint.checkMissingSkipped', { n: r.skipped_offline }))
+    const base = t('maint.checkMissingDone', { n: r.checked || 0, m: r.marked || 0 })
+    toast(extra.length ? `${base} · ${extra.join('，')}` : base, 'ok')
+    if (r.roots) rootStates.value = r.roots
     await load()
   } catch (e) { toast(e.message, 'err') } finally { checkMissingLoading.value = false }
+}
+
+/* 存储位置健康：外接盘 / NAS 掉线时，这些位置下的影片不会被判缺失，
+   也不该被清理。面板里明确告诉用户「为什么这次没判缺失」。 */
+const rootStates = ref([])
+const downRoots = computed(() => (rootStates.value || []).filter((r) => !r.usable))
+async function loadRoots() {
+  try {
+    const r = await storageRoots()
+    rootStates.value = r.roots || []
+  } catch (e) { rootStates.value = [] }
 }
 async function runDedup() { dedupLoading.value = true; try { dedup.value = await getDedup(); toast(t('maint.detectDone'), 'ok') } catch (e) { toast(e.message, 'err') } finally { dedupLoading.value = false } }
 async function runQuality() { qualityLoading.value = true; try { quality.value = await getQuality(); toast(t('maint.qualityDone'), 'ok') } catch (e) { toast(e.message, 'err') } finally { qualityLoading.value = false } }
@@ -156,7 +173,7 @@ const yearBars = computed(() => bars(st.by_year, 'bytes', 'year'))
 const healthCount = (k) => (health.value && health.value.counts && health.value.counts[k]) || 0
 const healthList = (k) => (health.value && health.value[k]) || []
 
-onMounted(() => { load(); loadSoftware() })
+onMounted(() => { load(); loadSoftware(); loadRoots() })
 </script>
 
 <template>
@@ -248,6 +265,21 @@ onMounted(() => { load(); loadSoftware() })
         <button class="btn tiny primary" :disabled="healthLoading" @click="runHealth">{{ healthLoading ? $t('maint.checking') : (health ? $t('maint.rerunHealth') : $t('maint.runHealth')) }}</button>
       </div>
       <div class="panel-body">
+        <!-- 存储位置不可用：外接盘 / NAS 没挂载时，这些位置下的影片不会被判缺失，
+             也不会被清理；明确告知原因，避免用户以为「检查坏了」 -->
+        <div v-if="downRoots.length" class="root-warn">
+          <span class="rw-ico">⚠</span>
+          <div class="rw-main">
+            <div class="rw-title">{{ $t('maint.rootsDown', { n: downRoots.length }) }}</div>
+            <div v-for="r in downRoots" :key="r.path" class="rw-line">
+              <code>{{ r.path }}</code>
+              <span>· {{ r.reason }}</span>
+              <span v-if="r.last_ok_at" class="rw-last">{{ $t('maint.rootLastOk') }} {{ r.last_ok_at }}</span>
+            </div>
+            <div class="rw-hint">{{ $t('maint.rootsDownHint') }}</div>
+          </div>
+          <button class="btn tiny" @click="loadRoots">{{ $t('maint.rootRecheck') }}</button>
+        </div>
         <div v-if="!health && !healthLoading" class="empty compact"><div class="desc">{{ $t('maint.clickToHealth') }}</div></div>
         <div v-else-if="healthLoading" class="empty compact"><span class="spinner large"></span></div>
         <template v-else>
@@ -373,6 +405,15 @@ onMounted(() => { load(); loadSoftware() })
 .sw-clean-item { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-2); font-size: var(--fs-sm); color: var(--c-text-2); }
 .sw-clean-row { display: flex; gap: var(--sp-2); flex-wrap: wrap; margin-top: var(--sp-1); }
 .empty.compact { padding: var(--sp-6) var(--sp-4); }
+/* 存储位置不可用提示条 */
+.root-warn { display: flex; gap: var(--sp-3); align-items: flex-start; padding: var(--sp-3); margin-bottom: var(--sp-3); border-radius: var(--r-md); border: 1px solid var(--c-warn); background: color-mix(in srgb, var(--c-warn) 10%, transparent); }
+.rw-ico { color: var(--c-warn); font-size: 16px; line-height: 1.3; }
+.rw-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.rw-title { font-weight: 600; font-size: var(--fs-md); }
+.rw-line { font-size: var(--fs-xs); color: var(--c-text-2); display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+.rw-line code { font-family: var(--font-mono, monospace); }
+.rw-last { color: var(--c-text-3); }
+.rw-hint { font-size: var(--fs-xs); color: var(--c-text-3); margin-top: 2px; }
 .hs-row { display: flex; flex-wrap: wrap; gap: var(--sp-2); }
 .hs-card { display: flex; flex-direction: column; align-items: center; min-width: 92px; padding: var(--sp-2) var(--sp-3); border-radius: var(--r-md); background: var(--c-surface-2); border: 1px solid var(--c-line); cursor: pointer; transition: all var(--t-fast); }
 .hs-card:hover { border-color: var(--c-line-strong); }

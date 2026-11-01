@@ -119,6 +119,14 @@ def run_scan(progress_cb=None, incremental=True, workers=None, hash_files=False,
     cfg = load_config()
     exts = {e.lower().lstrip(".") for e in video_exts(cfg)}
     roots = roots_to_scan(cfg)
+    # 存储根探针（外接盘 / NAS 掉线保护）：盘没挂载时目录读不到，若照常枚举，
+    # 该根下所有文件都会「本次没扫到」→ 被标成缺失 → 宽限期后自动清理真删。
+    # 因此只有探测为 ok 的根才参与枚举与缺失判定，其余根原样保留。
+    from . import roots as roots_mod
+
+    root_states = roots_mod.probe_roots(roots)
+    usable_roots = [r for r in roots if root_states[r].usable]
+    down_roots = [r for r in roots if not root_states[r].usable]
     if workers is None:
         workers = min(8, (os.cpu_count() or 4))
     sample = int(cfg.get("hash_sample_bytes", 262144))
@@ -139,13 +147,16 @@ def run_scan(progress_cb=None, incremental=True, workers=None, hash_files=False,
                 "sub_tracks, sub_probe_at FROM movie_files"
             )
         }
+        # 根状态落库，供维护页显示「上次可用时间」
+        roots_mod.save_states(conn, root_states)
+        conn.commit()
     finally:
         conn.close()
 
     to_process, alive, enumerated, skipped = [], set(), 0, 0
     ignores = cfg.get("library", {}).get("ignore_suffixes") or []
     SCAN.update(phase="enumerating", total=0, done=0, current="正在遍历目录…")
-    for path in iter_video_files(roots, exts, ignores):
+    for path in iter_video_files(usable_roots, exts, ignores):
         try:
             st = os.stat(path)
         except OSError:
@@ -180,7 +191,7 @@ def run_scan(progress_cb=None, incremental=True, workers=None, hash_files=False,
     # 2) 标记已从磁盘消失的文件：只在「本次扫描的 root 集合内」判定。
     #    原实现直接 set(existing) - alive，会把未参与本次扫描的目录（例如
     #    未挂载的磁盘、临时移出的库路径）里的文件整体误标为缺失。
-    lowered_roots = [r.replace("\\", "/").lower().rstrip("/") for r in roots]
+    lowered_roots = [r.replace("\\", "/").lower().rstrip("/") for r in usable_roots]
     removed = set()
     for p in existing.keys():
         lp = p.replace("\\", "/").lower()
@@ -287,25 +298,32 @@ def run_scan(progress_cb=None, incremental=True, workers=None, hash_files=False,
     cleaned = {"files": 0, "movies": 0, "orphans": {}}
     if auto_cleanup:
         SCAN.update(phase="cleaning", current="正在清理失效记录…")
-        cleaned = auto_cleanup_after_scan(alive, roots, progress_cb)
+        cleaned = auto_cleanup_after_scan(alive, usable_roots, progress_cb,
+                                          skip_roots=down_roots)
 
+    tail = ("；%d 个存储位置不可用，该位置的影片未参与缺失判定" % len(down_roots)) if down_roots else ""
     SCAN.finish(
-        "扫描完成：新增 %d / 更新 %d / 跳过 %d / 本地元数据 %d / 外挂字幕 %d / 缺失 %d / 清理 %d"
+        "扫描完成：新增 %d / 更新 %d / 跳过 %d / 本地元数据 %d / 外挂字幕 %d / 缺失 %d / 清理 %d%s"
         % (added, updated, skipped, local_nfo_hit, sidecar_subs, len(removed),
-           cleaned["files"] + cleaned["movies"] + sum(cleaned["orphans"].values()))
+           cleaned["files"] + cleaned["movies"] + sum(cleaned["orphans"].values()), tail)
     )
     return {"total": enumerated, "added": added, "updated": updated,
             "unchanged": unchanged, "missing": len(removed), "errors": errors,
-            "local_nfo": local_nfo_hit, "sidecar_subs": sidecar_subs, "cleaned": cleaned}
+            "local_nfo": local_nfo_hit, "sidecar_subs": sidecar_subs, "cleaned": cleaned,
+            "offline_roots": [s.to_dict() for s in root_states.values() if not s.usable]}
 
 
-def auto_cleanup_after_scan(alive_paths: set, roots: list, progress_cb=None):
+def auto_cleanup_after_scan(alive_paths: set, roots: list, progress_cb=None,
+                            skip_roots=()):
     """扫描后自动清理：
 
     1. 删除位于扫描根目录下、本次未出现在磁盘上的文件记录（prune_missing）；
     2. 连带删除因此失去所有文件的影片；
     3. 清理孤儿元数据（女优 / 类型 / 厂商 / 系列 / 标签）。
     全程基于本次扫描的 alive_paths 与 roots，不会误删其它目录的记录。
+
+    skip_roots：本次探测为不可用的存储根（外接盘 / NAS 掉线）。这些根下的记录
+    即使宽限期已过也不清理 —— 「拔盘一个月就自动删库」是不可接受的。
     """
     from . import store
     if progress_cb is None:
@@ -315,7 +333,8 @@ def auto_cleanup_after_scan(alive_paths: set, roots: list, progress_cb=None):
     grace_days = max(0, int(_cfg.get("library", {}).get("missing_grace_days", 0) or 0))
     conn = connect()
     try:
-        removed_files = store.prune_missing(conn, alive_paths, roots, grace_days=grace_days)
+        removed_files = store.prune_missing(conn, alive_paths, roots, grace_days=grace_days,
+                                           skip_roots=skip_roots)
         orphans = store.cleanup_orphans(conn)
         conn.commit()
     finally:

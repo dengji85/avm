@@ -306,20 +306,28 @@ def _days_since(ts: str) -> float:
 
 
 def prune_missing(conn: sqlite3.Connection, alive_paths: set[str], roots: Sequence[str],
-                  grace_days: int = 0) -> int:
+                  grace_days: int = 0, skip_roots: Sequence[str] = ()) -> int:
     """清理「磁盘上确已消失」的文件记录，并连带清理空影片。
 
     grace_days > 0 时只清理「标记缺失已超过宽限期」的记录：文件刚消失（或外置盘
     临时掉线）只保留为 missing，留给用户插回磁盘 / 搬回文件恢复的机会，避免误删。
     grace_days = 0 时保持旧行为（发现即清理）。
+
+    skip_roots：本次探测为不可用的存储根（外接盘 / NAS 掉线）。这些根下的记录
+    **一律不清理**，即使宽限期已过 —— 否则「拔盘一个月」就等于自动删库。
     """
     if not roots:
         return 0
+    from .roots import normalize_prefix, under_any
+
+    skip_prefixes = [normalize_prefix(r) for r in (skip_roots or [])]
     removed = 0
     lowered_roots = [r.replace("\\", "/").lower().rstrip("/") for r in roots]
     rows = conn.execute(
         "SELECT id, path, movie_id, missing, missing_since FROM movie_files").fetchall()
     for row in rows:
+        if skip_prefixes and under_any(row["path"], skip_prefixes):
+            continue  # 所在盘当前不可用：不动
         p = row["path"].replace("\\", "/").lower()
         if not any(p.startswith(r + "/") or p == r for r in lowered_roots):
             continue
@@ -335,26 +343,52 @@ def prune_missing(conn: sqlite3.Connection, alive_paths: set[str], roots: Sequen
                 continue
         conn.execute("DELETE FROM movie_files WHERE id = ?", (row["id"],))
         removed += 1
-    conn.execute("DELETE FROM movies WHERE id NOT IN (SELECT DISTINCT movie_id FROM movie_files)")
+    # 只清「因为文件没了才变空」的影片；已归档的即使没有文件记录也要保留
+    # （用户明确选择了「保留记录与历史」）。
+    conn.execute(
+        "DELETE FROM movies WHERE id NOT IN (SELECT DISTINCT movie_id FROM movie_files) "
+        "AND COALESCE(archived_at,'') = ''")
     return removed
 
 
-def check_missing_files(conn: sqlite3.Connection) -> Dict[str, Any]:
+def check_missing_files(conn: sqlite3.Connection,
+                        root_states: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """快速核对：只检查库里已有路径是否还存在（不遍历目录）。
 
     比全盘扫描快得多，可随手点一次。发现消失的文件就标记 missing 并记录
     首次缺失时间（宽限期清理据此计算）。返回核对与新增缺失的数量。
+
+    **安全前提**：先探一次存储根。外接盘 / NAS 没挂载时，目录取不到，但
+    ``os.path.exists`` 对所有文件都会返回 False —— 若不先判断根，一次「检查
+    缺失」就会把整盘影片标成缺失，宽限期过后 auto_cleanup 直接删记录。
+    因此：位于不可用根下的文件一律跳过，只就近核对可用根下的文件。
     """
+    from . import roots as roots_mod
+    from .config import load_config, roots_to_scan
+
+    states = root_states
+    if states is None:
+        states = roots_mod.probe_roots(roots_to_scan(load_config()), conn)
+    ok_prefixes = roots_mod.usable_prefixes(states)
+    down = roots_mod.down_prefixes(states)
+
     rows = query_all(
         conn,
         "SELECT id, path FROM movie_files WHERE COALESCE(missing,0)=0",
     )
     checked = 0
     marked = 0
+    skipped = 0
     for r in rows:
-        checked += 1
         p = str(r["path"] or "")
-        if not p or os.path.exists(p):
+        if not p:
+            continue
+        # 所在盘当前不可用（且不属于任何可用根）→ 跳过，绝不标记
+        if down and roots_mod.under_any(p, down) and not roots_mod.under_any(p, ok_prefixes):
+            skipped += 1
+            continue
+        checked += 1
+        if os.path.exists(p):
             continue
         conn.execute(
             "UPDATE movie_files SET missing = 1, missing_since = ? "
@@ -362,9 +396,36 @@ def check_missing_files(conn: sqlite3.Connection) -> Dict[str, Any]:
             (datetime_now(), r["id"]),
         )
         marked += 1
+
+    # 反向核对：盘插回来之后，把已标缺失的记录重新验证并复活。
+    # 只对「当前可用根」下的记录做，离线根一律不碰 —— 顺手也能修掉历史上
+    # 因为拔盘被误标的记录（用户插回外接盘后点一次「快速核对」即可自愈）。
+    restored = 0
+    if ok_prefixes:
+        stale = query_all(
+            conn,
+            "SELECT id, path FROM movie_files WHERE COALESCE(missing,0)=1",
+        )
+        for r in stale:
+            p = str(r["path"] or "")
+            if not p or not roots_mod.under_any(p, ok_prefixes):
+                continue
+            if not os.path.exists(p):
+                continue
+            conn.execute(
+                "UPDATE movie_files SET missing = 0, missing_since = '' WHERE id = ?",
+                (r["id"],),
+            )
+            restored += 1
+
     if marked:
-        conn.execute("DELETE FROM movies WHERE id NOT IN (SELECT DISTINCT movie_id FROM movie_files)")
-    return {"checked": checked, "marked": marked}
+        conn.execute(
+            "DELETE FROM movies WHERE id NOT IN (SELECT DISTINCT movie_id FROM movie_files) "
+            "AND COALESCE(archived_at,'') = ''")
+    # 记录各根状态，供维护页显示「上次可用时间」
+    roots_mod.save_states(conn, states)
+    return {"checked": checked, "marked": marked, "restored": restored,
+            "skipped_offline": skipped, "roots": roots_mod.states_as_list(states)}
 
 
 def datetime_now() -> str:
@@ -381,6 +442,7 @@ SELECT m.id, m.key, m.code, m.has_code, m.title, m.original_title, m.release_dat
        m.runtime, m.rating, m.favorite, m.watched, m.watchlist, m.play_count, m.cover, m.size,
        m.file_count, m.subtitle, m.embed_sub, m.embed_sub_zh, m.embed_sub_zh_kind,
        m.uncensored, m.leak, m.hd4k, m.vr, m.scraped_at,
+       m.archived_at, m.archive_reason,
        m.created_at, m.folder,
        st.name AS studio, se.name AS series,
        (SELECT group_concat(a.name, '||') FROM movie_actress ma
@@ -538,7 +600,16 @@ def _build_where(params: Dict[str, Any]) -> Tuple[str, List[Any]]:
         clauses.append("m.rating <= ?")
         args.append(float(params["max_rating"]))
 
-    where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+    where = ""
+    if clauses:
+        joined = op.join(clauses)
+        # OR 模式要给整体加括号，否则后面追加的 AND 条件（归档过滤）会抢走优先级
+        where = (" WHERE (" + joined + ")") if (len(clauses) > 1 and op.strip() == "OR") \
+            else (" WHERE " + joined)
+    # 归档影片默认不出现在浏览 / 检索结果里（记录与观看历史都还在，可随时恢复）。
+    # 这条始终用 AND 追加，不受用户选的 OR 影响。
+    if not params.get("include_archived"):
+        where += (" AND " if where else " WHERE ") + "COALESCE(m.archived_at, '') = ''"
     return where, args
 
 
@@ -1327,6 +1398,100 @@ def delete_movie(conn: sqlite3.Connection, movie_id: int) -> None:
     conn.execute("DELETE FROM movies WHERE id = ?", (movie_id,))
 
 
+# ----------------------------------------------------------------- 归档 / 清理
+
+def archive_movies(conn: sqlite3.Connection, ids: Sequence[int], reason: str = "user") -> int:
+    """归档：保留影片记录与观看历史，但从浏览 / 检索 / 待办里隐藏。
+
+    与「删除」的区别是数据都还在，随时能恢复；与「标记缺失」的区别是不再出现在
+    正常列表里，也不会被当成待处理项反复提醒。适合「文件删了、历史想留着」。
+    """
+    ids = [int(i) for i in (ids or [])]
+    if not ids:
+        return 0
+    ph = ",".join("?" * len(ids))
+    cur = conn.execute(
+        "UPDATE movies SET archived_at = datetime('now','localtime'), archive_reason = ? "
+        "WHERE id IN (" + ph + ") AND COALESCE(archived_at, '') = ''",
+        [str(reason or "user"), *ids],
+    )
+    return int(cur.rowcount or 0)
+
+
+def restore_movies(conn: sqlite3.Connection, ids: Sequence[int]) -> int:
+    """取消归档：重新出现在列表里（历史与进度本就一起保留着）。"""
+    ids = [int(i) for i in (ids or [])]
+    if not ids:
+        return 0
+    ph = ",".join("?" * len(ids))
+    cur = conn.execute(
+        "UPDATE movies SET archived_at = '', archive_reason = '' WHERE id IN (" + ph + ")",
+        ids,
+    )
+    return int(cur.rowcount or 0)
+
+
+def _movie_snapshot(conn: sqlite3.Connection, movie_id: int, reason: str) -> bool:
+    """把一部影片的核心信息与观看历史写进 history_archive。
+
+    **必须在删除之前调用**：watch_progress / watch_sessions 都是 CASCADE，
+    影片一删历史就没了，而且表里没有任何可重建的来源（连 code/title 都没冗余）。
+    """
+    m = query_one(conn, "SELECT * FROM movies WHERE id = ?", (movie_id,))
+    if not m:
+        return False
+    actresses = [r["name"] for r in query_all(
+        conn,
+        "SELECT a.name FROM movie_actress ma JOIN actresses a ON a.id = ma.actress_id "
+        "WHERE ma.movie_id = ? ORDER BY a.name", (movie_id,))]
+    genres = [r["name"] for r in query_all(
+        conn,
+        "SELECT g.name FROM movie_genre mg JOIN genres g ON g.id = mg.genre_id "
+        "WHERE mg.movie_id = ? ORDER BY g.name", (movie_id,))]
+    files = [{"path": r["path"], "size": r["size"]} for r in query_all(
+        conn, "SELECT path, size FROM movie_files WHERE movie_id = ?", (movie_id,))]
+    prog = query_one(
+        conn, "SELECT position, finished FROM watch_progress WHERE movie_id = ?",
+        (movie_id,)) or {}
+    watched = float(scalar(
+        conn, "SELECT COALESCE(SUM(watched_sec),0) FROM watch_sessions WHERE movie_id = ?",
+        (movie_id,)) or 0)
+    conn.execute(
+        "INSERT INTO history_archive(code, title, cover, runtime, play_count, watched_sec, "
+        "finished, progress, rating, favorite, genres_json, actresses_json, files_json, reason) "
+        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (m["code"] or "", m["title"] or "", m["cover"] or "", int(m["runtime"] or 0),
+         int(m["play_count"] or 0), watched, int(prog.get("finished") or 0),
+         float(prog.get("position") or 0), float(m["rating"] or 0), int(m["favorite"] or 0),
+         json.dumps(genres, ensure_ascii=False), json.dumps(actresses, ensure_ascii=False),
+         json.dumps(files, ensure_ascii=False), str(reason or "user_purge")),
+    )
+    return True
+
+
+def purge_movies(conn: sqlite3.Connection, ids: Sequence[int],
+                 reason: str = "user_purge") -> Dict[str, Any]:
+    """彻底删除：**先写历史快照，再删影片**，最后清孤儿元数据。
+
+    顺序不能反 —— 快照是观看历史唯一的可重建来源。磁盘上的封面 / 预览图不在这里
+    物理删除（删完即成为孤儿，由「软件数据占用 → 一键清理残留」统一回收，更安全）。
+    """
+    ids = [int(i) for i in (ids or [])]
+    out: Dict[str, Any] = {"snapshots": 0, "deleted": 0, "orphans": {}}
+    if not ids:
+        return out
+    for mid in ids:
+        if _movie_snapshot(conn, mid, reason):
+            out["snapshots"] += 1
+        delete_movie(conn, mid)
+        out["deleted"] += 1
+    try:
+        out["orphans"] = cleanup_orphans(conn)
+    except Exception:
+        out["orphans"] = {}
+    return out
+
+
 def cleanup_orphans(conn: sqlite3.Connection) -> Dict[str, int]:
     """清理没有任何关联影片的女优/类型/厂商/系列。"""
     result = {}
@@ -1397,7 +1562,8 @@ def continue_watching(conn: sqlite3.Connection, limit: int = 20) -> Dict[str, An
     if not ids:
         return {"items": [], "total": 0}
     placeholders = ",".join("?" * len(ids))
-    rows = query_all(conn, f"{_LIST_SELECT} WHERE m.id IN ({placeholders})", ids)
+    rows = query_all(conn, f"{_LIST_SELECT} WHERE m.id IN ({placeholders}) "
+            f"AND COALESCE(m.archived_at,'') = ''", ids)
     prog = {r["movie_id"]: r for r in query_all(
         conn,
         f"SELECT movie_id, position, duration FROM watch_progress WHERE movie_id IN ({placeholders})",
@@ -1440,7 +1606,8 @@ def recent_watch(conn: sqlite3.Connection, page: int = 1, size: int = 60) -> Dic
     items: list = []
     if ids:
         placeholders = ",".join("?" * len(ids))
-        rows = query_all(conn, f"{_LIST_SELECT} WHERE m.id IN ({placeholders})", ids)
+        rows = query_all(conn, f"{_LIST_SELECT} WHERE m.id IN ({placeholders}) "
+            f"AND COALESCE(m.archived_at,'') = ''", ids)
         prog = {r["movie_id"]: r for r in query_all(
             conn,
             f"SELECT movie_id, position, duration FROM watch_progress WHERE movie_id IN ({placeholders})",
@@ -1513,7 +1680,8 @@ def similar_movies(conn: sqlite3.Connection, movie_id: int, limit: int = 12) -> 
         return {"items": [], "total": 0}
     placeholders = ",".join("?" * len(ids))
     cards = {c["id"]: c for c in (
-        _row_to_card(r) for r in query_all(conn, f"{_LIST_SELECT} WHERE m.id IN ({placeholders})", ids))}
+        _row_to_card(r) for r in query_all(conn, f"{_LIST_SELECT} WHERE m.id IN ({placeholders}) "
+            f"AND COALESCE(m.archived_at,'') = ''", ids))}
     ordered = [cards[i] for i in ids if i in cards]
     return {"items": ordered, "total": len(ordered)}
 
@@ -2310,11 +2478,105 @@ def watch_history(conn: sqlite3.Connection, page: int = 1, size: int = 50,
 
 
 # ----------------------------------------------------------------- 文件体检（明细）
+def missing_overview(conn: sqlite3.Connection) -> Dict[str, Any]:
+    """缺失文件明细（按影片聚合），供维护页逐部处置。
+
+    同时给出存储位置状态：**位于离线位置下的缺失文件不该被清理**（只是盘没插），
+    前端据此把这些行标成「离线等待」并禁用清理按钮。
+    """
+    from . import roots as roots_mod
+    from .config import load_config, roots_to_scan
+
+    cfg = load_config()
+    states = roots_mod.probe_roots(roots_to_scan(cfg))
+    down = roots_mod.down_prefixes(states)
+    try:
+        grace = max(0, int(cfg.get("library", {}).get("missing_grace_days", 30) or 0))
+    except Exception:
+        grace = 30
+
+    rows = query_all(conn, """
+        SELECT m.id AS movie_id, m.code, m.title, m.cover, m.favorite, m.rating,
+               m.play_count, m.watched,
+               COUNT(f.id) AS missing_files,
+               MIN(NULLIF(COALESCE(f.missing_since,''),'')) AS since,
+               (SELECT COUNT(*) FROM movie_files x WHERE x.movie_id = m.id) AS total_files,
+               (SELECT COUNT(*) FROM movie_files x WHERE x.movie_id = m.id
+                  AND COALESCE(x.missing,0) = 0) AS alive_files,
+               (SELECT COALESCE(SUM(watched_sec),0) FROM watch_sessions w
+                  WHERE w.movie_id = m.id) AS watched_sec,
+               (SELECT COALESCE(position,0) FROM watch_progress p
+                  WHERE p.movie_id = m.id) AS progress
+        FROM movies m JOIN movie_files f ON f.movie_id = m.id
+        WHERE COALESCE(f.missing,0) = 1 AND COALESCE(m.archived_at,'') = ''
+        GROUP BY m.id
+        ORDER BY m.play_count DESC, since ASC
+    """)
+    paths: Dict[int, List[str]] = {}
+    for r in query_all(conn, "SELECT movie_id, path FROM movie_files WHERE COALESCE(missing,0) = 1"):
+        paths.setdefault(int(r["movie_id"]), []).append(str(r["path"] or ""))
+
+    items: List[Dict[str, Any]] = []
+    offline_cnt = expired_cnt = 0
+    for r in rows:
+        mid = int(r["movie_id"])
+        ps = paths.get(mid) or []
+        # 这部片所有缺失文件都落在离线位置 → 只是盘没插，绝不能清
+        offline = bool(down) and bool(ps) and all(roots_mod.under_any(p, down) for p in ps)
+        days = int(round(_days_since(r["since"] or ""))) if r["since"] else 0
+        expired = (not offline) and (grace <= 0 or days >= grace)
+        offline_cnt += 1 if offline else 0
+        expired_cnt += 1 if expired else 0
+        items.append({
+            "movie_id": mid,
+            "code": r["code"] or "",
+            "title": r["title"] or "",
+            "cover": r["cover"] or "",
+            "favorite": int(r["favorite"] or 0),
+            "rating": float(r["rating"] or 0),
+            "play_count": int(r["play_count"] or 0),
+            "watched_sec": float(r["watched_sec"] or 0),
+            "progress": float(r["progress"] or 0),
+            "missing_files": int(r["missing_files"] or 0),
+            "total_files": int(r["total_files"] or 0),
+            "alive_files": int(r["alive_files"] or 0),
+            "since": r["since"] or "",
+            "days": days,
+            "offline": offline,
+            "expired": expired,
+            "has_history": bool(int(r["play_count"] or 0) or float(r["watched_sec"] or 0)),
+        })
+    return {
+        "grace_days": grace,
+        "roots": roots_mod.states_as_list(states),
+        "roots_down": [s.to_dict() for s in states.values() if not s.usable],
+        "counts": {"total": len(items), "offline": offline_cnt, "expired": expired_cnt},
+        "items": items,
+    }
+
+
+def list_archived(conn: sqlite3.Connection, page: int = 1, size: int = 60) -> Dict[str, Any]:
+    """已归档影片列表（保留记录与历史，只是不在正常视图里）。"""
+    page = max(1, int(page or 1))
+    size = min(200, max(1, int(size or 60)))
+    total = int(scalar(
+        conn, "SELECT COUNT(*) FROM movies WHERE COALESCE(archived_at,'') <> ''") or 0)
+    rows = query_all(
+        conn,
+        f"{_LIST_SELECT} WHERE COALESCE(m.archived_at,'') <> '' "
+        "ORDER BY m.archived_at DESC LIMIT ? OFFSET ?",
+        (size, (page - 1) * size),
+    )
+    return {"total": total, "page": page, "page_size": size,
+            "items": [_row_to_card(r) for r in rows]}
+
+
 def health_check(conn: sqlite3.Connection) -> Dict[str, Any]:
     missing = query_all(
         conn,
         "SELECT f.movie_id, m.code, m.title, f.path, f.part "
-        "FROM movie_files f LEFT JOIN movies m ON m.id=f.movie_id WHERE f.missing=1")
+        "FROM movie_files f LEFT JOIN movies m ON m.id=f.movie_id "
+        "WHERE f.missing=1 AND COALESCE(m.archived_at,'') = ''")
     no_cover = query_all(
         conn,
         "SELECT m.id, m.code, m.title FROM movies m "
