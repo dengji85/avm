@@ -1,6 +1,22 @@
 # 容器内的 shell 脚本必须是 LF，避免 Windows 检出后带 CRLF 导致无法执行
 *.sh text eol=lf
 
+# 代码与文本统一 LF 入库、LF 检出（eol=lf 会关掉 autocrlf 对这些文件的改写）。
+# 背景：Windows 的 core.autocrlf=true 会反复把工作区文件转成 CRLF，导致
+# 「内容没变的文件在 diff 里整篇重写」——locale 文件已经因此出过两次。
+*.py text eol=lf
+*.js text eol=lf
+*.vue text eol=lf
+*.css text eol=lf
+*.html text eol=lf
+*.md text eol=lf
+*.json text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.toml text eol=lf
+*.txt text eol=lf
+*.ps1 text eol=lf
+
 # 图片等二进制不要做换行转换
 *.png binary
 *.jpg binary
@@ -8,3 +24,6 @@
 *.gif binary
 *.ico binary
 *.svg text eol=lf
+*.webp binary
+*.onnx binary
+*.db binary

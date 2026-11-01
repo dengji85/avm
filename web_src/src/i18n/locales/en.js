@@ -850,6 +850,10 @@ export default {
     posterSub: 'Auto-crop 2:3 posters from landscape covers',
     posterStrategy: 'Crop anchor',
     posterFace: 'Smart crop (face detection, recommended)',
+    posterFaceStatus: 'Detection', posterFaceGoExt: 'Install',
+    posterFaceOk: 'Face detection ready{v}', posterFaceUnknown: 'checking…',
+    posterFaceNoCv: 'opencv missing — smart crop falls back to right-crop until installed',
+    posterFaceNoModel: 'YuNet model missing — auto-downloads on first use (227KB); import manually from Extensions if that fails',
     posterRight: 'Right (default, subject usually there)',
     posterCenter: 'Center',
     posterFit: 'Fit whole image + blurred fill',
@@ -1866,6 +1870,7 @@ export default {
       'asr-model-small': 'Speech model (small)',
       'asr-model-medium': 'Speech model (medium)',
       'metatube': 'MetaTube scraper engine',
+
     },
     extDesc: {
       'ffmpeg': 'Needed for cover frames, previews, embedded-subtitle detection and browser playback (~100MB).',
@@ -1873,6 +1878,7 @@ export default {
       'asr-model-small': 'Recognition model (~460MB): fast, good for clear dialogue.',
       'asr-model-medium': 'Recognition model (~1.5GB): more accurate, ~3x slower.',
       'metatube': 'Open-source scraper service (Apache-2.0): fills in FC2, uncensored, amateur and official sources (30+). When enabled it joins scraping as an extra data source; reaching those sites requires a proxy.',
+      facedet: 'Detection engine for smart poster cropping: opencv + YuNet model (227KB). Once installed, horizontal covers are cropped to 2:3 around the subject instead of a fixed right side; falls back to right-crop when no face is found. Uninstalling only removes the component directory and never touches a globally pip-installed opencv.',
     },
     tracePurpose: {
       synopsis: 'Synopsis',

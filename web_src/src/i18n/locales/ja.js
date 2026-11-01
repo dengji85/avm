@@ -881,6 +881,10 @@ export default {
     posterSub: '横長カバーから 2:3 を自動生成',
     posterStrategy: '切り出し位置',
     posterFace: 'スマート裁切（顔検出・推奨）',
+    posterFaceStatus: '検出能力', posterFaceGoExt: '拡張コンポーネントへ',
+    posterFaceOk: '顔検出は利用可能{v}', posterFaceUnknown: '確認中…',
+    posterFaceNoCv: 'opencv がありません——今「スマート裁切」を選んでも右側裁切に戻ります。導入後は自動で有効になります',
+    posterFaceNoModel: 'YuNet モデルがありません——初回利用時に自動ダウンロード（227KB）。失敗したら「拡張コンポーネント」から手動导入できます',
     posterRight: '右側（既定・人物が右に多い）',
     posterCenter: '中央',
     posterFit: '全体を縮小＋ぼかし背景',
@@ -1909,6 +1913,7 @@ export default {
       'asr-model-small': '音声モデル small',
       'asr-model-medium': '音声モデル medium',
       'metatube': 'MetaTube スクレイパー',
+
     },
     extDesc: {
       'ffmpeg': 'カバー抽出・プレビュー・埋め込み字幕検出・ブラウザ再生に必要（約 100MB）。',
@@ -1916,6 +1921,7 @@ export default {
       'asr-model-small': '認識モデル（約 460MB）：高速で台詞が明瞭な作品向け。',
       'asr-model-medium': '認識モデル（約 1.5GB）：より正確だが約 3 倍遅い。',
       'metatube': 'オープンソースのスクレイパー（Apache-2.0）：FC2・無修正・素人・公式ソースを補完（30+ ソース）。有効化すると独立データソースとして参加します。外部接続にはプロキシが必要。',
+      facedet: 'ポスターのスマート裁切に使う検出エンジン：opencv + YuNet モデル（227KB）。導入すると横型カバーを 2:3 に切る際、固定の右側ではなく人物に合わせて切ります。顔が検出できない場合は右側裁切へ自動で戻ります。アンインストールはコンポーネントディレクトリのみで、グローバルに導入済みの opencv には影響しません。',
     },
     tracePurpose: {
       synopsis: 'あらすじ生成',

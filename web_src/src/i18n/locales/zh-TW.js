@@ -858,6 +858,10 @@ export default {
     posterSub: '橫版封面自動裁出 2:3 豎圖',
     posterStrategy: '取圖位置',
     posterFace: '智慧裁切（人臉定位，推薦）',
+    posterFaceStatus: '定位能力', posterFaceGoExt: '前往安裝',
+    posterFaceOk: '人臉定位可用{v}', posterFaceUnknown: '正在檢測…',
+    posterFaceNoCv: '缺少 opencv——現在選「智慧裁切」也會退回右側裁，安裝後自動生效',
+    posterFaceNoModel: '缺少 YuNet 模型——首次使用會自動下載（227KB），失敗時到「擴充元件」手動匯入',
     posterRight: '右側（預設，人物主視覺）',
     posterCenter: '置中',
     posterFit: '完整縮放 + 模糊補邊',
@@ -1874,6 +1878,7 @@ export default {
       'asr-model-small': '語音模型 small',
       'asr-model-medium': '語音模型 medium',
       'metatube': 'MetaTube 刮削引擎',
+
     },
     extDesc: {
       'ffmpeg': '封面擷取、預覽圖、內嵌字幕偵測、瀏覽器播放轉封裝都依賴它（約 100MB）。',
@@ -1881,6 +1886,7 @@ export default {
       'asr-model-small': '辨識模型（約 460MB）：速度快，適合對白清晰的片源。',
       'asr-model-medium': '辨識模型（約 1.5GB）：更準但慢約 3 倍。',
       'metatube': '開源刮削服務（Apache-2.0）：補齊 FC2、無碼廠、素人站與官方源（30+ 源）。啟用後作為獨立資料源參與刮削，存取外部站點需要代理。',
+      facedet: '豎版海報智慧裁切的偵測引擎：opencv + YuNet 模型（227KB）。裝好後橫版封面裁 2:3 會自動對準人物，而不是固定取右側；偵測不到人臉時自動退回右側裁。解除安裝只刪元件目錄，不影響全域 pip 安裝的 opencv。',
     },
     tracePurpose: {
       synopsis: '簡介生成',

@@ -851,6 +851,10 @@ export default {
     posterSub: '横版封面自动裁出 2:3 竖图',
     posterStrategy: '取图位置',
     posterFace: '智能裁切（人脸定位，推荐）',
+    posterFaceStatus: '定位能力', posterFaceGoExt: '去安装',
+    posterFaceOk: '人脸定位可用{v}', posterFaceUnknown: '正在检测…',
+    posterFaceNoCv: '缺少 opencv——现在选「智能裁切」也会退回右侧裁，安装后自动生效',
+    posterFaceNoModel: '缺少 YuNet 模型——首次使用会自动下载（227KB），失败时到「扩展组件」手动导入',
     posterRight: '右侧（默认，人物主视觉）',
     posterCenter: '居中',
     posterFit: '完整缩放 + 模糊补边',
@@ -1867,6 +1871,7 @@ export default {
       'asr-model-small': '语音模型 small',
       'asr-model-medium': '语音模型 medium',
       'metatube': 'MetaTube 刮削引擎',
+
     },
     extDesc: {
       'ffmpeg': '封面抽帧、预览图、内嵌字幕探测、浏览器播放转封装都依赖它（约 100MB）。',
@@ -1874,6 +1879,7 @@ export default {
       'asr-model-small': '识别模型（约 460MB）：速度快，适合对白清晰的片源。',
       'asr-model-medium': '识别模型（约 1.5GB）：更准但慢约 3 倍。',
       'metatube': '开源刮削服务（Apache-2.0）：补齐 FC2、无码厂、素人站与官方源（30+ 源）。启用后作为独立数据源参与刮削，访问外网站点需要代理。',
+      facedet: '竖版海报智能裁切的检测引擎：opencv + YuNet 模型（227KB）。装好后横版封面裁 2:3 会自动对准人物，而不是固定取右侧；检测不到人脸时自动退回右侧裁。卸载只删组件目录，不影响全局 pip 安装的 opencv。',
     },
     tracePurpose: {
       synopsis: '简介生成',

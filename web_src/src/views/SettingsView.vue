@@ -9,6 +9,7 @@ import {
   posterTaskStart, posterTaskState, posterTaskCancel,
   fsMounts,
   listPlugins, togglePlugin, regenAllPreviews, streamCacheStats, clearStreamCache,
+  extStatus,
   listSessions, revokeSession, getAudit, logout as apiLogout, logoutAll as apiLogoutAll,
   setPin, privacyState, privacyLock, trustedDevices, revokeTrusted,
   totpStatus, totpSetup, totpEnable, totpDisable,
@@ -174,6 +175,7 @@ async function load() {
     loadStreamCache()
     loadSecurity()
     loadAsr()
+    loadExtStatus()
     // 先拿到「是否已设置简单密码」，否则解锁方式下拉的校验会误判
     await loadPinStatus()
     state.config = cfg
@@ -1152,6 +1154,22 @@ async function doCheckUpdate() {
 }
 
 /* 女优资料插件管理 */
+/* 智能裁切（海报 face 策略）依赖 facedet 组件：不就绪时在设置页把「会发生什么」
+   说清楚（退回右侧裁），并给出去扩展组件页安装的路，避免选了没效果又不知道为什么 */
+const extComps = ref([])
+const faceComp = computed(() => (extComps.value || []).find((c) => c.id === 'facedet'))
+const posterFaceStatus = computed(() => {
+  const c = faceComp.value
+  if (!c) return t('settings.posterFaceUnknown')
+  if (c.state === 'ready') return t('settings.posterFaceOk', { v: c.version || '' })
+  if (c.opencv && !c.model) return t('settings.posterFaceNoModel')
+  return t('settings.posterFaceNoCv')
+})
+async function loadExtStatus() {
+  try { const r = await extStatus(); extComps.value = (r && r.components) || [] }
+  catch (e) { extComps.value = [] }
+}
+
 const pluginList = ref([])
 async function loadPlugins() {
   try {
@@ -1481,6 +1499,16 @@ onMounted(async () => {
                 <option value="center">{{ $t('settings.posterCenter') }}</option>
                 <option value="fit">{{ $t('settings.posterFit') }}</option>
               </select>
+              <!-- 智能裁切依赖人脸定位组件：不就绪时明确说清会退回右侧裁，
+                   并给出去装的路（否则用户选了也不知道为什么没效果） -->
+              <span v-if="cfg.media.poster_strategy === 'face' && faceComp" class="hint"
+                    :class="{ 'pf-warn': !faceComp.state || faceComp.state !== 'ready' }">
+                {{ posterFaceStatus }}
+              </span>
+              <button v-if="cfg.media.poster_strategy === 'face' && faceComp && faceComp.state !== 'ready'"
+                      class="btn tiny" @click="tab = 'ext'">
+                {{ $t('settings.posterFaceGoExt') }}
+              </button>
             </div>
             <span class="hint">{{ $t('settings.posterHint') }}</span>
             <div class="field-row checkbox">

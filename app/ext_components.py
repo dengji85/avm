@@ -91,6 +91,9 @@ def component_dir(cid: str) -> str:
         return os.path.join(ext_root(), "asr-libs")
     if cid == "metatube":
         return os.path.join(ext_root(), "metatube")
+    if cid == "facedet":
+        # opencv（pip --target）与 YuNet 模型都放这里；faces.py 会把它插进 sys.path
+        return os.path.join(ext_root(), "facedet")
     if cid.startswith("asr-model-"):
         size = cid.rsplit("-", 1)[-1]
         return os.path.join(str(DATA_DIR), "models", "faster-whisper-%s" % size)
@@ -299,6 +302,8 @@ def selftest(cid: str) -> Dict[str, Any]:
         return _selftest_asr_libs()
     if cid == "metatube":
         return _selftest_metatube()
+    if cid == "facedet":
+        return _selftest_facedet()
     if cid.startswith("asr-model-"):
         return _selftest_model(cid.rsplit("-", 1)[-1])
     raise ValueError("未知组件: %s" % cid)
@@ -403,6 +408,46 @@ def _selftest_metatube() -> Dict[str, Any]:
     return {"ok": ok, "checks": checks}
 
 
+def _selftest_facedet() -> Dict[str, Any]:
+    """人脸定位自检：opencv 可 import、有 FaceDetectorYN、模型在位、检测不抛异常。"""
+    from . import faces
+
+    st = faces.status()
+    checks: List[Dict[str, Any]] = []
+    ok = True
+    cv_ok = bool(st.get("opencv"))
+    checks.append({"name": "opencv（含 FaceDetectorYN）", "ok": cv_ok,
+                   "detail": st.get("version") or "未安装——点上方「安装」自动 pip 装到组件目录"})
+    ok &= cv_ok
+    has_model = bool(st.get("model"))
+    mp = st.get("model_path") or ""
+    detail = mp
+    if has_model:
+        try:
+            detail += "（%.0f KB）" % (os.path.getsize(mp) / 1024.0)
+        except OSError:
+            pass
+    else:
+        detail = "缺失——点上方「安装」自动下载（227KB），或用手动导入"
+    checks.append({"name": "YuNet 模型", "ok": has_model, "detail": detail})
+    ok &= has_model
+    if cv_ok and has_model:
+        try:
+            from PIL import Image
+
+            im = Image.new("RGB", (640, 480), (120, 90, 80))
+            faces.subject_center(im)
+            checks.append({"name": "检测可运行", "ok": True,
+                           "detail": "纯色测试图检不出人脸属正常——真实封面上才有人脸"})
+        except Exception as e:
+            ok = False
+            checks.append({"name": "检测可运行", "ok": False, "detail": str(e)[:160]})
+    if not ok:
+        checks.append({"name": "影响范围", "ok": True,
+                       "detail": "未就绪时「智能裁切」自动退回右侧裁，不影响其它功能"})
+    return {"ok": ok, "version": st.get("version") or "", "checks": checks}
+
+
 def _selftest_model(size: str) -> Dict[str, Any]:
     from . import asr
     root = asr.model_root(size)
@@ -420,6 +465,33 @@ def _selftest_model(size: str) -> Dict[str, Any]:
             ok = False
         checks.append({"name": f, "ok": present, "detail": detail})
     return {"ok": ok, "checks": checks}
+
+
+def _detect_facedet() -> Dict[str, Any]:
+    """人脸定位（竖版海报智能裁切）：opencv + YuNet 模型，缺哪个都不算就绪。"""
+    from . import faces
+
+    st = faces.status()
+    m = (_load_manifest().get("components") or {}).get("facedet") or {}
+    model_path = str(st.get("model_path") or "")
+    size = int(m.get("size") or 0)
+    if not size and st.get("model"):
+        try:
+            size = os.path.getsize(model_path)
+        except OSError:
+            size = 0
+    return {
+        "id": "facedet", "group": "scraper",
+        "state": "ready" if st.get("ready") else "missing",
+        "version": st.get("version") or "",
+        "path": model_path if st.get("model") else "",
+        "source": "ext" if st.get("model_from") == "ext" else ("system" if st.get("model") else ""),
+        "size": size,
+        # 前端区分「缺哪个」：opencv 缺 → 去组件页装；模型缺 → 首次使用会自动下载
+        "opencv": bool(st.get("opencv")),
+        "model": bool(st.get("model")),
+        "hint": st.get("hint") or "",
+    }
 
 
 def _detect_metatube() -> Dict[str, Any]:
@@ -464,6 +536,7 @@ def status() -> Dict[str, Any]:
         c["active"] = (s == size)
         comps.append(c)
     comps.append(_detect_metatube())
+    comps.append(_detect_facedet())
     with _LOCK:
         task = dict(_TASK)
     return {
@@ -723,6 +796,88 @@ def _install_model(size: str) -> Dict[str, Any]:
 
 
 # ------------------------------------------------------------------ 任务入口
+def _install_facedet(source: str) -> Dict[str, Any]:
+    """两步安装：① opencv（全局已有就跳过，否则 pip --target 装进组件目录）；
+    ② YuNet 模型（227KB，多源依次尝试）。
+
+    装完立即自检（faces.available()）：「面板显示就绪但功能不能用」在这里就拦住。
+    """
+    dest = component_dir("facedet")
+    os.makedirs(dest, exist_ok=True)
+
+    cv_src = "system"
+    try:
+        import cv2  # noqa: F401
+
+        _log("系统已装 opencv，跳过 pip 安装")
+    except ImportError:
+        pip = _pip_cmd()
+        if not pip:
+            raise RuntimeError("环境里没有 pip，无法自动安装 opencv；"
+                               "请手动安装 opencv-python-headless 后点「重新检测」")
+        _set(state="installing", percent=0, speed=0,
+             message="pip 安装 opencv-python-headless（约 60MB）…")
+        cmd = pip + ["install", "--no-cache-dir", "--disable-pip-version-check",
+                     "--upgrade", "--target", dest, "opencv-python-headless>=4.5.4"]
+        if source == "mirror":
+            cmd += ["-i", PYPI_MIRROR]
+        try:
+            import numpy  # noqa: F401  已有 numpy 就只装 opencv，避免把它降级覆盖
+
+            cmd.append("--no-deps")
+        except Exception:
+            pass
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        assert proc.stdout is not None
+        for raw in proc.stdout:
+            _check_cancel()
+            line = raw.decode("utf-8", "replace").strip()
+            if line and ("Collecting" in line or "Downloading" in line
+                         or "Installing" in line or "Successfully" in line
+                         or "ERROR" in line.upper()):
+                _log(line[:160])
+        rc = proc.wait()
+        _check_cancel()
+        if rc != 0:
+            raise RuntimeError("pip 安装失败（退出码 %d），详见日志" % rc)
+        cv_src = "pip"
+        if dest not in sys.path:
+            sys.path.insert(0, dest)   # 让当前进程立刻能 import 新装的 cv2
+
+    model = os.path.join(dest, "face_detection_yunet_2023mar.onnx")
+    if os.path.isfile(model) and os.path.getsize(model) >= 100_000:
+        _log("模型已存在，跳过下载")
+    else:
+        _set(state="downloading", percent=0, downloaded=0, total=0,
+             message="下载 YuNet 模型（227KB）…")
+        last = ""
+        got = False
+        for url in MODEL_URLS:
+            try:
+                _log("下载 " + url)
+                _download(url, model)
+                if os.path.getsize(model) >= 100_000:
+                    got = True
+                    break
+                _log("源返回内容异常（%d 字节），换下一个源" % os.path.getsize(model))
+            except _Cancelled:
+                raise
+            except Exception as e:                       # noqa: BLE001 换下一个源
+                last = str(e)
+                _log("源失败：%s" % last[:140])
+        if not got:
+            raise RuntimeError("YuNet 模型下载失败：%s" % (last[:180] or "所有源都不可达"))
+
+    from . import faces
+
+    if not faces.available():
+        raise RuntimeError("安装完成但人脸检测不可用（import cv2 或模型校验失败），请用「自检」定位")
+    st = faces.status()
+    size = _dir_size(dest)
+    _record("facedet", version=st.get("version") or "", size=size, source=cv_src)
+    return {"version": st.get("version") or "opencv", "size": size}
+
+
 def _install_metatube(source: str) -> Dict[str, Any]:
     """下载官方 Release（镜像优先），解压出单文件服务端并登记。"""
     from . import metatube
@@ -772,7 +927,8 @@ def _install_metatube(source: str) -> Dict[str, Any]:
 
 
 def install(cid: str, source: str = "auto", target: str = "") -> Dict[str, Any]:
-    if cid not in ("ffmpeg", "asr-libs", "asr-model-small", "asr-model-medium", "metatube"):
+    if cid not in ("ffmpeg", "asr-libs", "asr-model-small", "asr-model-medium",
+                   "metatube", "facedet"):
         raise ValueError("未知组件：%s" % cid)
     with _LOCK:
         if _TASK.get("running"):
@@ -795,6 +951,8 @@ def _run_install(cid: str, source: str) -> None:
             info = _install_asr_libs(source)
         elif cid == "metatube":
             info = _install_metatube(source)
+        elif cid == "facedet":
+            info = _install_facedet(source)
         else:
             info = _install_model(cid.rsplit("-", 1)[-1])
         _set(running=False, state="done", percent=100,
@@ -907,6 +1065,29 @@ def import_component(cid: str, src: str) -> Dict[str, Any]:
                     shutil.copy2(s, t)
         _record(cid, version=size, size=_dir_size(dest), source="import")
         return {"version": size}
+    if cid == "facedet":
+        # 手动导入 YuNet 模型（onnx 单文件，或包含它的 zip / 目录）
+        dest = component_dir("facedet")
+        os.makedirs(dest, exist_ok=True)
+        name = "face_detection_yunet_2023mar.onnx"
+        srcf = src
+        if zipfile.is_zipfile(src) or os.path.isdir(src):
+            tmp = os.path.join(ext_root(), "_tmp", "facedet-import")
+            shutil.rmtree(tmp, ignore_errors=True)
+            os.makedirs(tmp, exist_ok=True)
+            if zipfile.is_zipfile(src):
+                _extract(src, tmp)
+            else:
+                shutil.copytree(src, tmp)
+            srcf = _find_file(tmp, name)
+            if not srcf:
+                raise ValueError("目录 / 压缩包里没有 %s" % name)
+        if not (os.path.isfile(srcf) and srcf.lower().endswith(".onnx")
+                and os.path.getsize(srcf) >= 100_000):
+            raise ValueError("请提供有效的 %s（≥100KB）" % name)
+        shutil.copy2(srcf, os.path.join(dest, name))
+        _record("facedet", version="yunet-2023mar", size=_dir_size(dest), source="import")
+        return {"version": "yunet-2023mar"}
     raise ValueError("未知组件：%s" % cid)
 
 
@@ -918,6 +1099,9 @@ def uninstall(cid: str) -> Dict[str, Any]:
     elif cid == "metatube":
         from . import metatube
         metatube.stop()
+        shutil.rmtree(component_dir(cid), ignore_errors=True)
+    elif cid == "facedet":
+        # 只删组件目录里的东西：全局 pip 装的 opencv 不属于组件系统管
         shutil.rmtree(component_dir(cid), ignore_errors=True)
     elif cid.startswith("asr-model-"):
         # 只删默认位置的模型；用户自定义 model_dir 里的东西不属于组件系统管
