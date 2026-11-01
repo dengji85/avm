@@ -6,6 +6,9 @@
               <button class="btn tiny ghost" :disabled="ext.loading" @click="loadExt">
                 {{ $t('aiCenter.extRecheck') }}
               </button>
+              <button class="btn tiny ghost" @click="startImport('bundle')">
+                {{ $t('aiCenter.extBundleBtn') }}
+              </button>
             </div>
           </div>
           <template v-for="g in groups" :key="g.key">
@@ -192,7 +195,7 @@
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 
 import {
-  extCancel, extImport, extInstall, extSelftest, extStatus, extTask, extUninstall, getConfig, putConfig,
+  extCancel, extImport, extBundleImport, extInstall, extSelftest, extStatus, extTask, extUninstall, getConfig, putConfig,
   mtStart, mtStop, mtTest,
 } from '../api.js'
 import { t } from '../i18n/index.js'
@@ -347,6 +350,14 @@ async function doImport() {
   if (!imp.dir || imp.busy) return
   imp.busy = true
   try {
+    if (imp.cid === 'bundle') {
+      // 整合包导入是后台任务（解压 + 逐组件搬运，可能一两分钟），走进度轮询
+      await extBundleImport(imp.dir)
+      imp.cid = ''
+      startExtPoll()
+      await loadExt()
+      return
+    }
     await extImport(imp.cid, imp.dir)
     toast(t('aiCenter.extImported'), 'ok')
     imp.cid = ''

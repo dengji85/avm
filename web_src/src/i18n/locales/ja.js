@@ -1881,6 +1881,8 @@ export default {
     extAsrLibsPh: '空欄で管理位置のエンジンを使用',
     extAsrModelPh: '空欄で data/models',
     extRecheck: '再チェック',
+        extBundleBtn: '統合パックを導入',
+        extBundleHint: 'パックには FFmpeg / 音声認識依存 / 顔検出ランタイム / MetaTube が入っており、導入すれば全て揃います（音声モデルは任意）。GitHub Releases からダウンロード可能。国内回線やオフライン環境向け。',
     extInstall: 'インストール',
     extImport: '手動取り込み',
     extImportPh: 'zip またはフォルダーのフルパス',
@@ -1913,6 +1915,7 @@ export default {
       'asr-model-small': '音声モデル small',
       'asr-model-medium': '音声モデル medium',
       'metatube': 'MetaTube スクレイパー',
+      bundle: '統合オフラインパック',
 
       facedet: '顔検出（スマート裁切）',
     },

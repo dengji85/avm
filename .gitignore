@@ -15,6 +15,8 @@ tools/*
 # 但脚本类是功能的一部分，需要入库（模型 / 产物仍忽略）
 !tools/fetch_asr_model.py
 !tools/build_asr_zip.py
+!tools/build_opencv_zip.py
+!tools/build_ext_bundle.py
 
 # ----- 构建 / 打包产物 -----
 dist/

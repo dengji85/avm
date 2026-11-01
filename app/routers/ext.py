@@ -44,6 +44,21 @@ def ext_cancel() -> Dict[str, Any]:
     return ext_components.cancel()
 
 
+# 注意：必须在 /ext/{cid}/import **之前**注册——否则 bundle 会被当成 cid 吃掉
+@router.post("/ext/bundle/import")
+def ext_bundle_import(payload: Dict[str, Any] = Body(default={})) -> Dict[str, Any]:
+    """导入整合离线包（tools/build_ext_bundle.py 的产物）：按 manifest 一次装齐所有组件。
+
+    进度走 /ext/task 的任务通道（cid='bundle'）。单组件失败不中断其余组件。
+    """
+    from .. import ext_components
+
+    try:
+        return ext_components.import_bundle(str((payload or {}).get("dir") or ""))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e.args[0] if e.args else str(e)))
+
+
 @router.post("/ext/{cid}/import")
 def ext_import(cid: str, payload: Dict[str, Any] = Body(default={})) -> Dict[str, Any]:
     """手动导入离线包：zip / tar 包或已解压目录（服务端所在机器可访问的路径）。"""

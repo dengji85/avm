@@ -1846,6 +1846,8 @@ export default {
     extAsrLibsPh: '留空使用擴充元件安裝的語音元件',
     extAsrModelPh: '留空使用 data/models',
     extRecheck: '重新檢測',
+        extBundleBtn: '匯入整合包',
+        extBundleHint: '包內含 FFmpeg / 語音辨識依賴 / 人臉定位執行庫 / MetaTube，匯入後全部就位（可選含語音模型）。可從 GitHub Releases 下載，適合國內網路或離線機器。',
     extInstall: '一鍵安裝',
     extImport: '手動匯入',
     extImportPh: 'zip 壓縮包或目錄的完整路徑',
@@ -1878,6 +1880,7 @@ export default {
       'asr-model-small': '語音模型 small',
       'asr-model-medium': '語音模型 medium',
       'metatube': 'MetaTube 刮削引擎',
+      bundle: '整合離線包',
 
       facedet: '人臉定位（智慧裁切）',
     },

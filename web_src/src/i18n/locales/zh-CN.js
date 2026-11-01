@@ -1839,6 +1839,8 @@ export default {
     extAsrLibsPh: '留空使用扩展组件安装的语音组件',
     extAsrModelPh: '留空使用 data/models',
     extRecheck: '重新检测',
+        extBundleBtn: '导入整合包',
+        extBundleHint: '包内含 FFmpeg / 语音识别依赖 / 人脸定位运行库 / MetaTube，导入后全部就位（可选含语音模型）。可从 GitHub Releases 下载，适合国内网络或离线机器。',
     extInstall: '一键安装',
     extImport: '手动导入',
     extImportPh: 'zip 包或目录的完整路径',
@@ -1871,6 +1873,7 @@ export default {
       'asr-model-small': '语音模型 small',
       'asr-model-medium': '语音模型 medium',
       'metatube': 'MetaTube 刮削引擎',
+      bundle: '整合离线包',
 
       facedet: '人脸定位（智能裁切）',
     },

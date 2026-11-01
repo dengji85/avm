@@ -1838,6 +1838,8 @@ export default {
     extAsrLibsPh: 'Empty = the managed speech engine',
     extAsrModelPh: 'Empty = data/models',
     extRecheck: 'Re-check',
+        extBundleBtn: 'Import all-in-one pack',
+        extBundleHint: 'Contains FFmpeg / speech deps / face-detection runtime / MetaTube — one import sets everything up (speech model optional). Download from GitHub Releases; good for slow networks or offline machines.',
     extInstall: 'Install',
     extImport: 'Import',
     extImportPh: 'Full path to a zip or folder',
@@ -1870,6 +1872,7 @@ export default {
       'asr-model-small': 'Speech model (small)',
       'asr-model-medium': 'Speech model (medium)',
       'metatube': 'MetaTube scraper engine',
+      bundle: 'All-in-one offline pack',
 
       facedet: 'Face detection (smart crop)',
     },

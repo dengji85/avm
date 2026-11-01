@@ -345,6 +345,7 @@ export const extTask = () => get('/ext/task')
 export const extInstall = (cid, source = 'auto') => post(`/ext/${cid}/install`, { source })
 export const extCancel = () => post('/ext/task/cancel', {})
 export const extImport = (cid, dir) => post(`/ext/${cid}/import`, { dir })
+export const extBundleImport = (dir) => post('/ext/bundle/import', { dir })
 export const extUninstall = (cid) => post(`/ext/${cid}/uninstall`, {})
 /* MetaTube 刮削引擎（可选数据源）：状态 / 安装 / 启停 / 连接测试 */
 export const mtStart = () => post('/metatube/start', {})

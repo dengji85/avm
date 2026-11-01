@@ -50,14 +50,18 @@ FFMPEG_SOURCES: Dict[str, List[str]] = {
 }
 
 # 语音识别依赖的预打包 zip（pip install --target 产物，发布页提供）。
+# 镜像前缀优先：GitHub 直连对国内用户常常 <100KB/s 甚至失败，ghfast.top 实测快得多；
 # 没发布 / 链接失效时走手动导入，UI 会给出明确提示。
 ASR_LIBS_URLS = [
+    "https://ghfast.top/https://github.com/dengji85/avm/releases/latest/download/asr-libs-cp311-win64.zip",
     "https://github.com/dengji85/avm/releases/latest/download/asr-libs-cp311-win64.zip",
 ]
 
 # opencv 运行库的预打包 zip（pip install --target 的产物，tools/build_opencv_zip.py 打包）。
 # 打包版 exe 里没有 pip，「人脸定位」组件靠下载这个 zip 安装，机制与 asr-libs 相同。
+# 同样镜像优先（ghfast.top 对 GitHub Releases 直链有效）。
 FACEDET_LIBS_URLS = [
+    "https://ghfast.top/https://github.com/dengji85/avm/releases/latest/download/opencv-libs-cp311-win64.zip",
     "https://github.com/dengji85/avm/releases/latest/download/opencv-libs-cp311-win64.zip",
 ]
 
@@ -690,11 +694,22 @@ def _fetch_archive(urls: List[str], dest: str, what: str) -> str:
 
 
 # ------------------------------------------------------------------ 安装：ffmpeg
+def _ffmpeg_source_urls() -> List[str]:
+    """GitHub 源套国内镜像前缀（优先），gyan.dev 直连兜底。"""
+    out: List[str] = []
+    for u in FFMPEG_SOURCES.get("nt" if os.name == "nt" else "posix", []):
+        if "github.com" in u:
+            out.append("https://ghfast.top/" + u)
+            out.append("https://gh-proxy.com/" + u)
+        out.append(u)
+    return out
+
+
 def _install_ffmpeg(source: str) -> Dict[str, Any]:
     _set(state="downloading", percent=0, message="准备下载…", downloaded=0, total=0)
     arch = os.path.join(ext_root(), "_tmp")
     os.makedirs(arch, exist_ok=True)
-    pkg = _fetch_archive(FFMPEG_SOURCES.get("nt" if os.name == "nt" else "posix", []),
+    pkg = _fetch_archive(_ffmpeg_source_urls(),
                          os.path.join(arch, "ffmpeg.pkg"), "ffmpeg")
 
     _set(state="extracting", percent=0, message="解压中…", speed=0)
@@ -1005,6 +1020,164 @@ def _run_install(cid: str, source: str) -> None:
 
 
 # ------------------------------------------------------------------ 导入 / 卸载
+# ------------------------------------------------------------------ 整合离线包
+
+def import_bundle(src: str) -> Dict[str, Any]:
+    """导入整合离线包（tools/build_ext_bundle.py 的产物）：一次导入全部组件。
+
+    与单组件导入共用任务通道（cid='bundle'），前端进度条可见「导入 xx（2/4）…」。
+    """
+    src = str(src or "").strip().strip('"')
+    if not src or not os.path.exists(src):
+        raise ValueError("路径不存在：%s" % src)
+    with _LOCK:
+        if _TASK.get("running"):
+            raise ValueError("已有组件任务在进行中：%s" % _TASK.get("cid"))
+        _TASK.clear()
+        _TASK.update({
+            "running": True, "cid": "bundle", "state": "prepare", "percent": 0,
+            "message": "准备中…", "downloaded": 0, "total": 0, "speed": 0,
+            "cancel": False, "log": [], "started": int(time.time()),
+        })
+    submit_task(_run_bundle_import, src)
+    return {"ok": True}
+
+
+def _run_bundle_import(src: str) -> None:
+    try:
+        result = _do_import_bundle(src)
+        _set(running=False, state="done", percent=100,
+             message="导入完成：%s" % result["summary"], ended=int(time.time()))
+        _log("导入完成 " + result["summary"])
+    except _Cancelled:
+        _set(running=False, state="cancelled", message="已取消", ended=int(time.time()))
+    except Exception as e:                               # noqa: BLE001 任务层兜底
+        _set(running=False, state="failed", message=str(e)[:300], ended=int(time.time()))
+        _log("失败：" + str(e)[:160])
+
+
+def _do_import_bundle(src: str) -> Dict[str, Any]:
+    src = str(src or "").strip().strip('"')
+    if not src or not os.path.exists(src):
+        raise ValueError("路径不存在：%s" % src)
+    _set(state="extracting", message="读取整合包…")
+    work = os.path.join(ext_root(), "_tmp", "bundle")
+    shutil.rmtree(work, ignore_errors=True)
+    os.makedirs(work, exist_ok=True)
+    if zipfile.is_zipfile(src):
+        _extract(src, work)
+    else:
+        shutil.copytree(src, work)
+
+    mf = os.path.join(work, "manifest.json")
+    if not os.path.isfile(mf):
+        raise ValueError("这不是整合离线包（缺 manifest.json）——单个组件请用各自的「手动导入」")
+    try:
+        with open(mf, encoding="utf-8") as f:
+            manifest = json.loads(f.read() or "{}")
+    except Exception:
+        raise ValueError("manifest.json 解析失败")
+    comps = manifest.get("components") or {}
+    if not comps:
+        raise ValueError("manifest.json 里没有组件清单")
+
+    labels = {"ffmpeg": "FFmpeg", "asr-libs": "语音识别依赖", "facedet": "人脸定位运行库",
+              "metatube": "MetaTube", "asr-model-small": "语音模型 small"}
+    installed: Dict[str, Any] = {}
+    failed: Dict[str, str] = {}
+    total = len(comps)
+    for idx, (cid, meta) in enumerate(comps.items(), 1):
+        _check_cancel()
+        sub = os.path.join(work, str(meta.get("dir") or cid))
+        label = labels.get(cid, cid)
+        _set(message="导入 %s（%d/%d）…" % (label, idx, total))
+        try:
+            installed[cid] = _import_bundle_component(cid, sub)
+            _record(cid, source="bundle")
+            _log("%s 导入完成" % label)
+        except Exception as e:                           # noqa: BLE001 单组件失败不中断
+            failed[cid] = str(e)[:160]
+            _log("%s 导入失败：%s" % (label, str(e)[:140]))
+
+    try:
+        fd = component_dir("facedet")
+        if os.path.isdir(fd) and fd not in sys.path:
+            sys.path.insert(0, fd)
+    except Exception:
+        pass
+    shutil.rmtree(work, ignore_errors=True)
+    summary = "%d 个组件%s" % (len(installed), ("，失败 %d" % len(failed)) if failed else "")
+    return {"installed": installed, "failed": failed, "summary": summary}
+
+
+def _import_bundle_component(cid: str, sub: str) -> int:
+    """把整合包里某组件的目录安装到位，返回搬动的文件数。"""
+    if not os.path.isdir(sub):
+        raise ValueError("包内缺少目录 %s" % os.path.basename(sub))
+    if cid == "ffmpeg":
+        d = component_dir("ffmpeg")
+        os.makedirs(d, exist_ok=True)
+        n = 0
+        for f in os.listdir(sub):
+            s = os.path.join(sub, f)
+            if os.path.isfile(s):
+                shutil.copy2(s, os.path.join(d, f))
+                n += 1
+        exe = os.path.join(d, "ffmpeg.exe" if os.name == "nt" else "ffmpeg")
+        if not os.path.isfile(exe):
+            raise ValueError("目录里没有 ffmpeg 可执行文件")
+        ver = _ffmpeg_version(exe)
+        if not ver:
+            raise ValueError("ffmpeg 无法运行（缺系统依赖？）")
+        _record("ffmpeg", version=ver, size=_dir_size(d), source="bundle")
+        return n
+    if cid == "metatube":
+        from . import metatube
+
+        exe = ""
+        for root, _dirs, files in os.walk(sub):
+            for f in files:
+                lf = f.lower()
+                if lf.startswith("metatube-server") and (lf.endswith(".exe") or "." not in lf):
+                    exe = os.path.join(root, f)
+                    break
+            if exe:
+                break
+        if not exe:
+            raise ValueError("目录里没有 MetaTube 可执行文件")
+        d = metatube.component_dir()
+        os.makedirs(d, exist_ok=True)
+        shutil.copy2(exe, metatube.binary_path())
+        if os.name != "nt":
+            os.chmod(metatube.binary_path(), 0o755)
+        ver = metatube.probe_version(metatube.binary_path()) or "unknown"
+        _record("metatube", version=ver, size=_dir_size(d), source="bundle")
+        return 1
+    if cid in ("asr-libs", "facedet"):
+        d = component_dir(cid)
+        shutil.rmtree(d, ignore_errors=True)
+        shutil.copytree(sub, d)
+        if cid == "asr-libs" and not _has_pkg(d, "faster_whisper"):
+            raise ValueError("目录里没有 faster_whisper 包")
+        if cid == "facedet" and dest_cv2_missing(d):
+            raise ValueError("目录里没有 cv2 包")
+        return sum(len(fs) for _r, _ds, fs in os.walk(d))
+    if cid.startswith("asr-model-"):
+        size = cid.rsplit("-", 1)[-1]
+        if not os.path.isfile(os.path.join(sub, "model.bin")):
+            raise ValueError("目录里没有 model.bin")
+        d = os.path.join(str(DATA_DIR), "models", "faster-whisper-%s" % size)
+        shutil.rmtree(d, ignore_errors=True)
+        shutil.copytree(sub, d)
+        _record(cid, version=size, size=_dir_size(d), source="bundle")
+        return 1
+    raise ValueError("整合包里有未知组件：%s" % cid)
+
+
+def dest_cv2_missing(d: str) -> bool:
+    return not os.path.isdir(os.path.join(d, "cv2"))
+
+
 def import_component(cid: str, src: str) -> Dict[str, Any]:
     """手动导入：zip 包或已解压 / 已存在的目录。"""
     src = str(src or "").strip().strip('"')
