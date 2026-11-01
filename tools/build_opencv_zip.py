@@ -92,8 +92,8 @@ def build(out_dir, mirror):
     print("打包完成：%s（%d 个文件，%.1f MB）"
           % (dest.name, n, dest.stat().st_size / 1048576.0))
 
+    # SHA256 只打印（GitHub 资产详情页自带 digest，不再单独出 .sha256 文件）
     h = hashlib.sha256(dest.read_bytes()).hexdigest()
-    (out_dir / (name + ".sha256")).write_text("%s  %s\n" % (h, name), encoding="ascii")
     print("SHA256:", h)
     shutil.rmtree(src, ignore_errors=True)
     return dest

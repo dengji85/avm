@@ -253,9 +253,9 @@ def main():
                 zf.write(p, p.relative_to(WORK).as_posix())
                 n += 1
     h = hashlib.sha256(dest.read_bytes()).hexdigest()
-    (out / (dest.name + ".sha256")).write_text("%s  %s\n" % (h, dest.name), encoding="ascii")
 
-    # 指针文件：组件更新时只替换 Release 里的 zip 与这个 json，应用端无需改代码
+    # 指针文件：组件更新时只替换 Release 里的 zip 与这个 json，应用端无需改代码。
+    # sha256 写在这里——GitHub 资产详情页虽有 digest，但应用端自动下载时用 json 对照更直接。
     info = {
         "file": dest.name,
         "sha256": h,
@@ -270,8 +270,7 @@ def main():
     print("SHA256:", h)
     print("\n发布（一次上传，长期有效——放 ext-bundle 固定 tag，与应用发版解耦）：")
     print("  1. %s" % dest.name)
-    print("  2. %s.sha256" % dest.name)
-    print("  3. bundle-latest.json   ← 指针；以后组件更新只替换 zip 和它，应用不用动")
+    print("  2. bundle-latest.json   ← 指针；以后组件更新只替换 zip 和它，应用不用动")
     print("  首次创建：Releases → New release → tag 填 ext-bundle")
     shutil.rmtree(WORK, ignore_errors=True)
     shutil.rmtree(arch, ignore_errors=True)
