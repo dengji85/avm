@@ -89,6 +89,7 @@ export default {
     nocover: '缺封面',
     noscrape: '未刮削',
     nocode: '無番號',
+    archived: '已封存',
     embedZh: '內嵌中文字幕',
     subtitleShort: '字',
     uncensoredShort: '無',
@@ -226,6 +227,9 @@ export default {
     close: '關閉',
     select: '選擇',
     up: '上級',
+
+    joinedCollection: '已加入片單',
+
   },
   home: {
     subtitle: '歡迎回來，接著看，或者逛逛你的收藏',
@@ -397,6 +401,9 @@ export default {
     doneTitle: '本輪已全部過完',
     again: '再來一輪',
     dragHint: '拖曳卡片左右滑動 · 雙擊封面查看詳情',
+
+    recommend: '猜你喜歡',
+
   },
   detail: {
     fRating: '評分',
@@ -448,8 +455,6 @@ export default {
     aiPlotMetaDone: '沒有可用字幕，已按中繼資料生成簡介',
     aiFromSubs: 'AI 根據字幕生成',
     aiFromMeta: 'AI 根據中繼資料生成',
-    aiPanel: 'AI 助手',
-    aiPanelHint: '劇情簡介、標籤、字幕翻譯、劇情問答、相似推薦都在這裡',
     aiOffHint: 'AI 尚未啟用：請到「設定 → AI 增強」填寫介面位址與金鑰並開啟，再回到這裡使用。',
     scanSubs: '掃描同目錄字幕',
     scanSubsHint: '把 .srt/.ass/.vtt 放到影片同目錄後點一下，即可登記給播放器與 AI 使用',
@@ -457,25 +462,6 @@ export default {
     subsFound: '已登記 {n} 條外掛字幕',
     subsNone: '沒有發現新的外掛字幕',
     subsCount: '已登記 {n} 條',
-    aiPanelPlot: '劇情',
-    aiPanelPlotHint: '優先根據字幕總結劇情；沒有字幕時按中繼資料生成，結果寫入簡介。',
-    aiPanelPlotAgain: '重新生成劇情簡介',
-    aiPanelTags: '標籤',
-    aiPanelTagsHint: '根據番号 / 標題 / 女優建議 3–8 個標籤，可直接追加。',
-    aiPanelTagsRun: 'AI 建議標籤',
-    aiPanelSubs: '字幕',
-    aiPanelSubsHint: '讀取內嵌或外掛字幕，譯成目標語言並產生 .srt。',
-    aiPanelSubsNone: '還沒有 AI 譯文',
-    aiPanelAsk: '問答',
-    aiPanelAskHint: '只依據字幕回答，並給出 [分:秒] 依據；字幕裡沒有就會直說。',
-    aiPanelAskPh: '例如：結局她們在一起了嗎？',
-    aiPanelAskRun: '提問',
-    aiPanelAskFail: '問答失敗',
-    aiPanelAskHistory: '最近問答',
-    aiPanelSim: '推薦',
-    aiPanelSimHint: '按標籤 / 女優 / 系列 / 廠商 / 劇情相似度排序，不消耗 token。',
-    aiPanelSimNone: '暫無相似影片（庫裡可比對的條目太少）',
-    aiPanelSimLoading: '正在計算…',
     aiEditable: '可在「編輯資料」中修改',
     cast: '投屏到電視',
     castTitle: '選擇投屏裝置',
@@ -797,6 +783,27 @@ export default {
     insTrend: '近期觀看環比 {pct}%（正為升溫，負為降溫）。',
     insWeek: '工作日看了約 {work} 小時，週末約 {weekend} 小時。',
     insUnc: '無碼單片均看 {unc} 分鐘，比有碼（{cen} 分鐘）更久。',
+
+    matchCovers: '識別封面',
+
+    removedFail: '移除失敗',
+
+    taste_genre_focus: '類型專注',
+
+    taste_actress_loyalty: '女優專一',
+
+    taste_long_form: '長片偏好',
+
+    taste_freshness: '追新',
+
+    taste_uncensored: '無碼傾向',
+
+    taste_night_owl: '夜貓子',
+
+    taste_completion: '看完率',
+
+    taste_rewatch: '重溫',
+
   },
   onboarding: {
     title: '歡迎使用片匣 (AVM)',

@@ -89,6 +89,7 @@ export default {
     nocover: 'No Cover',
     noscrape: 'Not Scraped',
     nocode: 'No Code',
+    archived: 'Archived',
     embedZh: 'Embedded Chinese subs',
     subtitleShort: 'Sub',
     uncensoredShort: 'Unc',
@@ -226,6 +227,9 @@ export default {
     close: 'Close',
     select: 'Select',
     up: 'Up',
+
+    joinedCollection: 'Added to collection',
+
   },
   home: {
     subtitle: 'Welcome back. Pick up where you left off, or browse your collection.',
@@ -586,6 +590,9 @@ export default {
     playCount: 'Played {n} times',
     genFailed: 'Generation failed',
     subFile: '{lang} subtitle',
+
+    addToCollection: 'Add to collection',
+
   },
   subtitle: {
     title: 'Subtitle Match',
@@ -784,6 +791,11 @@ export default {
     insTrend: 'Recent watching is {pct}% vs earlier (positive = heating up, negative = cooling).',
     insWeek: 'About {work}h on weekdays, {weekend}h on weekends.',
     insUnc: 'Uncensored averages {unc} min per title, longer than censored ({cen} min).',
+
+    matchCovers: 'Match covers',
+
+    removedFail: 'Remove failed',
+
   },
   onboarding: {
     title: 'Welcome to AVM (片匣)',

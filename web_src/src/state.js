@@ -310,6 +310,8 @@ export const FLAGS = [
   ['hd4k', 'flag.hd4k', '4K'], ['vr', 'flag.vr', 'VR'],
   ['unwatched', 'flag.unwatched', '○'], ['watched', 'flag.watched', '●'],
   ['nocover', 'flag.nocover', '▢'], ['noscrape', 'flag.noscrape', '⚑'], ['nocode', 'flag.nocode', '?'],
+  // 归档：默认不出现在任何列表里，靠这个标记才能把它们捞出来看/恢复
+  ['archived', 'flag.archived', '▣'],
 ]
 
 export const FACET_KINDS = [

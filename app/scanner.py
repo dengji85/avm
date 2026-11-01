@@ -472,26 +472,6 @@ def register_sidecar_subtitles_after_scan(progress_cb=None) -> int:
     return added
 
 
-def remove_missing():
-    """清理已被标记为 missing 的文件记录，并删除因此失去所有文件的影片。"""
-    from . import store
-    conn = connect()
-    try:
-        ids = [r["id"] for r in conn.execute(
-            "SELECT id FROM movie_files WHERE missing = 1").fetchall()]
-        for fid in ids:
-            conn.execute("DELETE FROM movie_files WHERE id = ?", (fid,))
-        orphan = conn.execute(
-            "SELECT m.id FROM movies m WHERE NOT EXISTS "
-            "(SELECT 1 FROM movie_files f WHERE f.movie_id = m.id)").fetchall()
-        for r in orphan:
-            store.delete_movie(conn, r["id"])
-        conn.commit()
-        return len(ids), len(orphan)
-    finally:
-        conn.close()
-
-
 def preview_parse(names):
     """供前端「文件名解析预览」使用：返回每个输入名的解析结果（纯文件名解析，不访问磁盘）。"""
     out = []

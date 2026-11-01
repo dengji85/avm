@@ -59,6 +59,8 @@ FLAG_CLAUSES = {
     "noscrape": "m.scraped_at = ''",
     "nocode": "m.has_code = 0",
     "multi": "m.id IN (SELECT movie_id FROM movie_actress GROUP BY movie_id HAVING COUNT(*) >= 2)",
+    # 归档影片默认被排除在所有列表外，只有显式带上这个标记才反过来「只看归档」
+    "archived": "COALESCE(m.archived_at,'') <> ''",
 }
 
 
@@ -608,7 +610,11 @@ def _build_where(params: Dict[str, Any]) -> Tuple[str, List[Any]]:
             else (" WHERE " + joined)
     # 归档影片默认不出现在浏览 / 检索结果里（记录与观看历史都还在，可随时恢复）。
     # 这条始终用 AND 追加，不受用户选的 OR 影响。
-    if not params.get("include_archived"):
+    # 例外：勾了「已归档」标记时反过来只看归档（条件由 FLAG_CLAUSES 提供），
+    # 否则默认排除会把它们一起滤掉，归档就成了「查不到的孤岛」。
+    if "archived" in _split_multi(params.get("flags")):
+        pass
+    elif not params.get("include_archived"):
         where += (" AND " if where else " WHERE ") + "COALESCE(m.archived_at, '') = ''"
     return where, args
 
@@ -1425,7 +1431,8 @@ def restore_movies(conn: sqlite3.Connection, ids: Sequence[int]) -> int:
         return 0
     ph = ",".join("?" * len(ids))
     cur = conn.execute(
-        "UPDATE movies SET archived_at = '', archive_reason = '' WHERE id IN (" + ph + ")",
+        "UPDATE movies SET archived_at = '', archive_reason = '' "
+        "WHERE id IN (" + ph + ") AND COALESCE(archived_at, '') <> ''",
         ids,
     )
     return int(cur.rowcount or 0)

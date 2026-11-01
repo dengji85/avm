@@ -89,6 +89,7 @@ export default {
     nocover: 'カバーなし',
     noscrape: '未取得',
     nocode: '品番なし',
+    archived: 'アーカイブ済み',
     embedZh: '内蔵中文字幕',
     subtitleShort: '字',
     uncensoredShort: '無',
@@ -226,6 +227,9 @@ export default {
     close: '閉じる',
     select: '選択',
     up: '上へ',
+
+    joinedCollection: 'コレクションに追加済み',
+
   },
   home: {
     subtitle: 'おかえりなさい。続きを観るか、コレクションを眺めよう',
@@ -390,6 +394,23 @@ export default {
     doneTitle: 'このラウンドは完了しました',
     again: 'もう一回',
     dragHint: 'カードを左右にスワイプ · ダブルクリックで詳細',
+
+    recommend: 'おすすめ',
+
+    noHistory: 'まだ視聴履歴がありません。まずはランダムに見てみましょう。数本見るとおすすめの精度が上がります',
+
+    why_genre: 'よく見る「{name}」',
+
+    why_actress: '{name} が好み',
+
+    why_studio: 'よく見るメーカー {name}',
+
+    why_series: 'よく見るシリーズ {name}',
+
+    why_runtime: '再生時間が好みに合う',
+
+    why_year: '年代が好みに合う',
+
   },
   detail: {
     fRating: '評価',
@@ -578,6 +599,9 @@ export default {
     playCount: '再生 {n} 回',
     genFailed: '生成失敗',
     subFile: '{lang}字幕',
+
+    addToCollection: 'コレクションに追加',
+
   },
   subtitle: {
     title: '字幕マッチング',
@@ -754,6 +778,55 @@ export default {
     insTrend: '直近の視聴は前比 {pct}%（正は増加、負は減少）。',
     insWeek: '平日約 {work} 時間、週末約 {weekend} 時間。',
     insUnc: '無修正は作品あたり平均 {unc} 分、有修正（{cen} 分）より長く見る。',
+
+    matchCovers: 'カバーを照合',
+
+    removedFail: '削除に失敗',
+
+    waSegMethod: '方法',
+
+    tabOverview: '概要',
+
+    tabLibrary: 'マイコレクション',
+
+    tabTaste: '好み',
+
+    tabActivity: '視聴履歴',
+
+    calTitle: '視聴カレンダー',
+
+    calNone: '未視聴',
+
+    calSessions: ' 回',
+
+    calLess: '少',
+
+    calMore: '多',
+
+    calSummary: '{days} 日分の視聴記録 · 合計 {hours}',
+
+    calDows: '日,月,火,水,木,金,土',
+
+    tasteTitle: '好みプロファイル',
+
+    tasteAll: 'すべて',
+
+    taste_genre_focus: 'ジャンル集中',
+
+    taste_actress_loyalty: '女優一筋',
+
+    taste_long_form: '長時間作品好み',
+
+    taste_freshness: '新作志向',
+
+    taste_uncensored: '無修正傾向',
+
+    taste_night_owl: '夜型',
+
+    taste_completion: '完走率',
+
+    taste_rewatch: 'リピート',
+
   },
   onboarding: {
     title: '片匣 (AVM) へようこそ',
@@ -1355,6 +1428,29 @@ export default {
       privacy: 'プライバシー',
       about: 'について',
     },
+
+    previewQuality: 'プレビュー画像の密度',
+
+    pvLow: '少（省容量・生成が速い）',
+
+    pvSmart: 'スマート（長さに応じて自動）',
+
+    pvHigh: '多（より細かいプレビュー）',
+
+    previewQualityHint: 'ホバー時のシークバー / モバイルのスワイプで表示されるプレビュー枚数に影響します。新規生成分から反映されます',
+
+    regenPreviewBtn: '現在の密度で全プレビューを再生成',
+
+    regenPreviewHint: '現在の密度設定でライブラリ全作品のプレビュー画像を再生成します。作品数とディスク速度により時間がかかります。バックグラウンドで実行され、ページは閉じて構いません',
+
+    regenPreviewTitle: '全プレビュー画像を再生成しますか？',
+
+    regenPreviewDesc: '現在の密度設定で、全作品のプレビュー画像をバックグラウンドで再生成します（時間がかかります。ページを閉じても処理は続きます）。',
+
+    regenPreviewOk: '生成を開始',
+
+    regenPreviewStart: 'バックグラウンドで全プレビュー画像の再生成を開始しました',
+
   },
   tasks: {
     center: 'タスクセンター',

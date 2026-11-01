@@ -93,6 +93,7 @@ export default {
     nocover: '缺封面',
     noscrape: '未刮削',
     nocode: '无番号',
+    archived: '已归档',
     embedZh: '内嵌中文字幕',
     subtitleShort: '字',
     uncensoredShort: '无',
