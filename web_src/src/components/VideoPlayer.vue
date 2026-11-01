@@ -494,18 +494,89 @@ async function openExternal() {
   } catch (e) { toast(e.message, 'err') }
 }
 
-/** 切换系统原生全屏（不暂停） */
+/* ---- 全屏 ----
+ * 各端能力差别很大，按「能用的最强方案」逐级降级：
+ *   1. 标准 Fullscreen API —— 桌面 Chrome/Edge/Firefox、Android Chrome
+ *   2. webkit 前缀元素全屏 —— 旧 Safari、部分 Android WebView
+ *   3. iOS Safari：元素级全屏至今不支持，只能让 <video> 进系统原生全屏
+ *   4. 都不支持（老 WebView）：退化为「网页全屏」（纯 CSS 铺满视口）
+ * 原实现只写了第 1 种：iPhone 上 el.requestFullscreen 根本不存在，调用处直接
+ * 抛 TypeError（.catch 挂在返回值上，兜不住调用本身），表现为「点了没反应」。
+ */
+const webFs = ref(false)      // 是否处于网页全屏（CSS 兜底态）
+const needOwnFs = ref(false)  // 控制条没有原生全屏按钮时（iOS），右上角补一个
+
+function fullscreenEl() {
+  return document.fullscreenElement || document.webkitFullscreenElement || null
+}
+
+/** video.js 在 iOS 上不渲染 fullscreen 控件，此时需要自带一个入口 */
+function detectOwnFullscreen() {
+  const bar = player && player.controlBar && player.controlBar.el()
+  needOwnFs.value = !bar || !bar.querySelector('.vjs-fullscreen-control')
+}
+
+/** 网页全屏：不依赖任何浏览器 API，纯 CSS 把播放器铺满视口 */
+function toggleWebFullscreen() {
+  webFs.value = !webFs.value
+}
+// 兜底全屏铺满时锁住页面滚动（移动端尤其重要，否则手指一滑整页跟着动）
+watch(webFs, (on) => {
+  document.body.style.overflow = on ? 'hidden' : ''
+})
+
+/** 切换全屏（不暂停） */
 function toggleNativeFullscreen() {
-  // 关键：对 player 根元素（.video-js）请求全屏，而不是底层 <video>。
-  // 若只全屏 <video>，overlay/控制条会留在原位、不在全屏画面上，导致全屏下点不到暂停。
-  // 全屏根元素后，overlay 与控制条随之一起全屏，单击/双击仍可用。
-  const el = player ? player.el() : videoEl
-  if (!el) return
-  if (document.fullscreenElement) {
-    document.exitFullscreen().catch(() => {})
-  } else {
-    el.requestFullscreen().catch(() => {})
+  const root = player ? player.el() : null
+  const video = videoEl || (root && root.querySelector('video'))
+  // 1) 已在元素全屏：退出（标准 / webkit 前缀两种 API）
+  if (fullscreenEl()) {
+    if (document.exitFullscreen) document.exitFullscreen().catch(() => {})
+    else if (document.webkitExitFullscreen) document.webkitExitFullscreen()
+    return
   }
+  // 2) 处于 iOS 原生全屏（此时 document.fullscreenElement 仍是 null）
+  if (video && video.webkitDisplayingFullscreen) {
+    if (video.webkitExitFullscreen) video.webkitExitFullscreen()
+    return
+  }
+  if (webFs.value) { webFs.value = false; return }
+  // 3) 元素级全屏：必须对 .video-js 根元素请求，只全屏 <video> 会让
+  //    overlay/控制条留在原位，全屏画面里点不到暂停。
+  const el = root || video
+  if (el && el.requestFullscreen) { el.requestFullscreen().catch(() => {}); return }
+  if (el && el.webkitRequestFullscreen) { el.webkitRequestFullscreen(); return }
+  // 4) iOS Safari：整块 <video> 走系统原生全屏（字幕样式/浮层不参与，
+  //    但这是 iPhone 上唯一可行的全屏，比什么都不做强）
+  if (video && video.webkitEnterFullscreen) { video.webkitEnterFullscreen(); return }
+  // 5) 最后兜底
+  toggleWebFullscreen()
+}
+
+/* ---- 横屏 ----
+ * Android Chrome：进入元素全屏后可以调用 Screen Orientation API 锁横屏，
+ *   退出全屏时解锁（不锁的话竖着拿手机就是竖屏铺满，画面很小）。
+ * iOS Safari：没有 screen.orientation.lock（元素全屏本身也不支持），
+ *   但走 webkitEnterFullscreen 后是系统播放器，方向由系统按视频比例处理，
+ *   所以 iPhone 进全屏本来就是横屏的。
+ * 任何一步失败都静默，绝不因为它影响全屏本身。 */
+function lockLandscape() {
+  try {
+    const o = screen.orientation
+    if (o && typeof o.lock === 'function') Promise.resolve(o.lock('landscape')).catch(() => {})
+  } catch (e) { /* 不支持：忽略 */ }
+}
+
+function unlockOrientation() {
+  try {
+    const o = screen.orientation
+    if (o && typeof o.unlock === 'function') o.unlock()
+  } catch (e) { /* 忽略 */ }
+}
+
+function onFullscreenChange() {
+  if (fullscreenEl()) lockLandscape()
+  else unlockOrientation()
 }
 
 // 键盘方向键：左右快退/快进（每次 5 秒），上下调音量（每次 0.1）。在 document 上监听，
@@ -514,6 +585,11 @@ function onKeydown(e) {
   if (!player || !videoEl) return
   const tag = (e.target && e.target.tagName) || ''
   if (tag === 'INPUT' || tag === 'TEXTAREA') return
+  // 网页全屏兜底态没有浏览器自带的 Esc 退出，这里补上
+  if (e.key === 'Escape' && webFs.value) {
+    webFs.value = false
+    return
+  }
   if (e.key === 'ArrowLeft') {
     e.preventDefault()
     player.currentTime(Math.max(0, (videoEl.currentTime || 0) - 5))
@@ -756,6 +832,9 @@ function initPlayer() {
       autoplay: props.autoplay,
       controls: true,
       preload: 'auto',
+      // 移动端内联播放：不设这个，iOS 会一按播放就跳到系统全屏，
+      // 我们自己的控制条/浮层/字幕样式全部失效
+      playsinline: true,
       fluid: false,
       fill: true,
       // 初始音量调小，避免一打开声音过大
@@ -772,6 +851,7 @@ function initPlayer() {
 
     videoEl = player.el().querySelector('video')
     mountCcHost()
+    detectOwnFullscreen()
 
     player.on('loadedmetadata', () => { onLoaded() })
     player.on('timeupdate', () => onTime())
@@ -807,6 +887,7 @@ function initPlayer() {
 
 function destroyPlayer() {
   if (clickTimer) { clearTimeout(clickTimer); clickTimer = null }
+  webFs.value = false  // 兜底全屏态要一起退出，否则页面会一直锁着滚动
   if (player) {
     try {
       saveProgress(true)
@@ -951,6 +1032,9 @@ onMounted(() => {
   loadPrefs()
   window.addEventListener('avm-pause-player', onPauseRequest)
   window.addEventListener('avm-seek', onSeekRequest)
+  // 全屏状态变化：进全屏锁横屏，退出时解锁（iOS 不支持 lock，静默跳过）
+  document.addEventListener('fullscreenchange', onFullscreenChange)
+  document.addEventListener('webkitfullscreenchange', onFullscreenChange)
   nextTick(async () => { await resolveSource(); initPlayer() })
 })
 
@@ -960,6 +1044,9 @@ onBeforeUnmount(() => {
   savePrefs()
   window.removeEventListener('avm-pause-player', onPauseRequest)
   window.removeEventListener('avm-seek', onSeekRequest)
+  document.removeEventListener('fullscreenchange', onFullscreenChange)
+  document.removeEventListener('webkitfullscreenchange', onFullscreenChange)
+  unlockOrientation()  // 别把设备方向锁留在退出播放器之后
   clearInterval(saveTimer)
   destroyPlayer()
 })
@@ -985,7 +1072,7 @@ watch(() => props.movieId, () => {
 
 <template>
   <div class="player">
-    <div v-show="!failed" ref="containerEl" class="vjs-wrap">
+    <div v-show="!failed" ref="containerEl" class="vjs-wrap" :class="{ 'web-fs': webFs }">
       <!-- 播放器浮层：字幕轨选择/样式、片头片尾跳过标记 -->
       <!-- 字幕入口挂在 control-bar 里（见 mountCcHost），和原生按钮同一排 -->
       <Teleport v-if="uiReady && ccHost" :to="ccHost">
@@ -1031,6 +1118,10 @@ watch(() => props.movieId, () => {
             <button v-if="skipIntro || skipOutro" class="vp-item" @click="clearSkip('both')">{{ $t('player.skipClear') }}</button>
           </div>
         </div>
+        <!-- 移动端（iOS 等）控制条里没有原生全屏按钮，这里补一个入口 -->
+        <div v-if="needOwnFs" class="vp-btn" :class="{ on: webFs }"
+             :title="webFs ? $t('player.exitFullscreen') : $t('player.fullscreen')"
+             @click.stop="toggleNativeFullscreen">{{ webFs ? '⤡' : '⛶' }}</div>
       </div>
 
       <div v-if="skipToast" class="vp-toast" @click.stop>
@@ -1155,8 +1246,8 @@ watch(() => props.movieId, () => {
   background: transparent;
 }
 /* 系统原生全屏时，覆盖层同样铺满，保证全屏态下单击/双击仍可用 */
-:fullscreen .vjs-click-overlay,
-:-webkit-full-screen .vjs-click-overlay {
+.vjs-wrap :deep(.video-js:fullscreen .vjs-click-overlay),
+.vjs-wrap :deep(.video-js::-webkit-full-screen .vjs-click-overlay) {
   bottom: 3.2em;
   z-index: 5;
 }
@@ -1258,9 +1349,20 @@ watch(() => props.movieId, () => {
 .vjs-wrap.vp-sub-plain :deep(.vjs-text-track-cue) {
   text-shadow: 0 0 3px rgba(0, 0, 0, .9), 0 1px 2px rgba(0, 0, 0, .9);
 }
+/* 网页全屏兜底：不支持 Fullscreen API 的浏览器（iOS 旧版、部分 WebView）
+   用纯 CSS 把播放器铺满视口；100dvh 保证移动端地址栏收起/展开时不留白边 */
+.vjs-wrap.web-fs {
+  position: fixed !important;
+  top: 0; left: 0; right: 0; bottom: 0;
+  width: 100vw;
+  height: 100vh;
+  height: 100dvh;
+  z-index: 9999;
+}
 /* 手机/平板：视频铺满可用高度；控制条（含进度条）常驻可见，便于拖动定位 */
 @media (max-width: 768px) {
-  .vjs-wrap { height: 56vh; }
+  /* dvh：移动浏览器地址栏收起/展开时不跳变（老浏览器忽略，仍用上面的 vh） */
+  .vjs-wrap { height: 56vh; height: 56dvh; }
   .vjs-wrap :deep(.video-js .vjs-control-bar),
   .vjs-wrap :deep(.video-js.vjs-user-inactive .vjs-control-bar),
   .vjs-wrap :deep(.video-js.vjs-user-inactive.vjs-playing .vjs-control-bar) {
@@ -1272,6 +1374,11 @@ watch(() => props.movieId, () => {
   /* 加大进度条可点区域，移动端好拖 */
   .vjs-wrap :deep(.video-js .vjs-progress-control) { flex: 1 1 auto; }
   .vjs-wrap :deep(.video-js .vjs-progress-holder) { height: 0.5em; }
+}
+/* 手机横屏：直接铺满视口高度。竖屏那套 56dvh 在横屏下会让画面缩成上下留黑，
+   这里按「横屏即全屏」处理（限高 560px，避免影响桌面小窗口） */
+@media (max-height: 560px) and (orientation: landscape) {
+  .vjs-wrap { height: 100vh; height: 100dvh; }
 }
 .p-fail {
   display: flex; flex-direction: column; align-items: center; justify-content: center;
@@ -1297,18 +1404,27 @@ watch(() => props.movieId, () => {
 }
 .p-fail .title { font-size: var(--fs-lg); color: var(--c-text-2); }
 .p-fail .desc { max-width: 400px; font-size: var(--fs-md); }
-/* 系统原生全屏态：根元素 .video-js 铺满视口 */
-.video-js:fullscreen,
-.video-js:-webkit-full-screen {
+/* 系统原生全屏态：根元素 .video-js 铺满视口。
+   同样必须 :deep —— video.js 的 DOM 是运行时创建的，scoped 属性选择器命中不了，
+   原先这几条规则其实一直没生效。 */
+.vjs-wrap :deep(.video-js:fullscreen),
+.vjs-wrap :deep(.video-js::-webkit-full-screen) {
   width: 100vw !important;
   height: 100vh !important;
+  height: 100dvh !important;
   background: #000 !important;
 }
-.video-js:fullscreen .vjs-tech,
-.video-js:-webkit-full-screen .vjs-tech {
+.vjs-wrap :deep(.video-js:fullscreen .vjs-tech),
+.vjs-wrap :deep(.video-js::-webkit-full-screen .vjs-tech) {
   width: 100% !important;
   height: 100% !important;
   object-fit: contain !important;
+}
+/* 全屏时给刘海机底部手势条留位置，否则控制条会被系统横条压住点不到 */
+.vjs-wrap :deep(.video-js:fullscreen .vjs-control-bar),
+.vjs-wrap :deep(.video-js::-webkit-full-screen .vjs-control-bar) {
+  height: calc(3em + env(safe-area-inset-bottom, 0px));
+  padding-bottom: env(safe-area-inset-bottom, 0px);
 }
 /* 音量手势 OSD：垂直滑动/滚轮调音量时居中显示音量百分比与进度条
    （volOsdEl 是动态创建在 video.js 内部的元素，需用 :deep 穿透 scoped 才能命中） */
