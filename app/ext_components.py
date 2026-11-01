@@ -55,6 +55,12 @@ ASR_LIBS_URLS = [
     "https://github.com/dengji85/avm/releases/latest/download/asr-libs-cp311-win64.zip",
 ]
 
+# opencv 运行库的预打包 zip（pip install --target 的产物，tools/build_opencv_zip.py 打包）。
+# 打包版 exe 里没有 pip，「人脸定位」组件靠下载这个 zip 安装，机制与 asr-libs 相同。
+FACEDET_LIBS_URLS = [
+    "https://github.com/dengji85/avm/releases/latest/download/opencv-libs-cp311-win64.zip",
+]
+
 # 模型走 ModelScope 镜像（国内直连 HuggingFace 常超时；与 tools/fetch_asr_model.py 同源）
 MODEL_REPOS = {
     "small": "pengzhendong/faster-whisper-small",
@@ -485,7 +491,11 @@ def _detect_facedet() -> Dict[str, Any]:
         "state": "ready" if st.get("ready") else "missing",
         "version": st.get("version") or "",
         "path": model_path if st.get("model") else "",
-        "source": "ext" if st.get("model_from") == "ext" else ("system" if st.get("model") else ""),
+        # bundled = 模型随安装包内置（model_from=assets）；ext = 组件目录；
+        # system = 历史下载（旧位置）
+        "source": ({"ext": "ext", "bundled": "bundled"}.get(st.get("model_from") or "",
+                                                             "system")
+                   if st.get("model") else ""),
         "size": size,
         # 前端区分「缺哪个」：opencv 缺 → 去组件页装；模型缺 → 首次使用会自动下载
         "opencv": bool(st.get("opencv")),
@@ -653,6 +663,16 @@ def _find_file(root: str, name: str) -> str:
     return ""
 
 
+def _find_dir(root: str, name: str) -> str:
+    low = name.lower()
+    for dirpath, dirs, _files in os.walk(root):
+        if name in dirs:
+            return os.path.join(dirpath, name)
+        if low in {d.lower() for d in dirs}:
+            return os.path.join(dirpath, name)
+    return ""
+
+
 def _fetch_archive(urls: List[str], dest: str, what: str) -> str:
     """按顺序尝试多个下载源，全部失败抛 RuntimeError。返回落盘路径。"""
     last = ""
@@ -797,10 +817,9 @@ def _install_model(size: str) -> Dict[str, Any]:
 
 # ------------------------------------------------------------------ 任务入口
 def _install_facedet(source: str) -> Dict[str, Any]:
-    """两步安装：① opencv（全局已有就跳过，否则 pip --target 装进组件目录）；
-    ② YuNet 模型（227KB，多源依次尝试）。
-
-    装完立即自检（faces.available()）：「面板显示就绪但功能不能用」在这里就拦住。
+    """两步安装：① opencv 运行库（系统有就跳过；源码环境 pip --target；打包版
+    单文件 exe 里没有 pip，下载预打包 zip——与语音识别依赖同一套发布机制）；
+    ② YuNet 模型（安装包已内置，只有真缺失时才补下载）。最后自检。
     """
     dest = component_dir("facedet")
     os.makedirs(dest, exist_ok=True)
@@ -809,45 +828,65 @@ def _install_facedet(source: str) -> Dict[str, Any]:
     try:
         import cv2  # noqa: F401
 
-        _log("系统已装 opencv，跳过 pip 安装")
+        _log("系统已装 opencv，跳过安装")
     except ImportError:
-        pip = _pip_cmd()
-        if not pip:
-            raise RuntimeError("环境里没有 pip，无法自动安装 opencv；"
-                               "请手动安装 opencv-python-headless 后点「重新检测」")
-        _set(state="installing", percent=0, speed=0,
-             message="pip 安装 opencv-python-headless（约 60MB）…")
-        cmd = pip + ["install", "--no-cache-dir", "--disable-pip-version-check",
-                     "--upgrade", "--target", dest, "opencv-python-headless>=4.5.4"]
-        if source == "mirror":
-            cmd += ["-i", PYPI_MIRROR]
-        try:
-            import numpy  # noqa: F401  已有 numpy 就只装 opencv，避免把它降级覆盖
+        if getattr(sys, "frozen", False):
+            _set(state="downloading", percent=0, message="准备下载…",
+                 downloaded=0, total=0)
+            cfg = load_config(refresh=True)
+            urls = [str((cfg.get("ext") or {}).get("facedet_libs_url") or "").strip()]
+            urls += FACEDET_LIBS_URLS
+            arch = os.path.join(ext_root(), "_tmp", "opencv-libs.zip")
+            pkg = _fetch_archive([u for u in urls if u], arch,
+                                 "opencv 运行库（zip 未发布时可先手动导入）")
+            _set(state="extracting", percent=0, message="解压中…", speed=0)
+            _extract(pkg, dest)
+            shutil.rmtree(os.path.join(ext_root(), "_tmp"), ignore_errors=True)
+            cv_src = "zip"
+        else:
+            pip = _pip_cmd()
+            if not pip:
+                raise RuntimeError("环境里没有 pip，无法自动安装 opencv；"
+                                   "请手动安装 opencv-python-headless 后点「重新检测」")
+            _set(state="installing", percent=0, speed=0,
+                 message="pip 安装 opencv-python-headless（约 60MB）…")
+            cmd = pip + ["install", "--no-cache-dir", "--disable-pip-version-check",
+                         "--upgrade", "--target", dest, "opencv-python-headless>=4.5.4"]
+            if source == "mirror":
+                cmd += ["-i", PYPI_MIRROR]
+            try:
+                # 运行环境已有 numpy 就只装 opencv（避免把它降级覆盖）；
+                # 打包版没有 numpy，这里 except 后不加 --no-deps，让它随 opencv 一起装
+                import numpy  # noqa: F401
 
-            cmd.append("--no-deps")
-        except Exception:
-            pass
-        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-        assert proc.stdout is not None
-        for raw in proc.stdout:
+                cmd.append("--no-deps")
+            except Exception:
+                pass
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+            assert proc.stdout is not None
+            for raw in proc.stdout:
+                _check_cancel()
+                line = raw.decode("utf-8", "replace").strip()
+                if line and ("Collecting" in line or "Downloading" in line
+                             or "Installing" in line or "Successfully" in line
+                             or "ERROR" in line.upper()):
+                    _log(line[:160])
+            rc = proc.wait()
             _check_cancel()
-            line = raw.decode("utf-8", "replace").strip()
-            if line and ("Collecting" in line or "Downloading" in line
-                         or "Installing" in line or "Successfully" in line
-                         or "ERROR" in line.upper()):
-                _log(line[:160])
-        rc = proc.wait()
-        _check_cancel()
-        if rc != 0:
-            raise RuntimeError("pip 安装失败（退出码 %d），详见日志" % rc)
-        cv_src = "pip"
+            if rc != 0:
+                raise RuntimeError("pip 安装失败（退出码 %d），详见日志" % rc)
+            cv_src = "pip"
         if dest not in sys.path:
             sys.path.insert(0, dest)   # 让当前进程立刻能 import 新装的 cv2
 
-    model = os.path.join(dest, "face_detection_yunet_2023mar.onnx")
-    if os.path.isfile(model) and os.path.getsize(model) >= 100_000:
-        _log("模型已存在，跳过下载")
+    # 模型：安装包已内置（_MEIPASS/assets 或 app/assets），只在真缺失时才补
+    from . import faces as _faces
+
+    model = _faces.model_path()
+    if model.exists() and model.stat().st_size >= 100_000:
+        _log("模型已就位（%s），跳过下载" % model.parent.name)
     else:
+        target = os.path.join(dest, "face_detection_yunet_2023mar.onnx")
         _set(state="downloading", percent=0, downloaded=0, total=0,
              message="下载 YuNet 模型（227KB）…")
         last = ""
@@ -855,11 +894,11 @@ def _install_facedet(source: str) -> Dict[str, Any]:
         for url in MODEL_URLS:
             try:
                 _log("下载 " + url)
-                _download(url, model)
-                if os.path.getsize(model) >= 100_000:
+                _download(url, target)
+                if os.path.getsize(target) >= 100_000:
                     got = True
                     break
-                _log("源返回内容异常（%d 字节），换下一个源" % os.path.getsize(model))
+                _log("源返回内容异常（%d 字节），换下一个源" % os.path.getsize(target))
             except _Cancelled:
                 raise
             except Exception as e:                       # noqa: BLE001 换下一个源
@@ -1066,11 +1105,12 @@ def import_component(cid: str, src: str) -> Dict[str, Any]:
         _record(cid, version=size, size=_dir_size(dest), source="import")
         return {"version": size}
     if cid == "facedet":
-        # 手动导入 YuNet 模型（onnx 单文件，或包含它的 zip / 目录）
+        # 两类内容都能导入：① opencv 运行库 zip（内含 cv2/，打包版离线安装用）；
+        # ② YuNet 模型 onnx（或包含它的 zip / 目录）。按内容自动判断。
         dest = component_dir("facedet")
         os.makedirs(dest, exist_ok=True)
         name = "face_detection_yunet_2023mar.onnx"
-        srcf = src
+        work = src
         if zipfile.is_zipfile(src) or os.path.isdir(src):
             tmp = os.path.join(ext_root(), "_tmp", "facedet-import")
             shutil.rmtree(tmp, ignore_errors=True)
@@ -1079,12 +1119,31 @@ def import_component(cid: str, src: str) -> Dict[str, Any]:
                 _extract(src, tmp)
             else:
                 shutil.copytree(src, tmp)
-            srcf = _find_file(tmp, name)
-            if not srcf:
-                raise ValueError("目录 / 压缩包里没有 %s" % name)
-        if not (os.path.isfile(srcf) and srcf.lower().endswith(".onnx")
+            work = tmp
+
+        # ① 运行库：解压根目录（或其一）有 cv2/ 就按运行库处理
+        cv2dir = _find_dir(work, "cv2")
+        if cv2dir:
+            root = os.path.dirname(cv2dir)
+            for f in os.listdir(root):
+                s = os.path.join(root, f)
+                t = os.path.join(dest, f)
+                if os.path.isdir(s):
+                    shutil.copytree(s, t, dirs_exist_ok=True)
+                else:
+                    shutil.copy2(s, t)
+            if dest not in sys.path:
+                sys.path.insert(0, dest)
+            _record("facedet", version="opencv-libs", size=_dir_size(dest), source="import")
+            return {"version": "opencv-libs"}
+
+        # ② 模型 onnx
+        srcf = _find_file(work, name) if work != src else src
+        if not srcf and os.path.isfile(src):
+            srcf = src
+        if not (srcf and os.path.isfile(srcf) and srcf.lower().endswith(".onnx")
                 and os.path.getsize(srcf) >= 100_000):
-            raise ValueError("请提供有效的 %s（≥100KB）" % name)
+            raise ValueError("没有找到 opencv 运行库（cv2/），也不是有效的 %s" % name)
         shutil.copy2(srcf, os.path.join(dest, name))
         _record("facedet", version="yunet-2023mar", size=_dir_size(dest), source="import")
         return {"version": "yunet-2023mar"}

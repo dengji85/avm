@@ -7,8 +7,10 @@ qrcode>=7.0
 # qrcode 生成 PNG 需要 Pillow（二维码接口）；封面亮度分析也用到
 pillow>=10.0
 Send2Trash>=1.8.0
-# 可选：竖版海报的「智能裁切」（人脸定位）。不装也能用，只是自动退回固定裁切；
-# 装上后还需要一个 227KB 的 YuNet 模型（首次运行自动下载到 data/models/）。
+# 可选：竖版海报的「智能裁切」（人脸定位）。模型已随安装包内置（app/assets），
+# 但运行时还需要 opencv 才能推理——不装也能用，只是自动退回右侧裁。
+# 打包版不带它（体积 +50MB 不划算），请走 程序内 扩展组件 → 人脸定位 一键安装；
+# 源码运行的想省事也可以直接 pip install opencv-python-headless。
 # opencv-python-headless>=4.5.4
 # 可选：开发模式 --reload 的文件监听。uvicorn 自带的 StatReload 在部分
 # Windows 环境下完全不触发（实测改了代码服务也不重启），装上它 uvicorn

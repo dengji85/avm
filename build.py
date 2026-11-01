@@ -73,6 +73,16 @@ try:
     "--console",
     "--paths", ".",
     "--add-data", "web_dist;web_dist",
+    # 竖版海报智能裁切的 YuNet 人脸模型（227KB）：封面裁切是核心体验，随包内置，
+    # 不依赖首次联网下载。faces.model_path 会按「组件目录 > 内置 > data/models」查找。
+    "--add-data", os.path.join("app", "assets", "face_detection_yunet_2023mar.onnx") + ";assets",
+    # opencv 运行库有 50MB+，不值得让所有人为「还没用上的功能」买单：
+    # 不打进安装包，需要智能裁切的用户去 扩展组件 → 人脸定位 一键安装（打包版
+    # 下载预打包 zip、源码版 pip --target）。没装时 faces.py 自动退回右侧裁。
+    "--exclude-module", "cv2",
+    # numpy 只为 cv2 服务（faces.face_center 推理用），全项目再无使用者：
+    # 随 opencv 组件一起装进组件目录，不占安装包体积。
+    "--exclude-module", "numpy",
     "--collect-submodules", "app",
     "--hidden-import", "uvicorn.logging",
     "--hidden-import", "uvicorn.lifespan.on",

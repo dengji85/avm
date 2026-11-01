@@ -82,11 +82,13 @@ def _cv2() -> Any:
 
 
 def model_path() -> Path:
-    """模型文件的查找顺序：扩展组件目录 > data/models（旧位置，兼容升级）。
+    """模型查找顺序：扩展组件目录 > **打包内置** > data/models（旧位置兼容）。
 
-    组件目录是扩展组件页的下载 / 导入落点；旧位置保留只读兼容，避免已经下过
-    模型的用户被要求重新下载。
+    打包版（PyInstaller onefile）把模型随包分发在 ``sys._MEIPASS/assets/``，
+    源码运行则在 ``app/assets/``——封面裁切是核心体验，模型必须开箱即用，
+    不应依赖首次联网下载。都没有时返回组件目录的期望路径（下载 / 导入落点）。
     """
+    # 1) 扩展组件目录（扩展组件页下载 / 手动导入的落点，用户可自行更新模型）
     try:
         from .ext_components import component_dir
 
@@ -95,9 +97,24 @@ def model_path() -> Path:
             return p
     except Exception:
         pass
-    from .config import DATA_DIR
+    # 2) 打包内置资源
+    if getattr(sys, "frozen", False):
+        base = Path(getattr(sys, "_MEIPASS", "") or ".")
+    else:
+        base = Path(__file__).resolve().parent
+    p = base / "assets" / _MODEL_NAME
+    if p.exists():
+        return p
+    # 3) 旧位置（兼容已经下载过模型的用户，避免要求重新下载）
+    try:
+        from .config import DATA_DIR
 
-    return DATA_DIR / "models" / _MODEL_NAME
+        legacy = DATA_DIR / "models" / _MODEL_NAME
+        if legacy.exists():
+            return legacy
+        return Path(component_dir("facedet")) / _MODEL_NAME
+    except Exception:
+        return Path(_MODEL_NAME)
 
 
 def _ensure_model() -> bool:
@@ -228,13 +245,11 @@ def status() -> dict:
     try:
         has_model = p.exists() and p.stat().st_size >= _MODEL_MIN_BYTES
         if has_model:
-            try:
-                from .ext_components import component_dir
-
-                model_from = ("ext" if os.path.normpath(str(p.parent))
-                              == os.path.normpath(component_dir("facedet")) else "legacy")
-            except Exception:
-                model_from = ""
+            parent = p.parent.name
+            # ext = 扩展组件目录（用户可自行更新）；assets = 打包内置；
+            # models = 旧位置（历史下载）
+            model_from = "bundled" if parent == "assets" else (
+                "ext" if parent == "facedet" else "legacy")
     except OSError:
         pass
     ver = ""
