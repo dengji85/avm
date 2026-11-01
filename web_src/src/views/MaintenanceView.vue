@@ -51,13 +51,15 @@ const setTab = (id) => { state.maintTab = id }
 
 <style scoped>
 .maint { display: flex; flex-direction: column; min-height: 0; }
-/* 固定列宽：六个页签（概览/存储/字幕/失败/日志/导出）共用一条稳定的内容列，
-   切换与加载时不再随内容伸缩闪烁 */
+/* 页签过多时换行而不是被裁掉（窄屏下 7 个页签放不进一行） */
+.tabs { flex-wrap: wrap; }
+/* 固定列宽：七个页签共用一条稳定的内容列，切换与加载时不再随内容伸缩闪烁。
+   内边距与其它视图保持一致（--sp-5），避免维护页看起来比别的页面"贴边" */
 .tab-body {
   width: min(1080px, 100%);
   margin: 0 auto;
   scrollbar-gutter: stable;
-  padding: var(--sp-4) var(--sp-5);
+  padding: var(--sp-5);
 }
 .hint { font-size: var(--fs-xs); color: var(--c-text-3); }
 </style>

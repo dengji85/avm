@@ -233,7 +233,7 @@ onMounted(() => { loadSummary(); loadTasks() })
 .pad { padding: 24px 0; text-align: center; }
 @media (max-width: 860px) { .ops { grid-template-columns: repeat(2, 1fr); } .grid2 { grid-template-columns: 1fr; } .todo-grid { grid-template-columns: repeat(3, 1fr); } }
 
-.dropzone { margin-bottom: var(--sp-4); border: 1.5px dashed var(--c-line-strong, #2a3040); border-radius: 14px; padding: 22px; text-align: center; color: var(--c-text-3); transition: all .15s; }
+.dropzone { margin-bottom: var(--sp-4); border: 1.5px dashed var(--c-line-strong); border-radius: var(--r-lg); padding: var(--sp-5); text-align: center; color: var(--c-text-3); transition: all .15s; }
 .dropzone.active { border-color: var(--c-primary); background: var(--c-surface-2); color: var(--c-primary); }
 .dz-ico { display: block; font-size: 26px; margin-bottom: 6px; }
 .dz-t { display: block; font-weight: 600; color: var(--c-text); }

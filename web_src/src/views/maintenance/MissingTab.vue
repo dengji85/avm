@@ -90,7 +90,8 @@ onMounted(load)
 
 <template>
   <div class="mt">
-    <div class="mt-head">
+    <section class="panel">
+    <div class="panel-head">
       <div class="mt-tabs">
         <button class="mt-tab" :class="{ on: tab === 'pending' }" @click="switchTab('pending')">
           {{ $t('maint.missPending') }} <b>{{ pendingItems.length }}</b>
@@ -107,6 +108,7 @@ onMounted(load)
       </button>
     </div>
 
+    <div class="panel-body">
     <div v-if="downRoots.length" class="mt-warn">
       <span>⚠ {{ $t('maint.rootsDown', { n: downRoots.length }) }}</span>
       <span class="mt-warn-hint">{{ $t('maint.rootsDownHint') }}</span>
@@ -170,6 +172,8 @@ onMounted(load)
         </div>
       </div>
     </template>
+    </div>
+    </section>
 
     <!-- 批量操作条 -->
     <div v-if="tab !== 'archive' && pickedIds.length" class="mt-bulk">
@@ -183,8 +187,7 @@ onMounted(load)
 </template>
 
 <style scoped>
-.mt { display: flex; flex-direction: column; gap: var(--sp-3); }
-.mt-head { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; }
+.mt { display: flex; flex-direction: column; gap: var(--sp-4); }
 .mt-tabs { display: flex; gap: var(--sp-1); flex-wrap: wrap; flex: 1; }
 .mt-tab { display: inline-flex; align-items: center; gap: 6px; padding: 5px 10px; border-radius: var(--r-sm); border: 1px solid var(--c-line); background: var(--c-surface-2); color: var(--c-text-2); font-size: var(--fs-sm); cursor: pointer; }
 .mt-tab.on { border-color: var(--c-primary); color: var(--c-primary); background: var(--c-primary-soft); }

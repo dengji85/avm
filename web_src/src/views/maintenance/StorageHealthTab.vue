@@ -212,7 +212,6 @@ onMounted(() => { load(); loadSoftware(); loadRoots(); loadOrphans() })
 
 <template>
   <div class="sh">
-    <SectionTitle :title="$t('maint.overview')" />
     <div class="stat-cards">
       <div v-for="c in cards" :key="c.l" class="stat-card" :class="c.tone">
         <div class="stat-value">{{ c.v }}</div>

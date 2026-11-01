@@ -72,7 +72,12 @@ async function alignSelected() {
 
 <template>
   <div class="subtab">
-    <p class="lead">{{ t('subtitle.lead') }}</p>
+    <section class="panel">
+      <div class="panel-head">
+        {{ $t('maint.subtitle') }}
+        <span class="sub">{{ t('subtitle.lead') }}</span>
+      </div>
+      <div class="panel-body">
 
     <div class="pick">
       <input ref="fileInput" type="file" multiple accept=".srt,.ass,.ssa,.vtt,.sub,.smi,.txt"
@@ -129,30 +134,30 @@ async function alignSelected() {
       </div>
       <div v-if="alignResult && alignResult.error" class="err">{{ alignResult.error }}</div>
     </template>
+
+      </div>
+    </section>
   </div>
 </template>
 
 <style scoped>
-.subtab { display: flex; flex-direction: column; gap: var(--sp-3); }
-.lead { font-size: var(--fs-sm); color: var(--c-text-3); margin: 0; }
+.subtab { display: flex; flex-direction: column; gap: var(--sp-4); }
 .pick { display: flex; flex-direction: column; gap: 6px; }
-.file { font-size: var(--fs-sm); }
+.file { font-size: var(--fs-sm); color: var(--c-text-2); }
 .names { font-size: var(--fs-xs); color: var(--c-text-3); word-break: break-all; }
 .actions { display: flex; align-items: center; gap: var(--sp-3); }
 .ck { font-size: var(--fs-sm); color: var(--c-text-2); display: flex; align-items: center; gap: 4px; }
-.btn { padding: 6px 14px; border-radius: 8px; border: 1px solid var(--c-border); background: var(--c-bg-2); color: var(--c-text); cursor: pointer; }
-.btn.primary { background: var(--c-accent); color: #fff; border-color: var(--c-accent); }
-.btn:disabled { opacity: .5; cursor: not-allowed; }
 .sum { font-size: var(--fs-sm); color: var(--c-text-3); }
 .sum.ok { color: var(--c-ok); }
-.block { border: 1px solid var(--c-border); border-radius: 10px; padding: var(--sp-2) var(--sp-3); }
+.block { border: 1px solid var(--c-line); border-radius: var(--r-md); padding: var(--sp-2) var(--sp-3); background: var(--c-surface-2); }
 .block-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: var(--sp-2); }
 .block-head.muted { color: var(--c-text-3); font-size: var(--fs-sm); }
 .rows { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; max-height: 320px; overflow: auto; }
-.rows li { display: flex; align-items: center; gap: 8px; padding: 4px 8px; border-radius: 6px; font-size: var(--fs-sm); cursor: pointer; }
-.rows li.on { background: var(--c-bg-3); }
+.rows li { display: flex; align-items: center; gap: 8px; padding: 4px 8px; border-radius: var(--r-sm); font-size: var(--fs-sm); cursor: pointer; }
+.rows li:hover { background: var(--c-surface-3); }
+.rows li.on { background: var(--c-primary-soft); }
 .rows.dim li { color: var(--c-text-3); cursor: default; }
-.rows .code { font-weight: 600; color: var(--c-accent); min-width: 96px; }
+.rows .code { font-weight: 600; color: var(--c-primary); min-width: 96px; font-family: var(--font-mono, monospace); }
 .rows .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .rows .movie { color: var(--c-text-3); font-size: var(--fs-xs); }
 .rows .lang { color: var(--c-text-2); font-size: var(--fs-xs); min-width: 56px; text-align: right; }

@@ -82,7 +82,8 @@ watch(() => [q.status, q.code, q.task_id], () => { q.page = 1; loadLogs() })
 
 <template>
   <div class="sl">
-    <div class="filters">
+    <section class="panel">
+    <div class="panel-head filters">
       <select v-model="q.task_id" class="sel">
         <option value="">{{ $t('maint.allTasks') }}</option>
         <option v-for="t in tasks" :key="t.task_id" :value="t.task_id">{{ t.started_at }} · {{ t.total }}{{ $t('maint.items') }}</option>
@@ -98,6 +99,7 @@ watch(() => [q.status, q.code, q.task_id], () => { q.page = 1; loadLogs() })
       <button class="btn danger sm clear-btn" @click="clearLogs">{{ $t('maint.clearLogs') }}</button>
     </div>
 
+    <div class="panel-body">
     <div v-if="err" class="empty compact"><div class="icon err">!</div><div class="desc">{{ err }}</div></div>
     <div v-else-if="loading" class="empty compact"><span class="spinner large"></span></div>
     <div v-else-if="!logs.length" class="empty compact"><div class="desc">{{ $t('maint.noLogs') }}</div></div>
@@ -121,15 +123,18 @@ watch(() => [q.status, q.code, q.task_id], () => { q.page = 1; loadLogs() })
         <button class="btn tiny" :disabled="q.page >= totalPages()" @click="go(q.page + 1)">{{ $t('common.next') }}</button>
       </div>
     </div>
+    </div>
+    </section>
 
-    <section class="skip-block">
-      <header class="skip-head">
+    <section class="panel skip-block">
+      <header class="panel-head skip-head">
         <h3 class="sub">{{ $t('maint.skipsTitle') }} <span class="muted sm">{{ $t('maint.skipsHint', { n: skipTotal }) }}</span></h3>
         <div class="skip-acts">
           <button class="btn sm" :disabled="!skipTotal" @click="retrySkips">{{ $t('maint.retry') }}</button>
           <button class="btn danger sm" :disabled="!skipTotal" @click="clearSkips">{{ $t('maint.clearAll') }}</button>
         </div>
       </header>
+      <div class="panel-body">
       <div v-if="!skipTotal" class="empty compact"><div class="desc">{{ $t('maint.noSkips') }}</div></div>
       <div v-else class="tbl-wrap">
         <table class="tbl">
@@ -146,17 +151,20 @@ watch(() => [q.status, q.code, q.task_id], () => { q.page = 1; loadLogs() })
           </tbody>
         </table>
       </div>
+      </div>
     </section>
   </div>
 </template>
 
 <style scoped>
-.sl { display: flex; flex-direction: column; gap: var(--sp-3); }
+.sl { display: flex; flex-direction: column; gap: var(--sp-4); }
 .filters { display: flex; gap: var(--sp-2); align-items: center; flex-wrap: wrap; }
 .filters .clear-btn { margin-left: auto; }
 .sel, .inp { height: 32px; background: var(--c-surface-2); border: 1px solid var(--c-line); border-radius: var(--r-sm); color: var(--c-text); padding: 0 var(--sp-2); font-size: var(--fs-sm); }
 .inp { min-width: 160px; }
-.tbl-wrap { border: 1px solid var(--c-line); border-radius: var(--r-md); overflow: hidden; }
+/* 表格自带滚动容器：panel 的 overflow:hidden 会让 sticky 表头失效，
+   这里让 tbl-wrap 自己成为滚动上下文（表头仍吸顶，长表格也不会把页面撑太长） */
+.tbl-wrap { border: 1px solid var(--c-line); border-radius: var(--r-md); overflow: auto; max-height: 62vh; }
 .tbl { width: 100%; border-collapse: collapse; font-size: var(--fs-sm); }
 .tbl th, .tbl td { padding: 7px 10px; text-align: left; border-bottom: 1px solid var(--c-line); }
 .tbl th { background: var(--c-surface-2); position: sticky; top: 0; color: var(--c-text-3); font-weight: 600; }
@@ -172,9 +180,9 @@ watch(() => [q.status, q.code, q.task_id], () => { q.page = 1; loadLogs() })
 .pager { display: flex; align-items: center; gap: var(--sp-3); padding: var(--sp-2) var(--sp-3); border-top: 1px solid var(--c-line); }
 .empty.compact { padding: var(--sp-6) var(--sp-4); } .empty .icon.err { background: var(--c-err); color: #fff; }
 
-/* 跳过名单区块 */
-.skip-block { border-top: 1px solid var(--c-line); padding-top: var(--sp-3); }
-.skip-head { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-3); flex-wrap: wrap; margin-bottom: var(--sp-2); }
+/* 跳过名单区块：与其他面板同一套外观 */
+.skip-block { margin-top: 0; }
+.skip-head { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-3); flex-wrap: wrap; }
 .skip-head .sub { margin: 0; }
 .skip-acts { display: flex; gap: var(--sp-2); }
 .cp { cursor: pointer; } .cp:hover { color: var(--c-primary); }

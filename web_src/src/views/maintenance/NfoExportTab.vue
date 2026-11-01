@@ -198,9 +198,9 @@ onBeforeUnmount(() => clearTimeout(timer))
 </template>
 
 <style scoped>
-/* 与其他维护标签一致：panel 全局样式；单卡内容在页内居中，宽度不超过 720px */
-.nfo-tab { display: flex; flex-direction: column; align-items: center; }
-.nfo-tab .panel { width: 100%; max-width: 720px; }
+/* 与其他维护标签一致：撑满内容列宽度，不再单独居中收窄 */
+.nfo-tab { display: flex; flex-direction: column; gap: var(--sp-4); }
+.nfo-tab .panel { width: 100%; }
 .muted { margin: 0; }
 .nfo-run { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
 .xp-bar { height: 6px; border-radius: 3px; background: var(--c-surface-3); overflow: hidden; }

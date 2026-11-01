@@ -90,17 +90,20 @@ onMounted(() => { load(); loadProviders() })
 
 <template>
   <div class="sf">
-    <div class="sf-head">
+    <section class="panel">
+    <div class="panel-head sf-head">
       <div>
         <h3 class="sub">{{ t('maint.failTitle') }}</h3>
         <p class="muted sm">{{ t('maint.failSub') }}</p>
       </div>
+      <div class="spacer"></div>
       <div class="sf-acts">
         <label class="chk"><input type="checkbox" v-model="onlyUn" @change="load" /> {{ t('maint.failFilterAll') }}</label>
         <button class="btn sm" :disabled="busy" @click="retryNet">{{ t('maint.failRetryNet') }}</button>
       </div>
     </div>
 
+    <div class="panel-body">
     <!-- 分组计数卡 -->
     <div class="grp-cards">
       <button class="grp" :class="{ on: filter === '' }" @click="filter = ''; load()">
@@ -158,11 +161,13 @@ onMounted(() => { load(); loadProviders() })
       </select>
       <button class="btn sm" :disabled="busy || !providerName" @click="retryWithProvider">{{ t('maint.failRetryProvider') }}</button>
     </div>
+    </div>
+    </section>
   </div>
 </template>
 
 <style scoped>
-.sf { display: flex; flex-direction: column; gap: var(--sp-3); }
+.sf { display: flex; flex-direction: column; gap: var(--sp-4); }
 .sf-head { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--sp-3); flex-wrap: wrap; }
 .sf-head .sub { margin: 0; }
 .sf-acts { display: flex; gap: var(--sp-2); align-items: center; }
@@ -178,26 +183,27 @@ onMounted(() => { load(); loadProviders() })
 .grp.on { border-color: var(--c-primary); color: var(--c-primary); }
 .g-num { font-size: var(--fs-lg); font-weight: 700; font-variant-numeric: tabular-nums; }
 .g-lab { font-size: var(--fs-xs); }
-.grp.red .g-num { color: var(--c-err); } .grp.orange .g-num { color: #e0820c; }
-.grp.gray .g-num { color: var(--c-text-3); } .grp.purple .g-num { color: #9b59b6; }
-.grp.blue .g-num { color: #2f7de0; }
+.grp.red .g-num { color: var(--c-err); } .grp.orange .g-num { color: var(--c-warn); }
+.grp.gray .g-num { color: var(--c-text-3); } .grp.purple .g-num { color: var(--c-violet); }
+.grp.blue .g-num { color: var(--c-info); }
 
-.tbl-wrap { border: 1px solid var(--c-line); border-radius: var(--r-md); overflow: hidden; }
+/* 同日志页：表格自带滚动容器，保证 panel 内的 sticky 表头仍生效 */
+.tbl-wrap { border: 1px solid var(--c-line); border-radius: var(--r-md); overflow: auto; max-height: 62vh; }
 .tbl { width: 100%; border-collapse: collapse; font-size: var(--fs-sm); }
 .tbl th, .tbl td { padding: 7px 10px; text-align: left; border-bottom: 1px solid var(--c-line); vertical-align: top; }
 .tbl th { background: var(--c-surface-2); position: sticky; top: 0; color: var(--c-text-3); font-weight: 600; }
 .tbl tbody tr:hover { background: var(--c-surface-2); }
 .tbl tr.k-blocked { box-shadow: inset 3px 0 0 var(--c-err); }
-.tbl tr.k-neterr { box-shadow: inset 3px 0 0 #e0820c; }
-.tbl tr.k-parse_err { box-shadow: inset 3px 0 0 #9b59b6; }
-.tbl tr.k-code_issue { box-shadow: inset 3px 0 0 #2f7de0; }
+.tbl tr.k-neterr { box-shadow: inset 3px 0 0 var(--c-warn); }
+.tbl tr.k-parse_err { box-shadow: inset 3px 0 0 var(--c-violet); }
+.tbl tr.k-code_issue { box-shadow: inset 3px 0 0 var(--c-info); }
 .diag { color: var(--c-text); max-width: 220px; }
 .srcs { display: flex; flex-direction: column; gap: 2px; }
 .src { display: inline-flex; align-items: center; gap: 5px; font-size: var(--fs-xs); color: var(--c-text-2); }
 .src .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--c-warn); }
 .src.k-ok .dot { background: var(--c-ok); } .src.k-miss .dot { background: var(--c-warn); }
-.src.k-blocked .dot { background: var(--c-err); } .src.k-neterr .dot { background: #e0820c; }
-.src.k-parse_err .dot { background: #9b59b6; } .src.k-code_issue .dot { background: #2f7de0; }
+.src.k-blocked .dot { background: var(--c-err); } .src.k-neterr .dot { background: var(--c-warn); }
+.src.k-parse_err .dot { background: var(--c-violet); } .src.k-code_issue .dot { background: var(--c-info); }
 .rec { color: var(--c-text-2); max-width: 280px; }
 .mono { font-family: var(--font-mono, monospace); color: var(--c-text-3); font-size: var(--fs-xs); }
 .cp { cursor: pointer; } .cp:hover { color: var(--c-primary); }
