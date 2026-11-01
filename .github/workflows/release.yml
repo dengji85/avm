@@ -1,7 +1,9 @@
 name: Release (Windows exe)
 
-# 打 v* 标签时自动：构建前端 → PyInstaller 打包单文件 exe → 生成 SHA256 →
-# 创建 / 更新 GitHub Release 并附加产物。
+# 打 v* 标签时自动：构建前端 → PyInstaller 打包单文件 exe → 创建 / 更新 GitHub
+# Release 并附加产物（SHA256 由 GitHub 资产详情页自带，不再单独产出校验文件）。
+# 同时重打 asr-libs / opencv-libs 组件 zip 并更新到 ext-bundle 固定 tag 的
+# Release（组件资产与应用发版解耦，见 docs/扩展组件手册.md）。
 # 与 docker.yml 并行执行、互不依赖（一条 tag 同时产出 exe 与多架构镜像）。
 on:
   push:
@@ -51,14 +53,6 @@ jobs:
       - name: Build single-file exe
         run: python build.py
 
-      - name: Generate SHA256 checksum
-        shell: pwsh
-        run: |
-          Get-ChildItem dist\AVM-*.exe | ForEach-Object {
-            "$((Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower())  $($_.Name)"
-          } | Set-Content -Encoding ascii dist\SHA256.txt
-          Get-Content dist\SHA256.txt
-
       # 手动触发时仅上传为 Actions 工件，不碰 Release（避免为验证制造无意义的发布）
       - name: Upload artifact (manual run only)
         if: github.event_name == 'workflow_dispatch'
@@ -67,7 +61,6 @@ jobs:
           name: AVM-windows-exe
           path: |
             dist/AVM-*.exe
-            dist/SHA256.txt
 
       - name: Publish GitHub Release
         if: startsWith(github.ref, 'refs/tags/v')
@@ -76,11 +69,11 @@ jobs:
           body_path: RELEASE_NOTES.md
           files: |
             dist/AVM-*.exe
-            dist/SHA256.txt
           fail_on_unmatched_files: true
 
   # 语音识别依赖的预打包 zip：便携版 exe 里没有 pip，「一键安装」下载的就是它。
-  # 与 exe 同一条 tag 触发、并行构建，产物一并附加到同一个 Release。
+  # 组件资产统一托管在 ext-bundle 固定 tag 的 Release（与应用发版解耦），
+  # 打 v* 标签时重打并 --clobber 覆盖同名资产，应用端无需任何改动。
   asr-libs-zip:
     runs-on: windows-latest
     env:
@@ -106,13 +99,44 @@ jobs:
           name: asr-libs-zip
           path: |
             dist/asr-libs-*.zip
-            dist/asr-libs-*.sha256
 
-      - name: Publish GitHub Release
+      - name: Publish to ext-bundle release
         if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload ext-bundle (Get-ChildItem dist\asr-libs-*.zip).FullName --clobber
+
+  # 人脸定位运行库（opencv + numpy）：竖版海报智能裁切用，同 ext-bundle 固定 tag 托管。
+  opencv-libs-zip:
+    runs-on: windows-latest
+    env:
+      PYTHONUTF8: "1"
+      PYTHONIOENCODING: "utf-8"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
-          files: |
-            dist/asr-libs-*.zip
-            dist/asr-libs-*.sha256
-          fail_on_unmatched_files: true
+          python-version: "3.11"
+
+      - name: Build opencv-libs zip
+        run: python tools/build_opencv_zip.py --out dist
+
+      - name: Upload artifact (manual run only)
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v4
+        with:
+          name: opencv-libs-zip
+          path: |
+            dist/opencv-libs-*.zip
+
+      - name: Publish to ext-bundle release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload ext-bundle (Get-ChildItem dist\opencv-libs-*.zip).FullName --clobber
