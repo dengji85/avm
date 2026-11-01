@@ -94,3 +94,36 @@ def expand_term(term: str) -> List[str]:
         if w and w not in out:
             out.append(w)
     return out
+
+
+#: 别名（小写） → 规范名；与 CONCEPTS 同源，每个概念组的所有写法收敛到组名
+_ALIAS: Dict[str, str] = {}
+for _canon, _words in CONCEPTS.items():
+    for _w in _words:
+        _ALIAS.setdefault(_w.strip().lower(), _canon)
+
+
+def canonical_term(term: str) -> str:
+    """把类型 / 标签名收敛成规范写法；未收录的原样返回。
+
+    与 ``expand_term`` 方向相反，两者分工：
+
+    * ``expand_term``   —— **检索时**把「丝袜」展开成多语言写法，把查询放大；
+    * ``canonical_term`` —— **入库时**把 絲襪 / パンスト / stockings 收敛成同一个名字。
+
+    不做这一步的后果：同一题材在库里存成三行，筛选与统计被拆散——用户在「类型」
+    面板里点「丝袜」只有 3 部，点「パンスト」又是另 5 部，其实是同一批片。
+    """
+    t = str(term or "").strip()
+    if not t:
+        return ""
+    key = t.lower()
+    hit = _ALIAS.get(key)
+    if hit:
+        return hit
+    # 英文复数兜底：表里收的是单数（stocking），源站可能给 stockings
+    if len(key) > 3 and key.endswith("s"):
+        hit = _ALIAS.get(key[:-1])
+        if hit:
+            return hit
+    return t

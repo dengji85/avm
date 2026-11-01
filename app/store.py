@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from . import subprobe, subtitles
-from .concepts import expand_term
+from .concepts import canonical_term, expand_term
 from .db import query_all, query_one, scalar
 
 _TAXONOMY = {"actresses", "genres", "studios", "series", "tags"}
@@ -99,6 +99,10 @@ def get_or_create(conn: sqlite3.Connection, table: str, name: Any, source: str =
     name = norm_name(name)
     if not name:
         return None
+    if table == "genres":
+        # 同一题材在不同源写法不同（絲襪 / パンスト / stockings / 裤袜），入库前先收敛。
+        # 放在这里而不是刮削层：手工编辑、AI 建议转正、本地 NFO 导入都走这个入口。
+        name = norm_name(canonical_term(name)) or name
     row = conn.execute(f"SELECT id FROM {table} WHERE name = ?", (name,)).fetchone()
     if row:
         return row[0]
@@ -125,6 +129,46 @@ def set_relations(conn: sqlite3.Connection, movie_id: int, kind: str,
                 f"INSERT OR IGNORE INTO {link_table}(movie_id, {col}) VALUES(?, ?)",
                 (movie_id, rid),
             )
+
+
+def merge_duplicate_genres(conn: sqlite3.Connection) -> Dict[str, Any]:
+    """把库里已有的重复类型合并成规范名（修复历史数据）。
+
+    入库时的归一只管新数据；老库里可能已经并存 絲襪 / パンスト / stockings 三行。
+    这里按 ``canonical_term`` 把同组行找出来，把关联迁到规范行，再删掉别名行。
+    幂等：没有可合并的组时返回 0，可以重复点。
+    """
+    rows = query_all(conn, "SELECT id, name FROM genres ORDER BY id")
+    groups: Dict[str, List[Dict[str, Any]]] = {}
+    for r in rows:
+        name = str(r["name"] or "")
+        canon = norm_name(canonical_term(name)) or name
+        groups.setdefault(canon, []).append({"id": int(r["id"]), "name": name})
+
+    groups_merged = 0
+    removed = 0
+    for canon, items in groups.items():
+        if len(items) <= 1:
+            continue
+        # 规范行：优先已有同名行；否则复用第一条，把它改名成规范名
+        keep = next((x for x in items if x["name"] == canon), items[0])
+        keep_id = int(keep["id"])
+        if keep["name"] != canon:
+            conn.execute("UPDATE genres SET name = ? WHERE id = ?", (canon, keep_id))
+        for x in items:
+            aid = int(x["id"])
+            if aid == keep_id:
+                continue
+            # 同一部片已经挂了规范行时会冲突，用 OR IGNORE 跳过重复关联
+            conn.execute(
+                "UPDATE OR IGNORE movie_genre SET genre_id = ? WHERE genre_id = ?",
+                (keep_id, aid),
+            )
+            conn.execute("DELETE FROM movie_genre WHERE genre_id = ?", (aid,))
+            conn.execute("DELETE FROM genres WHERE id = ?", (aid,))
+            removed += 1
+        groups_merged += 1
+    return {"groups": groups_merged, "removed": removed}
 
 
 def get_relations(conn: sqlite3.Connection, movie_id: int, kind: str) -> List[str]:

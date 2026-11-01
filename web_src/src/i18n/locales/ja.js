@@ -1661,6 +1661,8 @@ export default {
     failRetryProvider: '別ソース再取得', failProviderSel: 'データソース選択', failRetrySel: '選択ソースで再試行', failDoing: '再試行中…',
     phNoLog: '未使用', phRate: '{n}% 成功（{c} 回）',
     phLastOk: '最終成功 {t}', phLastErr: '最近の失敗：{r}', phInactive: '停止中',
+    mergeGenres: '重複ジャンルを統合', mergeGenresHint: '同じ題材が情報源ごとに別名で入っている場合（例：絲襪 / パンスト / stockings）、統一的にまとめます',
+    mergeGenresDone: '{g} グループを統合し、{n} 件の重複ジャンルを整理しました',
     failViewMovie: '影片を表示', failElapsed: '所要', failGroupLabel: '原因別グループ',
     failOpenFolder: 'フォルダを開く', failNoAction: '未登録', failOpenErr: 'フォルダを開けません', failNoMovie: 'この影片は未登録です',
     confirmRetrySkips: 'スキップリストの動画を強制再スクレイプしますか（スキップ無視・既存データ上書きなし）？',

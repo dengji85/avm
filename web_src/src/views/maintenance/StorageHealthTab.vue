@@ -1,7 +1,7 @@
 <script setup>
 import { ref, reactive, computed, onMounted } from 'vue'
 import { state } from '../../state.js'
-import { getStorage, getIntegrity, getHealthCheck, getDedup, resolveDedup, getQuality, sniffCovers, getSoftwareStorage, cleanSoftwareStorage, checkMissing, storageRoots, getOrphans, cleanOrphans } from '../../api.js'
+import { getStorage, getIntegrity, getHealthCheck, getDedup, resolveDedup, getQuality, sniffCovers, getSoftwareStorage, cleanSoftwareStorage, checkMissing, storageRoots, getOrphans, cleanOrphans, normalizeGenres } from '../../api.js'
 import { toast, confirmDialog, fmtSize } from '../../utils.js'
 import { t } from '../../i18n/index.js'
 import PageHead from '../../components/PageHead.vue'
@@ -52,6 +52,18 @@ async function runCheckMissing() {
     if (r.roots) rootStates.value = r.roots
     await load()
   } catch (e) { toast(e.message, 'err') } finally { checkMissingLoading.value = false }
+}
+
+/* 类型归一：同一题材被不同源写成多个名字（絲襪 / パンスト / stockings），
+   入库时已会自动收敛，这里修的是早先存下来的历史数据。 */
+const gnBusy = ref(false)
+async function runMergeGenres() {
+  gnBusy.value = true
+  try {
+    const r = await normalizeGenres()
+    toast(t('maint.mergeGenresDone', { g: r.groups || 0, n: r.removed || 0 }), 'ok')
+    await load()
+  } catch (e) { toast(e.message, 'err') } finally { gnBusy.value = false }
 }
 
 /* 孤儿数据：数据库里指向已删影片的悬空行 + 磁盘上无主的封面 / 背景。
@@ -321,6 +333,13 @@ onMounted(() => { load(); loadSoftware(); loadRoots(); loadOrphans() })
               <b class="tabular">{{ healthCount(k) }}</b><span>{{ $t(label) }}</span>
             </div>
           </div>
+          <!-- 类型归一：同一题材被不同源写成多个名字时，合并成统一叫法 -->
+          <div class="gn-row">
+            <span class="muted sm">{{ $t('maint.mergeGenresHint') }}</span>
+            <button class="btn tiny" :disabled="gnBusy" @click="runMergeGenres">
+              {{ gnBusy ? $t('maint.checking') : $t('maint.mergeGenres') }}
+            </button>
+          </div>
           <div v-for="[k, label, desc] in HEALTH_GROUPS" :key="'d' + k">
             <div v-if="openGroup[k] && healthList(k).length" class="hd-group">
               <div class="hd-title">{{ $t(label) }} <span class="muted">· {{ $t(desc) }}</span></div>
@@ -473,6 +492,10 @@ onMounted(() => { load(); loadSoftware(); loadRoots(); loadOrphans() })
 .sw-clean-item { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-2); font-size: var(--fs-sm); color: var(--c-text-2); }
 .sw-clean-row { display: flex; gap: var(--sp-2); flex-wrap: wrap; margin-top: var(--sp-1); }
 .empty.compact { padding: var(--sp-6) var(--sp-4); }
+/* 类型归一按钮行 */
+.gn-row { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; padding-top: var(--sp-2); border-top: 1px dashed var(--c-line); }
+.gn-row .muted { flex: 1; min-width: 220px; }
+
 /* 孤儿数据卡片 */
 .orph-row { display: flex; gap: var(--sp-2); flex-wrap: wrap; }
 .orph-card { display: flex; flex-direction: column; align-items: center; gap: 2px; min-width: 130px; padding: var(--sp-2) var(--sp-3); border-radius: var(--r-md); border: 1px solid var(--c-line); background: var(--c-surface-2); color: var(--c-text); cursor: pointer; }

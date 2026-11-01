@@ -1618,6 +1618,8 @@ export default {
     failRetryProvider: 'Retry with source', failProviderSel: 'Select source', failRetrySel: 'Retry with selected source', failDoing: 'Retrying…',
     phNoLog: 'never used', phRate: '{n}% success ({c} runs)',
     phLastOk: 'last success {t}', phLastErr: 'last error: {r}', phInactive: 'disabled',
+    mergeGenres: 'Merge duplicate genres', mergeGenresHint: 'When the same theme is stored under several names (e.g. 絲襪 / パンスト / stockings), merge them into one',
+    mergeGenresDone: 'Merged {g} group(s), removed {n} duplicate genre(s)',
     failViewMovie: 'View movie', failElapsed: 'Elapsed', failGroupLabel: 'Group by cause',
     failOpenFolder: 'Open folder', failNoAction: 'Not added', failOpenErr: 'Failed to open folder', failNoMovie: 'This movie is not in the library',
     confirmRetrySkips: 'Force re-scrape the skip list (ignore skip, do not overwrite existing data)?',

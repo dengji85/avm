@@ -1061,6 +1061,19 @@ def check_missing() -> Dict[str, Any]:
     return {"ok": True, **result}
 
 
+@router.post("/maintenance/genres/normalize")
+def genres_normalize() -> Dict[str, Any]:
+    """把已入库的重复类型合并成规范名。
+
+    入库时的归一只管新数据；这个接口修历史数据（例如早先并存下来的 絲襪 / パンスト /
+    stockings）。幂等，可以重复点。
+    """
+    with db() as conn:
+        result = store.merge_duplicate_genres(conn)
+        conn.commit()
+    return {"ok": True, **result}
+
+
 @router.get("/maintenance/providers-health")
 def providers_health(days: int = 30) -> Dict[str, Any]:
     """数据源健康总览：按源聚合最近 N 天的真实刮削结果。

@@ -1619,6 +1619,8 @@ export default {
     failRetryProvider: '换源重抓', failProviderSel: '选择数据源', failRetrySel: '用选中源重试', failDoing: '正在重试…',
     phNoLog: '未使用过', phRate: '{n}% 成功（{c} 次）',
     phLastOk: '最后成功 {t}', phLastErr: '最近失败：{r}', phInactive: '已停用',
+    mergeGenres: '合并重复类型', mergeGenresHint: '同一题材被不同源写成多个名字时（如「絲襪 / パンスト / stockings」），合并成统一叫法',
+    mergeGenresDone: '已合并 {g} 组，清理 {n} 个重复类型',
     failViewMovie: '查看影片', failElapsed: '耗时', failGroupLabel: '按原因分组',
     failOpenFolder: '打开文件夹', failNoAction: '未入库', failOpenErr: '打开文件夹失败', failNoMovie: '该影片尚未入库',
     confirmRetrySkips: '对跳过名单里的影片强制重新刮削一次（忽略跳过、不覆盖已有数据）？',

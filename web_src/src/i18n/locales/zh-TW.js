@@ -1627,6 +1627,8 @@ export default {
     failRetryProvider: '換源重抓', failProviderSel: '選擇資料源', failRetrySel: '用選中源重試', failDoing: '正在重試…',
     phNoLog: '未使用過', phRate: '{n}% 成功（{c} 次）',
     phLastOk: '最後成功 {t}', phLastErr: '最近失敗：{r}', phInactive: '已停用',
+    mergeGenres: '合併重複類型', mergeGenresHint: '同一題材被不同來源寫成多個名字時（如「絲襪 / パンスト / stockings」），合併成統一叫法',
+    mergeGenresDone: '已合併 {g} 組，清理 {n} 個重複類型',
     failViewMovie: '檢視影片', failElapsed: '耗時', failGroupLabel: '按原因分組',
     failOpenFolder: '開啟資料夾', failNoAction: '未入庫', failOpenErr: '開啟資料夾失敗', failNoMovie: '該影片尚未入庫',
     confirmRetrySkips: '對跳過名單裡的影片強制重新刮削一次（忽略跳過、不覆蓋已有資料）？',
