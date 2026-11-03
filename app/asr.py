@@ -41,10 +41,19 @@ MIN_TEXT_LEN = 4           # 太短的碎片（「あ」「ん」）对剧情没
 MAX_LINE_SECONDS = 20.0    # 单段过长说明模型在连续编，截断
 ASR_SEG_SECONDS = 600      # 转写切片：10 分钟一块，控制单次 STFT 内存
 
+# 词级时间戳：segment 级的 start/end 是 30 秒窗口内 token 位置的近似
+# （实测产出大量整秒边界，字幕与画面差 1~2 秒），词级用交叉注意力对齐，
+# 精度 ±0.2s。代价是速度 +15~25%。
+WORD_TS = True
+# 重拼后的单行上限：超过就在词边界断行
+LINE_MAX_SEC = 7.0
+LINE_MAX_CHARS = 30
+
 _JOBS: Dict[int, Dict[str, Any]] = {}
 _JOBS_LOCK = threading.Lock()
 _MODEL_CACHE: Dict[Tuple[str, str, str], Any] = {}
 _MODEL_LOCK = threading.Lock()
+_VAD_OK: Optional[bool] = None   # 子进程探测结果缓存（见 _vad_available）
 
 _CLOCK = re.compile(r"^\s*\[(\d+):(\d{2})\]")
 # dialog.txt 的一整行（含台词正文），旧数据兜底用
@@ -355,6 +364,120 @@ def _clock(sec: float) -> str:
     return "%d:%02d" % (sec // 60, sec % 60)
 
 
+def _vad_available() -> bool:
+    """onnxruntime 能否安全 import——决定要不要开 silero VAD。
+
+    必须用**子进程**探测：部分环境（本机实测）import onnxruntime 会直接把
+    进程带崩（无 Python 异常、无 traceback），在主进程里试一次整个后端就没了。
+    探测成功才开 vad_filter；失败退回无 VAD，行为与旧版一致，不会更差。
+    """
+    global _VAD_OK
+    if _VAD_OK is not None:
+        return _VAD_OK
+    _ensure_libs()
+    extra = libs_dir()
+    probe = ("import sys; sys.path.insert(0, %r); import onnxruntime" % (extra or ""))
+    try:
+        r = subprocess.run([sys.executable, "-c", probe],
+                           capture_output=True, timeout=90)
+        _VAD_OK = r.returncode == 0
+    except Exception:
+        _VAD_OK = False
+    sys.stderr.write("%s VAD(%s onnxruntime): %s\n"
+                     % (LOG_PREFIX, "with" if _VAD_OK else "without",
+                        "enabled" if _VAD_OK else "disabled"))
+    return _VAD_OK
+
+
+def _seg_bad(seg: Any) -> bool:
+    """段级粗滤：整个 segment 明显不可信时直接跳过（词级/段级两条路径共用）。"""
+    if getattr(seg, "no_speech_prob", 0) and seg.no_speech_prob > NO_SPEECH_MAX:
+        return True
+    lp = getattr(seg, "avg_logprob", None)
+    if lp is not None and lp < LOGPROB_MIN:
+        return True
+    cr = getattr(seg, "compression_ratio", None)
+    if cr is not None and cr > COMPRESS_MAX:
+        return True
+    return False
+
+
+def _line_ok(text: str, last: str, language: str) -> bool:
+    """行级文本过滤（词级重拼后的行没有段级统计，只做语言与重复判断）。"""
+    t = (text or "").strip()
+    if len(t) < MIN_TEXT_LEN:
+        return False
+    if not _lang_ok(t, language):
+        return False
+    if _ONLY_KANA.match(t) and len(t) <= 8:
+        return False
+    if len(set(t)) <= 2:
+        return False
+    digits = sum(ch.isdigit() for ch in t)
+    letters = sum(ch.isalpha() for ch in t)
+    if digits and digits >= max(2, letters):
+        return False
+    if last:
+        a, b = set(last), set(t)
+        if len(a & b) / max(1, len(a | b)) > 0.9:
+            return False
+    return True
+
+
+def _regroup(seg: Any, base: float, language: str,
+             state: Dict[str, Any]) -> None:
+    """把一个 segment 的词级时间戳重拼成 ≤7 秒 / ≤30 字的字幕行。
+
+    whisper 的 segment start/end 是窗口近似；words 里的每个词才带真实语音
+    边界。行首取首词 start、行尾取末词 end，超限就在词边界断行——日语的
+    分词单元本身就是断点，英文词自带前导空格，直接拼接即可。
+    ``state`` 跨段携带 last（上一条保留的文本）与累计结果。
+    """
+    words = list(getattr(seg, "words", None) or [])
+    if not words:
+        return
+    rows: List[Dict[str, Any]] = []
+    cur: List[Any] = []
+    cur_chars = 0
+    span0 = None
+
+    def flush() -> None:
+        nonlocal cur, cur_chars, span0
+        if not cur:
+            return
+        text = "".join(str(w.word or "") for w in cur).strip()
+        start = base + float(cur[0].start or 0)
+        end = base + float(cur[-1].end or 0)
+        probs = [float(w.probability or 0) for w in cur if w.probability is not None]
+        rows.append({"start": round(start, 2), "end": round(end, 2),
+                     "text": text,
+                     "logprob": round(sum(probs) / len(probs), 3) if probs else
+                     round(float(getattr(seg, "avg_logprob", 0) or 0), 3)})
+        cur, cur_chars, span0 = [], 0, None
+
+    for w in words:
+        if getattr(w, "start", None) is None or getattr(w, "end", None) is None:
+            continue
+        if cur and span0 is not None:
+            if (float(w.end) - span0) > LINE_MAX_SEC or cur_chars >= LINE_MAX_CHARS:
+                flush()
+        if not cur:
+            span0 = float(w.start)
+        cur.append(w)
+        cur_chars += len(str(w.word or "").strip())
+    flush()
+
+    last = state.get("last", "")
+    for row in rows:
+        if _line_ok(row["text"], last, language):
+            state["segs"].append(row)
+            state["lines"].append("[%s] %s" % (_clock(row["start"]), row["text"]))
+            state["kept"] += 1
+            state["chars"] += len(row["text"])
+            last = row["text"]
+    state["last"] = last
+
+
 _ONLY_KANA = re.compile(r"^[\sぁ-んァ-ヶーｰ、。,.!?！？…~〜\-]+$")
 
 
@@ -453,6 +576,35 @@ def _prepare_audio(video: str, out_wav: str, ffmpeg: str,
     return os.path.getsize(out_wav) / (16000 * 2.0)
 
 
+def _av_offset(video: str, cfg: Dict[str, Any] | None) -> float:
+    """音视频流的起点差（秒），绝对值 ≤0.3s 时视为 0。
+
+    remux 过的文件音画起点可能不同：字幕时间轴基于**音频**流，若音频流比
+    视频流晚 N 秒开始，识别出的时间就要整体加 N 才能对上画面。探测失败
+    （ffprobe 缺失 / 读不出）一律返回 0，不阻塞提取。
+    """
+    try:
+        from .ext_components import ffprobe_exe
+
+        fp = ffprobe_exe(cfg or load_config())
+        if not fp or not os.path.isfile(video):
+            return 0.0
+        r = subprocess.run(
+            [fp, "-v", "error", "-show_entries", "stream=codec_type,start_time",
+             "-of", "json", video], capture_output=True, timeout=30)
+        streams = (json.loads(r.stdout or b"{}").get("streams")) or []
+        starts = {str(s.get("codec_type")): float(s.get("start_time") or 0)
+                  for s in streams
+                  if s.get("codec_type") in ("video", "audio")
+                  and s.get("start_time") is not None}
+        if "audio" not in starts or "video" not in starts:
+            return 0.0
+        diff = starts["audio"] - starts["video"]
+        return round(diff, 3) if abs(diff) > 0.3 else 0.0
+    except Exception:
+        return 0.0
+
+
 def _run(movie_id: int, video: str, cfg: Dict[str, Any], size: str,
          language: str, max_seconds: int, start_seconds: int = 0) -> None:
     started = time.time()
@@ -485,22 +637,31 @@ def _run(movie_id: int, video: str, cfg: Dict[str, Any], size: str,
         sys.stderr.write("[asr] movie %s: audio %.0fs -> %d part(s)\n"
                          % (movie_id, duration, len(parts)))
         total = float(duration or 0)
+        # 音视频流起点差：remux 过的文件音画起点可能不同，字幕时间轴基于音频，
+        # 需要按差值整体平移（库里实测多为 0，防御 remux 文件）。
+        av_off = _av_offset(video, cfg)
+        vad = _vad_available()
         lines: List[str] = []
         # 同时留一份带 start/end 的逐段数据：后面导出草稿字幕全靠它
         segs: List[Dict[str, Any]] = []
-        last = ""
-        kept = chars = 0
+        state: Dict[str, Any] = {"last": "", "segs": segs, "lines": lines,
+                                 "kept": 0, "chars": 0}
         offset = 0.0
         for part in parts:
             if _job_cancelled(movie_id):
                 raise RuntimeError("已取消")
-            # 注意：不用内置 vad_filter——它依赖 onnxruntime，在部分环境会直接崩溃；
-            # 噪声交给 _keep() 在文本层面过滤，效果等价且稳定。
+            # VAD 由 _vad_available() 子进程探测：onnxruntime 能安全 import 才开
+            # （消除静音拉伸与幻听段）；否则退回纯文本过滤，行为与旧版一致。
             segments, info = model.transcribe(
                 part,
                 language=None if language in ("", "auto") else language,
                 beam_size=beam_size(cfg),
-                vad_filter=False,
+                vad_filter=vad,
+                vad_parameters=dict(min_silence_duration_ms=500,
+                                    speech_pad_ms=300) if vad else None,
+                word_timestamps=WORD_TS,
+                # 词级时间戳才有意义：跳过长静音里的幻听段
+                hallucination_silence_threshold=2.0 if (vad and WORD_TS) else None,
                 condition_on_previous_text=False,
                 no_speech_threshold=0.6,
                 log_prob_threshold=LOGPROB_MIN,
@@ -508,28 +669,43 @@ def _run(movie_id: int, video: str, cfg: Dict[str, Any], size: str,
                 chunk_length=30,
             )
             part_dur = float(info.duration or 0)
+            # base = 这段音频在视频里的真实起点：start_seconds（提取起点）+
+            # 前面切片累计 + 音画起点差。之前漏加 start_seconds，
+            # 一旦用「从第 N 分钟开始提取」整条字幕就会整体错位 N 分钟。
+            base = float(start_seconds or 0) + offset + av_off
             for seg in segments:
                 if _job_cancelled(movie_id):
                     raise RuntimeError("已取消")
-                text = (seg.text or "").strip()
-                start = offset + float(seg.start or 0)
-                end = offset + float(seg.end or 0)
-                if _keep(seg, text, last, language):
-                    lines.append("[%s] %s" % (_clock(start), text))
-                    segs.append({
-                        "start": round(start, 2),
-                        "end": round(end, 2),
-                        "text": text,
-                        "logprob": round(float(getattr(seg, "avg_logprob", 0) or 0), 3),
-                    })
-                    last = text
-                    kept += 1
-                    chars += len(text)
+                if _seg_bad(seg):
+                    continue
+                if WORD_TS and list(getattr(seg, "words", None) or []):
+                    # 词级路径：行首/行尾取真实语音边界，超 7 秒 / 30 字断行
+                    _regroup(seg, base, language, state)
+                else:
+                    # 词级不可用（模型过旧等）退回旧行为：段级时间戳 + 全套过滤
+                    text = (seg.text or "").strip()
+                    start = base + float(seg.start or 0)
+                    end = base + float(seg.end or 0)
+                    if _keep(seg, text, state["last"], language):
+                        lines.append("[%s] %s" % (_clock(start), text))
+                        segs.append({
+                            "start": round(start, 2),
+                            "end": round(end, 2),
+                            "text": text,
+                            "logprob": round(float(getattr(seg, "avg_logprob", 0) or 0), 3),
+                        })
+                        state["last"] = text
+                        state["kept"] += 1
+                        state["chars"] += len(text)
+                end_all = base + float(seg.end or 0)
                 if total > 0:
-                    pct = 12 + int(83 * min(1.0, end / total))
-                    _set_job(movie_id, percent=pct, message="已识别 %d 段" % kept)
+                    pct = 12 + int(83 * min(1.0, end_all / total))
+                    _set_job(movie_id, percent=pct,
+                             message="已识别 %d 段" % state["kept"])
             offset += part_dur
 
+        kept = state["kept"]
+        chars = state["chars"]
         text = "\n".join(lines)
         if not text:
             raise RuntimeError("没有识别到可用对白：这段音频可能以环境音/拟声为主")
@@ -546,6 +722,10 @@ def _run(movie_id: int, video: str, cfg: Dict[str, Any], size: str,
             "duration": round(total, 1),
             "elapsed": round(time.time() - started, 1),
             "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            # 诊断用：这次跑用的对齐模式。排查「字幕对不对齐」先看这三个值
+            "word_ts": bool(WORD_TS),
+            "vad": bool(vad),
+            "av_offset": round(av_off, 3),
             "error": "",
         }
         with open(_meta_path(movie_id), "w", encoding="utf-8") as f:
