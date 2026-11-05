@@ -1016,14 +1016,15 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', onKey) })
 
                   <div class="dd-g">
                     <span class="dd-g-lbl">{{ $t('detail.grpMaint') }}</span>
-                    <div class="dd-btns flow">
-                    <!-- 刮削：只补空字段；强制刮削：覆盖字段并强制换封面（含低清图） -->
+                    <div class="dd-btns flow maint">
+                    <!-- 刮削：只补空字段；强制刮削：覆盖字段并强制换封面（含低清图）。
+                         封面相关操作（换图 / 抽帧 / 清除）统一放在封面下方 cov-acts，这里不再重复放入口 -->
                     <button class="btn ghost" @click="doScrape(false)" :disabled="loading"
                             :title="$t('detail.scrapeTip')">⟳ {{ $t('detail.scrape') }}</button>
                     <button class="btn ghost" @click="doScrape(true)" :disabled="loading"
                             :title="$t('detail.forceScrapeTip')">⇊ {{ $t('detail.forceScrape') }}</button>
-                    <button class="btn icon ghost" @click="doNfo" :data-tip="$t('detail.exportNfo')">⤓</button>
-                    <button class="btn icon ghost" @click="removeCover" :data-tip="$t('detail.clearCover')">🖼</button>
+                    <button class="btn ghost" @click="doNfo"
+                            :title="$t('detail.exportNfoTip')">⤓ {{ $t('detail.exportNfo') }}</button>
                     </div>
                   </div>
 
@@ -1749,6 +1750,11 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', onKey) })
 .dd-btns.flow { display: flex; flex-wrap: wrap; }
 .dd-btns.flow > .btn:not(.icon) { flex: 0 0 104px; }
 .dd-btns.flow > .btn.icon { flex: 0 0 30px; }
+/* 维护行只有三个按钮：按文字宽度紧凑排列、始终一行，不再被 104px 格子撑宽或折行。
+   极窄屏实在放不下时横向滚动（滚动条隐藏），而不是折成两行。 */
+.dd-btns.flow.maint { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; }
+.dd-btns.flow.maint::-webkit-scrollbar { display: none; }
+.dd-btns.flow.maint > .btn:not(.icon) { flex: 0 0 auto; width: auto; padding: 0 9px; }
 .dd-g-lbl { flex: 0 0 36px; font-size: 11px; color: var(--c-text-3); letter-spacing: .04em; }
 .site-flat { white-space: nowrap; font-size: 12px; height: 26px; padding: 0 10px;
   display: inline-flex; align-items: center; }
