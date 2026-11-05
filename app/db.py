@@ -448,6 +448,14 @@ def _migrate(conn: sqlite3.Connection) -> None:
         "lang TEXT DEFAULT '', source TEXT DEFAULT 'matched', "
         "created_at TEXT DEFAULT (datetime('now','localtime')))")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_sub_movie ON movie_subtitles(movie_id)")
+    # 在线字幕匹配：老库补来源 / 质检分 / 原始地址 / 字幕时长（幂等，可重复执行）
+    sub_cols = {r[1] for r in conn.execute("PRAGMA table_info(movie_subtitles)").fetchall()}
+    for col, ddl in (("provider", "TEXT DEFAULT ''"),
+                     ("score", "INTEGER DEFAULT 0"),
+                     ("origin_url", "TEXT DEFAULT ''"),
+                     ("sub_duration_ms", "INTEGER DEFAULT 0")):
+        if col not in sub_cols:
+            conn.execute("ALTER TABLE movie_subtitles ADD COLUMN %s %s" % (col, ddl))
     # 刮削日志逐源明细：老库补 detail 列
     log_cols = {r[1] for r in conn.execute("PRAGMA table_info(scrape_logs)").fetchall()}
     if "detail" not in log_cols:

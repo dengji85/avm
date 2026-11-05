@@ -44,10 +44,15 @@ router = APIRouter(prefix="/api")
 from .routers import covers as _covers_api          # noqa: E402
 from .routers import ext as _ext_api                # noqa: E402
 from .routers import metatube as _metatube_api      # noqa: E402
+from .routers import subtitles as _subtitles_api    # noqa: E402
 
 router.include_router(_covers_api.router)
 router.include_router(_ext_api.router)
 router.include_router(_metatube_api.router)
+router.include_router(_subtitles_api.router)
+
+#: 在线字幕来源的展示名（登记时存的是 provider id，打分与配置都按 id 走）
+_ONLINE_SUB_LABELS = {"thunder": "迅雷", "subtitlecat": "SubtitleCat"}
 
 # 当前程序版本（单一真源见 app/__init__.__version__，与发布版本保持一致）。
 from . import __version__ as APP_VERSION
@@ -2193,8 +2198,10 @@ def download_subtitle_file(movie_id: int, sub_id: int) -> FileResponse:
     norm = path.replace("\\", "/")
     if not os.path.isfile(path):
         raise HTTPException(status_code=404, detail="字幕文件已不存在")
-    # 防止用「字幕路径」当任意文件读取：AI 产物必须落在 data/subs 下
-    if row["source"] == "ai-translate" and "/data/subs/" not in norm and "/subs/" not in norm:
+    # 防止用「字幕路径」当任意文件读取：AI 译文与在线下载产物都必须落在 data/subs 下
+    src = row["source"] or ""
+    if (src == "ai-translate" or src.startswith("external:")) \
+            and "/data/subs/" not in norm and "/subs/" not in norm:
         raise HTTPException(status_code=403, detail="非法的字幕路径")
     return FileResponse(path, media_type="text/plain; charset=utf-8",
                         filename=os.path.basename(path))
@@ -2441,7 +2448,11 @@ def movie_subtitle_tracks(movie_id: int) -> Dict[str, Any]:
             if key in seen_file:
                 continue
             seen_file.add(key)
-            prefix = "AI 译文 · " if s.get("source") == "ai-translate" else ""
+            src = s.get("source") or ""
+            prefix = "AI 译文 · " if src == "ai-translate" else ""
+            if src.startswith("external:"):
+                pid = (s.get("provider") or "").split(":", 1)[-1] or src.split(":", 1)[-1]
+                prefix = "在线 · %s · " % _ONLINE_SUB_LABELS.get(pid, pid)
             tracks.append({
                 "kind": "file",
                 "id": str(s["id"]),

@@ -18,7 +18,19 @@ import re
 import os
 import sys
 import datetime
+import shutil
 import PyInstaller.__main__
+
+# UPX 能把 onefile 产物再压一截，但它不是 Python 依赖，需要系统单独安装。
+# 显式探测：装了就传给 PyInstaller，没装就 --noupx，避免不同机器上
+# 「有时压缩有时不压缩」导致产物体积不可预期。
+_upx = shutil.which("upx")
+if _upx:
+    _upx_args = ["--upx-dir", os.path.dirname(_upx)]
+    print("[build] UPX detected, compression enabled: %s" % _upx)
+else:
+    _upx_args = ["--noupx"]
+    print("[build] UPX not found, compression skipped")
 
 # Windows CI 的控制台默认可能是 cp1252 等非 UTF-8 编码，脚本里的中文 print 会抛
 # UnicodeEncodeError。这里把标准输出统一切到 UTF-8（环境不支持时静默跳过）。
@@ -105,6 +117,7 @@ try:
     "--exclude-module", "av",
     "--clean",
     "--noconfirm",
+    *_upx_args,
 ])
 finally:
     _restore_build_date(_original_api)

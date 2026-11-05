@@ -1,5 +1,5 @@
 <script setup>
-import { ref, reactive, computed, watch, onMounted, onBeforeUnmount } from 'vue'
+import { ref, reactive, computed, watch, onMounted, onBeforeUnmount, defineAsyncComponent } from 'vue'
 import { state } from '../state.js'
 import {
   getMovie, updateMovie, deleteMovie, toggleFlag, playMovie,
@@ -8,6 +8,7 @@ import {
   listTags, renameTag, deleteTag, aiPromoteTags, cleanupTags,
   dlnaDevices, dlnaAddDevice, dlnaCast, dlnaStop,
   getActress, avatarUrl, getConfig, scanMovieSubtitles, extStatus,
+  searchOnlineSubtitles, fetchOnlineSubtitle,
 } from '../api.js'
 import AddToCollectionBtn from './AddToCollectionBtn.vue'
 import {
@@ -19,7 +20,8 @@ import { useTasks } from '../composables/useTasks.js'
 import { aiWorkspace as ws } from '../composables/aiWorkspace.js'
 
 const { runScrape } = useTasks()
-import VideoPlayer from './VideoPlayer.vue'
+// video.js 体积较大，播放器要点「播放」才用到：拆成异步 chunk，首屏不加载
+const VideoPlayer = defineAsyncComponent(() => import('./VideoPlayer.vue'))
 import ActressModal from './ActressModal.vue'
 
 // 详情页布局：hero 沉浸 / split 左图右信息 / compact 紧凑横图
@@ -180,6 +182,41 @@ async function scanSidecars() {
     scanningSubs.value = false
   }
 }
+/* 在线字幕匹配：按番号搜候选 → 用户选一条，后端负责下载 / 质检 / 登记 */
+const onlineSubs = reactive({ loading: false, picking: '', candidates: [], sources: [], searched: false, error: '' })
+const fmtOnlineMinutes = (ms) => Math.round((ms || 0) / 60000)
+async function searchOnlineSubs() {
+  if (onlineSubs.loading || !id.value) return
+  onlineSubs.loading = true
+  onlineSubs.error = ''
+  onlineSubs.candidates = []
+  onlineSubs.sources = []
+  onlineSubs.searched = false
+  try {
+    const r = await searchOnlineSubtitles(id.value)
+    onlineSubs.candidates = r.candidates || []
+    onlineSubs.sources = r.sources || []
+    onlineSubs.searched = true
+  } catch (e) {
+    onlineSubs.error = e.message
+  } finally {
+    onlineSubs.loading = false
+  }
+}
+async function pickOnlineSub(c) {
+  if (onlineSubs.picking) return
+  onlineSubs.picking = c.id
+  try {
+    const r = await fetchOnlineSubtitle(id.value, c.id)
+    await refreshMovie()
+    toast(t('detail.onlineSubsDone', { score: r.score }), 'ok')
+  } catch (e) {
+    toast(e.message, 'err')
+  } finally {
+    onlineSubs.picking = ''
+  }
+}
+
 /** AI 操作后的轻量刷新：只重取影片数据，不重置当前 tab 与播放状态 */
 async function refreshMovie() {
   if (!state.currentId) return
@@ -1158,6 +1195,46 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', onKey) })
                 </div>
               </div>
 
+              <!-- 在线字幕匹配：只按番号查字幕站，采纳后自动出现在播放器字幕菜单 -->
+              <div class="online-subs">
+                <div class="hstack">
+                  <span class="lbl">{{ $t('detail.onlineSubs') }}</span>
+                  <span class="spacer"></span>
+                  <button class="btn tiny ghost" :disabled="onlineSubs.loading || !mv.code"
+                          @click="searchOnlineSubs">
+                    {{ onlineSubs.loading ? $t('detail.onlineSubsSearching') : $t('detail.onlineSubs') }}
+                  </button>
+                </div>
+                <div class="os-hint">{{ $t('detail.onlineSubsHint') }}</div>
+                <div v-if="onlineSubs.error" class="err">{{ onlineSubs.error }}</div>
+                <div v-if="onlineSubs.searched && !onlineSubs.candidates.length" class="os-hint">
+                  {{ $t('detail.onlineSubsEmpty') }}
+                </div>
+                <div v-if="onlineSubs.candidates.length" class="os-hint">
+                  {{ $t('detail.onlineSubsCount', { n: onlineSubs.candidates.length }) }}
+                </div>
+                <ul v-if="onlineSubs.candidates.length" class="os-rows">
+                  <li v-for="c in onlineSubs.candidates" :key="c.id">
+                    <span class="os-score">{{ $t('detail.onlineSubsEstimate', { n: c.estimate }) }}</span>
+                    <span class="os-name" :title="c.name">{{ c.name }}</span>
+                    <span class="os-meta">{{ c.provider_label }} · {{ c.lang }}</span>
+                    <span class="os-meta" v-if="c.duration_ms">
+                      {{ $t('detail.onlineSubsDuration', { n: fmtOnlineMinutes(c.duration_ms) }) }}
+                    </span>
+                    <span class="spacer"></span>
+                    <button class="btn tiny primary" :disabled="!!onlineSubs.picking"
+                            @click="pickOnlineSub(c)">
+                      {{ onlineSubs.picking === c.id ? $t('detail.onlineSubsPicking') : $t('detail.onlineSubsPick') }}
+                    </button>
+                  </li>
+                </ul>
+                <div v-for="s in onlineSubs.sources.filter(x => x.status !== 'ok')" :key="s.provider" class="os-hint">
+                  {{ s.message || (s.status === 'miss'
+                      ? $t('detail.onlineSubsSourceMiss', { name: s.label })
+                      : $t('detail.onlineSubsSourceOff', { name: s.label })) }}
+                </div>
+              </div>
+
               <!-- 自定义标签：常驻主区可见，随时增删 -->
               <div class="dd-sec-t">{{ $t('detail.secTags') }}</div>
               <div class="dd-tags">
@@ -1543,6 +1620,18 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', onKey) })
 </template>
 
 <style scoped>
+/* 在线字幕候选：分数 / 文件名 / 来源 / 时长 一行展示，窄屏另起一行 */
+.online-subs { display: flex; flex-direction: column; gap: 6px; margin-top: var(--sp-2); }
+.online-subs .os-hint { font-size: var(--fs-xs); color: var(--c-text-3); }
+.os-rows { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; max-height: 260px; overflow: auto; }
+.os-rows li { display: flex; align-items: center; gap: 8px; padding: 5px 8px; border: 1px solid var(--c-line); border-radius: var(--r-sm); background: var(--c-surface-2); font-size: var(--fs-sm); }
+.os-score { font-size: var(--fs-xs); color: var(--c-primary); min-width: 78px; white-space: nowrap; }
+.os-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.os-meta { font-size: var(--fs-xs); color: var(--c-text-3); white-space: nowrap; }
+@media (max-width: 640px) {
+  .os-rows li { flex-wrap: wrap; }
+  .os-name { flex-basis: 100%; order: -1; }
+}
 /* 连播（全屏播放层）之上打开详情时，层级需高于 --z-player，否则会被完全盖住。
    .drawer-mask / .drawer 的基础样式在 styles/layout.css，这里只覆盖层级。 */
 .drawer-mask.over-player { z-index: var(--z-drawer-over); }
@@ -1632,8 +1721,7 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', onKey) })
 /* A. 沉浸：整宽大图 + 图上信息 + 主操作在下方 */
 .layout-hero { flex-direction: column; }
 .layout-hero .dd-hero img { max-height: 380px; }
-/* 沉浸式整宽下，操作面板限宽，按钮组仍按固定网格排
-.layout-hero .dd-actions { max-width: 720px; }
+/* 沉浸式整宽下，操作面板不再限宽（按钮组按固定网格平铺） */
 .dd-hero-info {
   position: absolute; left: 0; right: 0; bottom: 0;
   padding: 48px 14px 12px; pointer-events: none;
@@ -1688,7 +1776,8 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', onKey) })
 .dd-layout-switch .ll:hover { color: var(--c-text-1); }
 .dd-layout-switch .ll.on { background: var(--c-primary-soft-strong); color: var(--c-primary-h); }
 
-.cw-bar { position: absolute; left: 0; right: 0; bottom: 0; height: 3px; background: rgba(0,0,0,.5); }
+/* z-index 高于沉浸式图上的信息层，否则恢复渐变遮罩后进度条会被盖住 */
+.cw-bar { position: absolute; left: 0; right: 0; bottom: 0; z-index: 2; height: 3px; background: rgba(0,0,0,.5); }
 .cw-bar > i { display: block; height: 100%; background: var(--c-primary); }
 .cover-src-badge {
   position: absolute; top: 6px; left: 6px; z-index: 2;

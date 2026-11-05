@@ -332,6 +332,10 @@ export const aiModelTest = (name) => post(`/ai/models/${encodeURIComponent(name)
 export const subtitleTracks = (id) => get(`/movies/${id}/subtitle-tracks`)
 /* 扫描视频同目录的外挂字幕并登记（幂等） */
 export const scanMovieSubtitles = (id) => post(`/movies/${id}/subtitles/scan`, {})
+/* 在线字幕匹配：按番号搜索候选 → 用户选一条，由后端下载 / 质检 / 登记 */
+export const searchOnlineSubtitles = (id) => post(`/movies/${id}/subtitles/online-search`, {})
+export const fetchOnlineSubtitle = (id, candidateId) =>
+  post(`/movies/${id}/subtitles/online-fetch`, { candidate_id: candidateId })
 export const setSkipPoints = (id, body) => put(`/movies/${id}/skip`, body)
 /* AI 剧情问答与相似推荐 */
 export const aiAsk = (id, question) => post(`/ai/ask/${id}`, { question })

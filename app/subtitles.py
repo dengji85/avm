@@ -130,8 +130,14 @@ def match_subtitle_files(conn, paths: List[str]) -> Dict[str, Any]:
     return {"matched": matched, "unmatched": unmatched, "total": len(paths)}
 
 
-def _register_subtitle(conn, movie_id: int, path: str, source: str = "matched") -> bool:
-    """登记一条字幕（幂等）。返回是否真的新增。"""
+def _register_subtitle(conn, movie_id: int, path: str, source: str = "matched",
+                       lang: str = "", provider: str = "", score: int = 0,
+                       origin_url: str = "", sub_duration_ms: int = 0) -> bool:
+    """登记一条字幕（幂等）。返回是否真的新增。
+
+    在线下载的字幕会额外带上来源 / 质检分 / 原始地址；老调用方只传前四个
+    位置参数，行为完全不变（文件名猜语言、其余字段走数据库默认值）。
+    """
     existing = query_one(
         conn,
         "SELECT id FROM movie_subtitles WHERE movie_id=? AND file_path=?",
@@ -140,9 +146,11 @@ def _register_subtitle(conn, movie_id: int, path: str, source: str = "matched") 
     if existing is not None:
         return False
     conn.execute(
-        "INSERT INTO movie_subtitles(movie_id, file_path, filename, lang, source) "
-        "VALUES(?,?,?,?,?)",
-        (movie_id, path, os.path.basename(path), _lang_of(os.path.basename(path)), source),
+        "INSERT INTO movie_subtitles(movie_id, file_path, filename, lang, source, "
+        "provider, score, origin_url, sub_duration_ms) VALUES(?,?,?,?,?,?,?,?,?)",
+        (movie_id, path, os.path.basename(path),
+         lang or _lang_of(os.path.basename(path)), source,
+         provider or "", int(score or 0), origin_url or "", int(sub_duration_ms or 0)),
     )
     return True
 
@@ -266,7 +274,8 @@ def align_subtitle(conn, subtitle_path: str, movie_id: int,
 def list_subtitles(conn, movie_id: int) -> List[Dict[str, Any]]:
     rows = query_all(
         conn,
-        "SELECT id, file_path, filename, lang, source, created_at "
+        "SELECT id, file_path, filename, lang, source, created_at, "
+        "provider, score, origin_url, sub_duration_ms "
         "FROM movie_subtitles WHERE movie_id=? ORDER BY id",
         (movie_id,),
     )
@@ -275,6 +284,9 @@ def list_subtitles(conn, movie_id: int) -> List[Dict[str, Any]]:
         out.append({
             "id": r["id"], "path": r["file_path"], "filename": r["filename"],
             "lang": r["lang"], "source": r["source"], "created_at": r["created_at"],
+            "provider": r["provider"] or "", "score": int(r["score"] or 0),
+            "origin_url": r["origin_url"] or "",
+            "sub_duration_ms": int(r["sub_duration_ms"] or 0),
             "exists": os.path.exists(r["file_path"]),
         })
     return out

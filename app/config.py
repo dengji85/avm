@@ -118,6 +118,21 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         ],
         "follow_symlinks": False,
     },
+    # 在线字幕匹配：只按番号出站查询，绝不上传文件名 / 路径 / 视频内容。
+    # P0 提供单部影片的手动搜索 / 选择 / 下载；批量任务与自动策略后续阶段再加。
+    "subtitles": {
+        "enabled": True,
+        # 内置源：subtitlecat（按番号索引，主力）/ thunder（迅雷，补充且偶发返回空）
+        "providers": ["subtitlecat", "thunder"],
+        # 单次请求超时（秒）与每个源的请求间隔（毫秒），避免把字幕站打挂
+        "timeout": 15,
+        "delay_ms": 800,
+        # 单部影片最多展示多少条候选
+        "max_candidates": 24,
+        # 留空则沿用 scraper.proxy
+        "proxy": "",
+        "user_agent": DEFAULT_UA,
+    },
     "cover": {
         # 扫描时自动嗅探同目录下的本地封面图
         "auto_local": True,

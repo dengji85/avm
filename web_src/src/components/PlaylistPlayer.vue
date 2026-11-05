@@ -1,6 +1,7 @@
 <script setup>
-import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
-import VideoPlayer from './VideoPlayer.vue'
+import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount, defineAsyncComponent } from 'vue'
+// 与详情页一致：播放器按需加载，避免 video.js 进入首屏 chunk
+const VideoPlayer = defineAsyncComponent(() => import('./VideoPlayer.vue'))
 import { coverThumbUrl as thumbUrl, setCollectionPlayhead } from '../api.js'
 import { state, closePlayQueue } from '../state.js'
 import { t } from '../i18n/index.js'
