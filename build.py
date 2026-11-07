@@ -106,6 +106,12 @@ try:
     "--hidden-import", "email.mime.text",
     "--hidden-import", "email.mime.multipart",
     "--hidden-import", "charset_normalizer",
+    # PIL._avif 是 AVIF 编解码插件（压缩后 4.1MB，占包体 17%）：项目从不处理
+    # AVIF —— Accept 头不请求它，_looks_like_image 的魔数校验也只认
+    # JPEG/PNG/GIF/WEBP。纯死重，不打进包。
+    "--exclude-module", "PIL._avif",
+    # watchfiles 是 uvicorn --reload（开发热重载）的可选依赖，打包版用不到
+    "--exclude-module", "watchfiles",
     # 语音对白提取是可选组件（依赖约 170MB + 模型 460MB），
     # 绝不打进主程序：用户需要时另装，用 AVM_ASR_LIBS 指向即可。
     "--exclude-module", "faster_whisper",

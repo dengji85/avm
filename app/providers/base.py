@@ -131,7 +131,7 @@ def http_get(url: str, scfg: Dict[str, Any], options: Dict[str, Any],
             "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
         ),
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,"
-                  "image/avif,image/webp,*/*;q=0.8",
+                  "image/webp,*/*;q=0.8",
         "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
         "Accept-Encoding": "gzip, deflate",
         "Connection": "keep-alive",

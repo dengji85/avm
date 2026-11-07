@@ -579,7 +579,9 @@ def download(url: str, cfg: Dict[str, Any], referer: str = "") -> Optional[bytes
     headers = {
         "User-Agent": scraper.get("user_agent", "Mozilla/5.0"),
         "Referer": ref,
-        "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+        # 不请求 image/avif：本项目不解码 AVIF（打包也不带编解码插件），
+        # 要了也只会被 _looks_like_image 丢弃；服务器会回退 webp/jpeg
+        "Accept": "image/webp,image/apng,image/*,*/*;q=0.8",
         "Accept-Encoding": "gzip, deflate",
     }
 
