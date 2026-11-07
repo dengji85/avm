@@ -7,17 +7,20 @@
     python run.py dedupe --json        # 列出重复组（精确重复 + 同番号多版本）
     python run.py stats                # 库规模与磁盘占用
     python run.py export --out lib.csv # 导出 CSV
-    python run.py organize --root D:/AV --dry-run   # 仅预览整理方案
-    python run.py organize --root D:/AV --apply      # 执行整理（移动文件 + 更新库）
+    python run.py organize --root D:/AV --dry-run                # 仅预览整理方案
+    python run.py organize --root D:/AV --apply                  # 执行整理（移动文件 + 更新库）
+    python run.py organize --root D:/AV --mode hardlink --apply  # 硬链接整理（同卷零拷贝），失败自动降级复制
     python run.py serve                # 启动 Web 服务（等价于不带子命令）
 """
 from __future__ import annotations
 
 import argparse
 import csv
+import errno
 import io
 import json
 import os
+import shutil
 import sys
 import threading
 import webbrowser
@@ -32,8 +35,10 @@ _ILLEGAL = '\\/:*?"<>|'
 
 
 def _safe(name: str) -> str:
-    s = "".join("_" if c in _ILLEGAL else c for c in (name or "")).strip().strip(".")
-    return s[:80] or "unknown"
+    # strip 必须放在截断之后：[:80] 可能恰好停在空格处，而 Windows 不允许
+    # 目录名以空格结尾（mkdir 会被系统剥掉，后续按带空格路径操作就找不到了）
+    s = "".join("_" if c in _ILLEGAL else c for c in (name or ""))
+    return s[:80].strip().strip(".") or "unknown"
 
 
 def cmd_scan(args) -> int:
@@ -123,8 +128,40 @@ def _build_dst(template: str, m: dict, f: dict, root: str) -> Path:
     return Path(root) / dst_dir / dst_name
 
 
+_ORGANIZE_MODES = ("move", "copy", "hardlink", "symlink")
+_ORGANIZE_VERBS = {"move": "移动", "copy": "复制", "hardlink": "硬链接", "symlink": "软链接"}
+
+
+def _place_file(mode: str, src: Path, dst: Path) -> str:
+    """按整理模式放置单个文件，返回实际生效的模式。
+
+    链接模式建链失败（hardlink 跨盘、Windows 未开开发者模式 / 非管理员）时
+    自动降级为复制，保证批量任务不因个别文件中断。
+    """
+    if mode == "move":
+        src.replace(dst)
+        return "move"
+    if mode == "copy":
+        shutil.copy2(src, dst)
+        return "copy"
+    try:
+        if mode == "hardlink":
+            os.link(src, dst)
+        else:
+            os.symlink(src, dst)
+        return mode
+    except OSError as e:
+        # EXDEV=跨盘硬链；EPERM/EACCES/winerror 1314=Windows 建链权限不足
+        if getattr(e, "errno", None) in (errno.EXDEV, errno.EPERM, errno.EACCES) \
+                or getattr(e, "winerror", None) == 1314:
+            shutil.copy2(src, dst)
+            return "copy"
+        raise
+
+
 def cmd_organize(args) -> int:
     init_db()
+    mode = args.mode
     conn = connect()
     try:
         movies = query_all(conn, "SELECT * FROM movies WHERE has_code = 1")
@@ -140,31 +177,44 @@ def cmd_organize(args) -> int:
                                  "src": f["path"], "dst": str(dst)})
     finally:
         conn.close()
-    print(f"整理方案：{len(plan)} 个文件将移动到 {args.root}/{args.template}")
+    verb = _ORGANIZE_VERBS[mode]
+    print(f"整理方案：{len(plan)} 个文件将{verb}到 {args.root}/{args.template}")
     for item in plan[:50]:
         print(f"  {item['src']}\n    -> {item['dst']}")
     if len(plan) > 50:
         print(f"  ... 其余 {len(plan) - 50} 项省略")
+    db_note = "并更新库" if mode == "move" else "，库中路径仍指向原文件"
     if not args.apply:
-        print("\n(这是 dry-run 预览，未做任何改动。加 --apply 才真正移动文件并更新库)")
+        print(f"\n(这是 dry-run 预览，未做任何改动。加 --apply 才真正{verb}文件{db_note})")
         return 0
     conn = connect()
+    done = 0
+    fallback = 0
     try:
-        moved = 0
         for item in plan:
             src, dst = Path(item["src"]), Path(item["dst"])
             try:
                 dst.parent.mkdir(parents=True, exist_ok=True)
-                src.replace(dst)
-                conn.execute("UPDATE movie_files SET path = ? WHERE id = ?", (str(dst), item["file_id"]))
-                conn.execute("UPDATE movies SET folder = ? WHERE id = ?", (str(dst.parent), item["movie_id"]))
-                moved += 1
+                actual = _place_file(mode, src, dst)
+                if actual == "copy" and mode != "copy":
+                    fallback += 1
+                if mode == "move":
+                    conn.execute("UPDATE movie_files SET path = ? WHERE id = ?", (str(dst), item["file_id"]))
+                    conn.execute("UPDATE movies SET folder = ? WHERE id = ?", (str(dst.parent), item["movie_id"]))
+                done += 1
             except Exception as e:
-                print(f"移动失败 {src}: {e}", file=sys.stderr)
+                print(f"{verb}失败 {src}: {e}", file=sys.stderr)
         conn.commit()
     finally:
         conn.close()
-    print(f"\n已移动 {moved} 个文件并更新库。")
+    print(f"\n已{verb} {done} 个文件。")
+    if mode == "move":
+        print("库中路径已同步更新。")
+    else:
+        print("仅 move 模式会改库；库中路径仍指向原文件。")
+    if fallback:
+        print(f"其中 {fallback} 个无法建链（跨盘硬链 / Windows 权限不足），已降级为复制。"
+              "软链接需开启 Windows 开发者模式或以管理员运行。")
     return 0
 
 
@@ -333,7 +383,10 @@ def build_parser() -> argparse.ArgumentParser:
     po = sub.add_parser("organize", help="按模板整理文件（默认 dry-run）")
     po.add_argument("--root", required=True, help="整理目标根目录")
     po.add_argument("--template", default="{studio}/{code} {title}", help="目录模板，支持 {studio}/{code}/{title}/{prefix}")
-    po.add_argument("--apply", action="store_true", help="真正移动文件（默认仅预览）")
+    po.add_argument("--mode", choices=_ORGANIZE_MODES, default="move",
+                    help="放置方式：move=移动并更新库（默认）/ copy=复制 / hardlink=硬链接（同卷零拷贝）"
+                         "/ symlink=软链接；建链失败（跨盘 / Windows 权限）自动降级为复制")
+    po.add_argument("--apply", action="store_true", help="真正执行（默认仅预览）")
     sub.add_parser("mcp", help="以 MCP 服务器（stdio）运行，供外部 AI 客户端连接（需 pip install mcp）")
     pa = sub.add_parser("ai-check", help="诊断 AI 助手：模型配置 / 库字典 / 这句话会被解析成什么")
     pa.add_argument("question", nargs="?", default="找一下穿丝袜的、年纪大一点的", help="要诊断的问句")
