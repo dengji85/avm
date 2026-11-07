@@ -1,6 +1,7 @@
 import { createApp } from 'vue'
 import App from './App.vue'
 import { t, setLang, initI18n } from './i18n'
+import { applySiteTitleFromCache } from './utils.js'
 
 import './styles/tokens.css'
 import './styles/base.css'
@@ -8,6 +9,9 @@ import './styles/ui.css'
 import './styles/layout.css'
 import './styles/assistant.css'
 import './styles.css'
+
+// 挂载前用缓存的后缀同步定标题，避免刷新时闪过 index.html 的默认标题
+applySiteTitleFromCache()
 
 const app = createApp(App)
 app.config.globalProperties.$t = t

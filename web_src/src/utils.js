@@ -179,14 +179,26 @@ export function resolveConfirm(v) {
 /* ---------------- 其他 ---------------- */
 
 /**
- * 设置浏览器标题为「品牌名 - 自定义后缀」。
- *
- * 后缀来自 privacy.site_subtitle，用于混淆：任务栏 / 标签页被旁人扫到时不起疑，
- * 是「紧急遮挡」之外的第二道隐私保护（见 docs/安全与隐私设计.md 的 L4）。
+ * 浏览器标题 = 品牌名 + 自定义后缀（混淆用，见 docs/安全与隐私设计.md 的 L4）。
+ * 后缀来自 privacy.site_subtitle。每次设置都把它缓存到 localStorage，
+ * 供首屏挂载前同步应用（见 applySiteTitleFromCache），避免刷新时闪一下默认值。
  */
+const SITE_SUB_KEY = 'avm.site_subtitle'
 export function setSiteTitle(subtitle) {
   const brand = t('nav.brand')
   const sub = String(subtitle == null ? '' : subtitle).trim()
+  document.title = sub ? `${brand} - ${sub}` : brand
+  try { localStorage.setItem(SITE_SUB_KEY, sub) } catch (e) { /* 隐私模式忽略 */ }
+}
+
+/**
+ * 用缓存的后缀立即定标题。在 main.js 里、Vue 挂载前同步调用，
+ * 这样刷新后标签页标题第一帧就是配置值，不再闪过 index.html 的默认标题。
+ */
+export function applySiteTitleFromCache() {
+  let sub = ''
+  try { sub = String(localStorage.getItem(SITE_SUB_KEY) || '').trim() } catch (e) { /* 隐私模式忽略 */ }
+  const brand = t('nav.brand')
   document.title = sub ? `${brand} - ${sub}` : brand
 }
 
