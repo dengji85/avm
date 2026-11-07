@@ -13,7 +13,8 @@
           </div>
           <template v-for="g in groups" :key="g.key">
             <div class="ext-group-head">{{ $t('aiCenter.extGroup.' + g.key) }}</div>
-            <div v-for="c in g.items" :key="c.id" class="aic-card">
+            <div v-for="c in g.items" :key="c.id" class="aic-card"
+                 :class="{ 'aic-hl': state.extHighlight === c.id }">
             <div class="aic-card-head">
               <strong>{{ $t('aiCenter.extName.' + c.id) }}</strong>
               <span class="aic-badge" :class="c.state">{{ extStateText(c) }}</span>
@@ -192,7 +193,9 @@
 </template>
 
 <script setup>
-import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+
+import { state } from '../state.js'
 
 import {
   extCancel, extImport, extBundleImport, extInstall, extSelftest, extStatus, extTask, extUninstall, getConfig, putConfig,
@@ -506,6 +509,17 @@ async function doMtStop() {
 
 onMounted(() => { loadExt(); loadSpeech() })
 onBeforeUnmount(() => { stopExtPoll() })
+
+/* ---------- 跨页面「去安装」高亮：state.extHighlight 指到谁就滚到谁 ---------- */
+watch(() => state.extHighlight, (v) => {
+  if (!v) return
+  loadExt()
+  nextTick(() => {
+    const el = document.querySelector('.aic-hl')
+    if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' })
+  })
+  setTimeout(() => { state.extHighlight = '' }, 6000)
+})
 </script>
 
 <style scoped>
@@ -520,6 +534,15 @@ onBeforeUnmount(() => { stopExtPoll() })
 .aic-card {
   background: var(--c-surface); border: 1px solid var(--c-line);
   border-radius: 12px; padding: 14px 16px; margin-bottom: 12px;
+}
+/* 跨页面「去安装」跳转进来时的高亮脉冲（6s 后由 JS 清掉 class） */
+.aic-hl {
+  border-color: var(--c-primary);
+  animation: aic-hl-pulse 1.2s ease-in-out 4;
+}
+@keyframes aic-hl-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 transparent; }
+  50% { box-shadow: 0 0 0 4px var(--c-primary-soft, rgba(224, 53, 90, .25)); }
 }
 .aic-card-head {
   display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 8px;

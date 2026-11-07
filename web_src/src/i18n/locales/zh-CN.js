@@ -647,7 +647,8 @@ export default {
     note: '备注',
     generating: '生成中…',
     genPreview: '生成预览图',
-    needFfmpeg: '需要配置 ffmpeg 路径',
+    needFfmpeg: '预览抽帧需要 ffmpeg，点击前往扩展组件安装',
+    goInstall: '去安装',
     noPreview: '还没有预览图',
     synopsis: '简介',
     fileName: '文件名',
@@ -912,6 +913,8 @@ export default {
     donePhone: '手机访问',
     donePhoneHint: '打开「设置 → 访问」生成二维码，手机扫码即登录（5 分钟有效、用一次失效）。',
     twofaWarn: '你选择了公网访问：请到「设置 → 访问 → 高级」绑定两步验证，并确认反向代理已配置 trusted_proxies。',
+    extMissing: '检测到基础组件 ffmpeg 未安装：预览缩略图、视频补封面、浏览器播放转封装、内嵌字幕探测都依赖它。完成后可在「设置 → 扩展组件」一键安装。',
+    extChecking: '正在检测基础组件…',
     scanning: '正在启动扫描…',
   },
   settings: {
@@ -2102,7 +2105,7 @@ export default {
       'asr-model-small': '识别模型（约 460MB）：速度快，适合对白清晰的片源。',
       'asr-model-medium': '识别模型（约 1.5GB）：更准但慢约 3 倍。',
       'metatube': '开源刮削服务（Apache-2.0）：补齐 FC2、无码厂、素人站与官方源（30+ 源）。启用后作为独立数据源参与刮削，访问外网站点需要代理。',
-      facedet: '竖版海报智能裁切的检测引擎：opencv + YuNet 模型（227KB）。装好后横版封面裁 2:3 会自动对准人物，而不是固定取右侧；检测不到人脸时自动退回右侧裁。卸载只删组件目录，不影响全局 pip 安装的 opencv。',
+      facedet: '竖版海报智能裁切的检测引擎：opencv + YuNet 模型（227KB）。未安装时不会报错，横版封面裁 2:3 自动降级为固定取右侧；装好后自动对准人物裁切。卸载只删组件目录，不影响全局 pip 安装的 opencv。',
     },
     tracePurpose: {
       synopsis: '简介生成',
@@ -2453,5 +2456,12 @@ export default {
     empty: '暂无数据',
     hour: '小时',
     min: '分钟',
+  },
+  // 升级自动提醒（顶部横幅，每 24h 静默检查一次）
+  update: {
+    newVersion: '发现新版本 v{v}',
+    current: '当前 v{v} · 升级用新版 exe 覆盖旧文件即可，data/ 数据全部保留',
+    openRelease: '查看发布页',
+    later: '下次再说',
   },
 }

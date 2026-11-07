@@ -261,7 +261,7 @@ def extract_cover(movie_id: int) -> Dict[str, Any]:
             raise HTTPException(400, "网络串流无法抽帧，请手动上传封面")
         name = store.extract_cover_from_video(conn, movie_id, ffmpeg)
     if not name:
-        raise HTTPException(400, "抽帧失败：ffmpeg 不可用、视频无法读取或无有效帧")
+        raise HTTPException(400, "抽帧失败：ffmpeg 未安装（设置 → 扩展组件 可一键安装）、视频无法读取或无有效帧")
     if name == "skipped":
         raise HTTPException(409, "该影片已有正式封面（刮削/上传），不会用视频抽帧覆盖")
     images.ensure_poster(name)

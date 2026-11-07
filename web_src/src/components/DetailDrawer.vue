@@ -1,6 +1,6 @@
 <script setup>
 import { ref, reactive, computed, watch, onMounted, onBeforeUnmount, defineAsyncComponent } from 'vue'
-import { state } from '../state.js'
+import { state, openExtInstall } from '../state.js'
 import {
   getMovie, updateMovie, deleteMovie, toggleFlag, playMovie,
   exportNfo, getPreviews, getSimilar, coverUrl, coverThumbUrl, fanartUrl, uploadCover, clearCover,
@@ -560,7 +560,12 @@ async function loadPreviews(generate = false) {
   try {
     const r = await getPreviews(id.value, generate)
     previews.value = (r && r.urls) ? r.urls.map((u) => '/api' + u) : []
-    if (generate && !previews.value.length) toast(r.error || t('detail.genFailed'), 'err')
+    if (generate && !previews.value.length) {
+      const msg = r.error || t('detail.genFailed')
+      // ffmpeg 缺失是可行动的错：toast 带「去安装」，一步跳到扩展组件页
+      const install = extSt.ffmpeg ? null : { label: t('detail.goInstall'), run: () => openExtInstall('ffmpeg') }
+      toast(msg, 'err', install ? 0 : 3000, install)
+    }
   } catch (e) { toast(e.message, 'err') } finally { pvLoading.value = false }
 }
 
@@ -793,7 +798,12 @@ async function extractFromVideo() {
     await extractCover(id.value)
     bust.value = Date.now()
     toast(t('detail.coverExtracted'), 'ok')
-  } catch (e) { toast(e.message, 'err') }
+  } catch (e) {
+    // 同预览：ffmpeg 缺失时给「去安装」入口
+    const install = (!extSt.ffmpeg && /ffmpeg/i.test(e.message || ''))
+      ? { label: t('detail.goInstall'), run: () => openExtInstall('ffmpeg') } : null
+    toast(e.message, 'err', install ? 0 : 3000, install)
+  }
   finally { extracting.value = false }
 }
 
@@ -1563,7 +1573,7 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', onKey) })
                   <button class="btn tiny" :disabled="pvLoading" @click="loadPreviews(true)">
                     {{ pvLoading ? $t('detail.generating') : $t('detail.genPreview') }}
                   </button>
-                  <span v-if="!extSt.ffmpeg" class="muted">{{ $t('detail.needFfmpeg') }}</span>
+                  <button v-if="!extSt.ffmpeg" class="link-btn" @click="openExtInstall('ffmpeg')">{{ $t('detail.needFfmpeg') }}</button>
                 </div>
                 <div v-if="previews.length" class="pv-grid">
                   <img v-for="(u, i) in previews" :key="i" :src="u" alt="" @click="openLightbox(previews, i)" />

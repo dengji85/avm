@@ -208,7 +208,7 @@ def _run(mid: int, src: str, cfg: Dict[str, Any]) -> None:
             tmp.unlink(missing_ok=True)
             with _LOCK:
                 _STATE[mid] = {"status": "failed", "percent": 0,
-                               "message": "重封装失败（该片可能需要转码，请用系统播放器）",
+                               "message": "重封装失败：ffmpeg 未安装（设置 → 扩展组件 可一键安装）或该片需要转码，请用系统播放器",
                                "ts": time.time()}
     except Exception as exc:  # 兜底：绝不把异常抛到线程外
         try:

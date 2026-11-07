@@ -13,9 +13,10 @@
 import { ref, reactive, computed, onMounted } from 'vue'
 import { state } from '../state.js'
 import { t, setLang, LANGUAGES, i18nState } from '../i18n/index.js'
-import { fsList, fsMounts, getServerInfo, putConfig, setupDone } from '../api.js'
+import { fsList, fsMounts, getServerInfo, putConfig, setupDone, extStatus } from '../api.js'
 import { prettyHostPath, toast } from '../utils.js'
 import { useTasks } from '../composables/useTasks.js'
+import { openExtInstall } from '../state.js'
 
 const tasks = useTasks()
 
@@ -31,7 +32,24 @@ const env = reactive({ inContainer: false, urls: [], loaded: false })
 /* 容器里已挂载的目录（宿主机 → 容器），用来一键加入媒体库 */
 const mounts = ref([])
 
+/* 基础组件检测：ffmpeg 缺失时完成页提示 + 完成后带「去安装」的常驻 toast。
+ * 预览缩略图 / 视频补封面 / 浏览器播放转封装 / 内嵌字幕探测都依赖 ffmpeg，
+ * 打包版不内置（体积考虑），首次使用最容易在这里卡住。 */
+const ffMissing = ref(false)
+const extChecking = ref(false)
+
+async function checkExt() {
+  extChecking.value = true
+  try {
+    const r = await extStatus()
+    const ff = (r.components || []).find((c) => c.id === 'ffmpeg')
+    ffMissing.value = !ff || ff.state !== 'ready'
+  } catch (e) { ffMissing.value = false }
+  finally { extChecking.value = false }
+}
+
 onMounted(async () => {
+  checkExt()
   try {
     const info = await getServerInfo()
     env.inContainer = !!info.in_container
@@ -119,6 +137,11 @@ async function finish(scan = true) {
     state.config.library = Object.assign({}, state.config.library, { paths: paths.slice() })
     state.config.server = Object.assign({}, state.config.server, { setup_done: true, exposure: exposure.value })
     state.onboarded = true            // 先关遮罩，避免扫描时看不到任务中心
+    if (ffMissing.value) {
+      // 常驻 toast + 「去安装」：引导结束后一步跳到扩展组件页
+      toast(t('onboarding.extMissing'), 'warn', 0,
+        { label: t('detail.goInstall'), run: () => openExtInstall('ffmpeg') })
+    }
     if (scan) {
       starting.value = true
       await tasks.runScan({})
@@ -278,6 +301,12 @@ async function copyCmd() {
         </div>
 
         <p v-if="exposure === 'public'" class="ob-tip ob-tip-warn">{{ t('onboarding.twofaWarn') }}</p>
+
+        <!-- 基础组件提示：预览/补封面/转封装都靠 ffmpeg，打包版默认不带，先说清楚去哪装 -->
+        <p v-if="ffMissing && !extChecking" class="ob-tip ob-tip-warn">
+          {{ t('onboarding.extMissing') }}
+        </p>
+        <p v-else-if="extChecking" class="ob-tip muted">{{ t('onboarding.extChecking') }}</p>
       </div>
 
       <!-- 底部操作 -->

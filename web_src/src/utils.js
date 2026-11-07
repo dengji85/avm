@@ -140,18 +140,24 @@ export const toasts = reactive([])
 let toastSeq = 0
 
 const _recentToasts = new Map()
-export function toast(msg, type = '', ms = 3000) {
-  const key = String(msg) + '|' + type
+/**
+ * 弹一条 toast。action = { label, fn } 时在气泡里加一个操作按钮（如「去安装」），
+ * 点击执行 fn 并立即关闭；ms=0 表示不自动消失（点按钮或等下次覆盖），适合
+ * 「报错 + 行动入口」这类需要用户看清楚再处理的提示。
+ */
+export function toast(msg, type = '', ms = 3000, action = null) {
+  const key = String(msg) + '|' + type + '|' + (action ? action.label : '')
   const now = Date.now()
   // 短时间内相同文案去重，避免后端离线时大量并行请求疯狂弹 toast
   if (_recentToasts.has(key) && now - _recentToasts.get(key) < 2500) return -1
   _recentToasts.set(key, now)
   const id = ++toastSeq
-  toasts.push({ id, msg: String(msg), type })
-  setTimeout(() => {
+  toasts.push({ id, msg: String(msg), type, action: action || null })
+  const remove = () => {
     const i = toasts.findIndex((t) => t.id === id)
     if (i >= 0) toasts.splice(i, 1)
-  }, ms)
+  }
+  if (ms > 0) setTimeout(remove, ms)
   return id
 }
 

@@ -640,7 +640,8 @@ export default {
     note: 'Note',
     generating: 'Generating…',
     genPreview: 'Generate previews',
-    needFfmpeg: 'ffmpeg path must be configured',
+    needFfmpeg: 'Preview generation needs ffmpeg — click to install it under Extensions',
+    goInstall: 'Install now',
     noPreview: 'No previews yet',
     synopsis: 'Synopsis',
     fileName: 'File name',
@@ -911,6 +912,8 @@ export default {
     donePhone: 'Phone access',
     donePhoneHint: 'Open Settings → Access to generate a QR code; scanning it signs in (valid 5 minutes, one-time).',
     twofaWarn: 'You chose internet exposure: enable two-factor authentication under Settings → Access → Advanced, and make sure trusted_proxies is configured for your reverse proxy.',
+    extMissing: 'Basic component ffmpeg is not installed: previews, cover extraction, browser-playback remux and embedded-subtitle detection all depend on it. After setup, install it in one click under Settings → Extensions.',
+    extChecking: 'Checking basic components…',
     scanning: 'Starting scan…',
   },
   settings: {
@@ -2101,7 +2104,7 @@ export default {
       'asr-model-small': 'Recognition model (~460MB): fast, good for clear dialogue.',
       'asr-model-medium': 'Recognition model (~1.5GB): more accurate, ~3x slower.',
       'metatube': 'Open-source scraper service (Apache-2.0): fills in FC2, uncensored, amateur and official sources (30+). When enabled it joins scraping as an extra data source; reaching those sites requires a proxy.',
-      facedet: 'Detection engine for smart poster cropping: opencv + YuNet model (227KB). Once installed, horizontal covers are cropped to 2:3 around the subject instead of a fixed right side; falls back to right-crop when no face is found. Uninstalling only removes the component directory and never touches a globally pip-installed opencv.',
+      facedet: 'Detection engine for smart poster cropping: opencv + YuNet model (227KB). Without it, 2:3 cropping silently degrades to a fixed right-side crop (no error is shown); once installed, horizontal covers are cropped around the subject automatically. Uninstalling only removes the component directory and never touches a globally pip-installed opencv.',
     },
     tracePurpose: {
       synopsis: 'Synopsis',
@@ -2452,5 +2455,12 @@ export default {
     empty: 'No data',
     hour: 'h',
     min: 'm',
+  },
+  // Auto update notice (top banner, silent check every 24h)
+  update: {
+    newVersion: 'New version v{v} available',
+    current: 'Current v{v} · Upgrading is just replacing the old exe; everything in data/ is preserved',
+    openRelease: 'Open release page',
+    later: 'Later',
   },
 }

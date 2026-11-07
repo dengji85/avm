@@ -3078,7 +3078,7 @@ def _gen_previews_sync(movie_id: int, target: str, quality: str = None):
     except Exception as exc:
         return None, str(exc)
     if not new_paths:
-        return None, "ffmpeg 不可用或抽帧失败（请在设置中配置 ffmpeg 路径）"
+        return None, "预览抽帧失败：ffmpeg 未安装或不可用（设置 → 扩展组件 可一键安装），或视频无法解码"
     with db() as conn:
         store.set_previews(conn, movie_id, new_paths, q)
     return new_paths, None

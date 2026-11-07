@@ -76,6 +76,8 @@ export const state = reactive({
   theme: saved.theme === 'light' ? 'light' : 'dark',
   // 跨页面请求设置页的某个标签（如解锁码提示 → 设置 → 隐私）；消费后置空
   settingsTab: '',
+  // 跨页面请求高亮扩展组件页的某个组件卡（如抽帧报错 → 去安装 ffmpeg）；ExtPanel 消费后置空
+  extHighlight: '',
   // 跨页面请求 AI 中心的某个分区（如面板里的「改提示词」→ AI 中心 → 提示词）；消费后置空
   aiSection: '',
   density: saved.density || 'cozy',
@@ -165,6 +167,16 @@ export function openPlayQueue(movies, source = '', startIdx = -1, cid = 0, autop
 /** 关闭全局播放器（保留队列与进度，方便再次打开续播） */
 export function closePlayQueue() {
   state.playQueue.open = false
+}
+
+/**
+ * 跳到 设置 → 扩展组件 并高亮某个组件卡。
+ * 报错文案「xxx 未安装」出现时，「去安装」按钮走这里，让用户一步到位。
+ */
+export function openExtInstall(cid = 'ffmpeg') {
+  state.extHighlight = cid
+  state.settingsTab = 'ext'
+  state.view = 'settings'
 }
 
 /**

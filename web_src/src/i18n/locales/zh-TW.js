@@ -643,7 +643,8 @@ export default {
     note: '備註',
     generating: '生成中…',
     genPreview: '生成預覽圖',
-    needFfmpeg: '需要設定 ffmpeg 路徑',
+    needFfmpeg: '預覽抽幀需要 ffmpeg，點擊前往擴充元件安裝',
+    goInstall: '去安裝',
     noPreview: '還沒有預覽圖',
     synopsis: '簡介',
     fileName: '檔名',
@@ -919,6 +920,8 @@ export default {
     donePhone: '手機存取',
     donePhoneHint: '開啟「設定 → 存取」產生二維碼，手機掃碼即登入（5 分鐘有效、用一次失效）。',
     twofaWarn: '你選擇了公網存取：請到「設定 → 存取 → 進階」綁定兩步驗證，並確認反向代理已設定 trusted_proxies。',
+    extMissing: '偵測到基礎元件 ffmpeg 未安裝：預覽縮圖、影片補封面、瀏覽器播放轉封裝、內嵌字幕偵測都依賴它。完成後可在「設定 → 擴充元件」一鍵安裝。',
+    extChecking: '正在偵測基礎元件…',
     scanning: '正在啟動掃描…',
   },
   settings: {
@@ -2109,7 +2112,7 @@ export default {
       'asr-model-small': '辨識模型（約 460MB）：速度快，適合對白清晰的片源。',
       'asr-model-medium': '辨識模型（約 1.5GB）：更準但慢約 3 倍。',
       'metatube': '開源刮削服務（Apache-2.0）：補齊 FC2、無碼廠、素人站與官方源（30+ 源）。啟用後作為獨立資料源參與刮削，存取外部站點需要代理。',
-      facedet: '豎版海報智慧裁切的偵測引擎：opencv + YuNet 模型（227KB）。裝好後橫版封面裁 2:3 會自動對準人物，而不是固定取右側；偵測不到人臉時自動退回右側裁。解除安裝只刪元件目錄，不影響全域 pip 安裝的 opencv。',
+      facedet: '豎版海報智慧裁切的偵測引擎：opencv + YuNet 模型（227KB）。未安裝時不會報錯，橫版封面裁 2:3 自動降級為固定取右側；裝好後自動對準人物裁切。解除安裝只刪元件目錄，不影響全域 pip 安裝的 opencv。',
     },
     tracePurpose: {
       synopsis: '簡介生成',
@@ -2461,5 +2464,12 @@ export default {
     empty: '暫無資料',
     hour: '小時',
     min: '分鐘',
+  },
+  // 升級自動提醒（頂部橫幅，每 24h 靜默檢查一次）
+  update: {
+    newVersion: '發現新版本 v{v}',
+    current: '目前 v{v} · 升級用新版 exe 覆蓋舊檔案即可，data/ 資料全部保留',
+    openRelease: '查看發布頁',
+    later: '下次再說',
   },
 }
