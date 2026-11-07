@@ -1,7 +1,7 @@
 <script setup>
 import { onMounted, onBeforeUnmount, watch, ref, computed } from 'vue'
 import { state, applyTheme } from './state.js'
-import { getFacets, getConfig, getServerInfo, getSession, onNoToken, serverOffline, privacyState } from './api.js'
+import { getFacets, getConfig, getServerInfo, getSession, onNoToken, serverOffline, privacyState, checkUpdate } from './api.js'
 import { toast, setSiteTitle } from './utils.js'
 import { useTasks } from './composables/useTasks.js'
 
@@ -121,6 +121,37 @@ async function loadServerCaps() {
   } catch (e) { /* 非致命 */ }
 }
 
+/* ---- 升级自动提醒 ----
+ * 每 24h 静默检查一次（localStorage 节流，多标签页共用）；
+ * 有新版本且未被该版本「下次再说」过 → 顶部横幅；离线 / 未配置更新源 → 完全静默。
+ * 用户升级到该版本后 latest 变化，横幅自然恢复。 */
+const updateInfo = ref(null)
+const UPD_CHECK_KEY = 'avm.updateCheckAt'
+const UPD_SKIP_KEY = 'avm.updateDismissed'
+
+async function checkForUpdate() {
+  try {
+    const last = Number(localStorage.getItem(UPD_CHECK_KEY) || 0)
+    if (Date.now() - last < 24 * 3600 * 1000) return
+    localStorage.setItem(UPD_CHECK_KEY, String(Date.now()))
+    const r = await checkUpdate('stable')
+    if (r && r.update_available && r.latest
+        && r.latest !== (localStorage.getItem(UPD_SKIP_KEY) || '')) {
+      updateInfo.value = r
+    }
+  } catch (e) { /* 离线 / 限流：静默，不打扰 */ }
+}
+
+function dismissUpdate() {
+  if (updateInfo.value) localStorage.setItem(UPD_SKIP_KEY, updateInfo.value.latest)
+  updateInfo.value = null
+}
+
+function openRelease() {
+  const url = updateInfo.value && updateInfo.value.download_url
+  if (url) window.open(url, '_blank', 'noopener')
+}
+
 function onGlobalRefresh() {
   loadFacets()
   window.dispatchEvent(new CustomEvent('avm-reload-view'))
@@ -152,6 +183,7 @@ onMounted(async () => {
   await Promise.all([loadFacets(), loadConfig(), loadServerCaps()])
   checkSession()
   checkPinTip()
+  if (state.onboarded) checkForUpdate()   // 引导没做完的库还谈不上升级
   tasks.start()
   window.addEventListener('avm-refresh', onGlobalRefresh)
   window.addEventListener('avm-privacy-changed', onPrivacyChanged)
@@ -185,6 +217,17 @@ function onFilterChange() { /* 由各视图自行响应 state 变化 */ }
       </div>
       <button class="btn tiny primary" @click="goPrivacySettings">{{ $t('privacy.tipGo') }}</button>
       <button class="btn tiny ghost" @click="dismissPinTip">{{ $t('common.close') }}</button>
+    </div>
+
+    <!-- 发现新版本：每 24h 静默检查一次，「下次再说」按版本号记忆 -->
+    <div v-if="updateInfo" class="pin-tip upd-tip" role="status">
+      <span class="pin-tip-ic">⬆</span>
+      <div class="pin-tip-body">
+        <b>{{ $t('update.newVersion', { v: updateInfo.latest }) }}</b>
+        <span>{{ $t('update.current', { v: updateInfo.current }) }}</span>
+      </div>
+      <button class="btn tiny primary" @click="openRelease">{{ $t('update.openRelease') }}</button>
+      <button class="btn tiny ghost" @click="dismissUpdate">{{ $t('update.later') }}</button>
     </div>
 
     <div class="app-main">
