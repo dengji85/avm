@@ -20,7 +20,7 @@ import tempfile
 import uuid
 import secrets
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from datetime import datetime
 from urllib.parse import quote, urljoin, urlsplit, urlunsplit
 
@@ -31,7 +31,8 @@ from fastapi.responses import (FileResponse, PlainTextResponse, RedirectResponse
 from . import ai as ai_mod
 from . import (ai_core, ai_extra, ai_jobs, asr, dedupe, dlna, emby as emby_mod, images,
                nfo_writer, plugins, providers,
-               scanner, scraper, scrape_diag, store, subprobe, subtext, subtitles, translate, vtt)
+               scanner, scraper, scrape_diag, store, subprobe, subqc, subtext,
+               subtitles, translate, vtt)
 from .config import (COVER_DIR, DATA_DIR, IN_CONTAINER, avatar_dir, _deep_merge,
                      current_access_token, emby_cfg, load_config, public_base_url, update_config)
 from .db import connect, db, query_all, query_one
@@ -41,18 +42,24 @@ router = APIRouter(prefix="/api")
 
 
 # 按领域拆出的子路由（阶段 2）：路径与行为不变，只是文件分开。
+from .routers import adcheck as _adcheck_api        # noqa: E402
 from .routers import covers as _covers_api          # noqa: E402
 from .routers import ext as _ext_api                # noqa: E402
 from .routers import metatube as _metatube_api      # noqa: E402
 from .routers import subtitles as _subtitles_api    # noqa: E402
 
+router.include_router(_adcheck_api.router)
 router.include_router(_covers_api.router)
 router.include_router(_ext_api.router)
 router.include_router(_metatube_api.router)
 router.include_router(_subtitles_api.router)
 
 #: 在线字幕来源的展示名（登记时存的是 provider id，打分与配置都按 id 走）
-_ONLINE_SUB_LABELS = {"thunder": "迅雷", "subtitlecat": "SubtitleCat"}
+_ONLINE_SUB_LABELS = {
+    "thunder": "迅雷", "subtitlecat": "SubtitleCat",
+    "opensubtitles": "OpenSubtitles", "assrt": "伪射手 ASSRT",
+    "custom": "自定义字幕源",
+}
 
 # 当前程序版本（单一真源见 app/__init__.__version__，与发布版本保持一致）。
 from . import __version__ as APP_VERSION
@@ -149,9 +156,10 @@ def remove_movie(movie_id: int, delete_file: bool = False, trash_file: bool = Fa
                     trashed.append(f["path"])
                 else:
                     failed.append(f["path"])
-        store.delete_movie(conn, movie_id)
+        # 删库行的同时清掉它独占的软件数据（封面/预览/字幕/证据图/转封装缓存）
+        assets = store.delete_movie(conn, movie_id)
         return {"ok": True, "deleted_files": deleted,
-                "trashed_files": trashed, "failed_files": failed}
+                "trashed_files": trashed, "failed_files": failed, "assets": assets}
 
 
 @router.post("/movies/{movie_id}/toggle")
@@ -1200,7 +1208,8 @@ def clean_orphans(payload: Dict[str, Any] = Body(default={})) -> Dict[str, Any]:
     with db() as conn:
         if "db" in targets:
             result["db"] = store.clean_dangling(conn)
-        media = [t for t in targets if t in ("covers", "fanarts")]
+        media = [t for t in targets
+                 if t in ("covers", "fanarts", "previews", "subs", "adcheck", "remux")]
         if media:
             result.update(store.clean_orphan_media(conn, media))
         conn.commit()
@@ -1636,6 +1645,20 @@ def extract_movie_dialog(movie_id: int,
     return {"ok": True, **job}
 
 
+@router.post("/movies/{movie_id}/dialog/cancel")
+def cancel_movie_dialog(movie_id: int) -> Dict[str, Any]:
+    """中途停止对白提取（保留已提取的内容，不清理结果）。
+
+    整片识别可能跑十几分钟，且占着长任务线程池；只有「删除」能停下会把
+    已有结果一起清掉，所以单独给一个取消入口。
+    """
+    with db() as conn:
+        if not store.movie_detail(conn, movie_id):
+            raise HTTPException(status_code=404, detail="影片不存在")
+    asr.cancel(movie_id)
+    return {"ok": True, **asr.summary(movie_id)}
+
+
 @router.delete("/movies/{movie_id}/dialog")
 def delete_movie_dialog(movie_id: int) -> Dict[str, Any]:
     asr.cancel(movie_id)
@@ -1654,7 +1677,8 @@ def export_movie_dialog_srt(movie_id: int) -> Dict[str, Any]:
         if not store.movie_detail(conn, movie_id):
             raise HTTPException(status_code=404, detail="影片不存在")
     try:
-        return asr.export_srt(movie_id)
+        asr_lang = str((load_config().get("asr") or {}).get("language") or "ja")
+        return asr.export_srt(movie_id, lang=asr_lang)
     except RuntimeError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -1860,9 +1884,13 @@ def _ai_scope_ids(kind: str, payload: Dict[str, Any]) -> List[int]:
         clauses.append("(m.embed_sub=1 OR EXISTS(SELECT 1 FROM movie_subtitles s "
                        "WHERE s.movie_id=m.id))")
         if scope == "untranslated":
+            # 旧数据里在线/本地字幕写的是「简体中文」这类展示名，AI 译文写
+            # zh-Hans；只比 target 会把已有中文字幕的片误判成未翻译。
+            langs = subqc.lang_equivalents(target)
             clauses.append("NOT EXISTS(SELECT 1 FROM movie_subtitles s2 "
-                           "WHERE s2.movie_id=m.id AND s2.lang=?)")
-            args.append(target)
+                           "WHERE s2.movie_id=m.id AND s2.lang IN (%s))"
+                           % ",".join("?" for _ in langs))
+            args.extend(langs)
     elif kind == "plot":
         if scope == "no_plot":
             clauses.append("COALESCE(TRIM(m.plot), '') = ''")
@@ -2003,11 +2031,14 @@ def ai_jobs_cancel_active() -> Dict[str, Any]:
 # ------------------------------------------------------------------ AI 字幕翻译
 @router.post("/ai/translate/{movie_id}")
 def ai_translate_subtitle(movie_id: int, target: str = "zh-Hans",
-                          bilingual: bool = False) -> Dict[str, Any]:
+                          bilingual: bool = False,
+                          sub_id: Optional[int] = None) -> Dict[str, Any]:
     """单部片字幕翻译：**后台任务**（长片要几分钟，同步请求会被浏览器/反代判超时）。
 
     立即返回任务状态，前端轮询 ``GET /ai/translate/{id}`` 看进度；
     产物仍落 data/subs/{id}/ 并登记到字幕列表。
+    ``sub_id`` 可选：指定翻译某条已登记字幕（在线采纳后「翻译这一条」），
+    不传则按「原文优先」自动取材，绝不选中 AI 自己生成的译文。
     """
     cfg = load_config(refresh=True)
     if not ai_mod.is_available(cfg):
@@ -2015,8 +2046,13 @@ def ai_translate_subtitle(movie_id: int, target: str = "zh-Hans",
     with db() as conn:
         if not query_one(conn, "SELECT 1 FROM movies WHERE id = ?", (movie_id,)):
             raise HTTPException(status_code=404, detail="影片不存在")
+        if sub_id:
+            row = query_one(conn, "SELECT 1 FROM movie_subtitles WHERE id=? AND movie_id=?",
+                            (sub_id, movie_id))
+            if not row:
+                raise HTTPException(status_code=404, detail="指定的字幕不存在")
     from . import translate_job
-    return translate_job.start(movie_id, cfg, target, bool(bilingual))
+    return translate_job.start(movie_id, cfg, target, bool(bilingual), sub_id)
 
 
 @router.get("/ai/translate/{movie_id}")
@@ -2431,13 +2467,14 @@ def movie_subtitle_tracks(movie_id: int) -> Dict[str, Any]:
             seen_emb.add(e["key"])
             tracks.append(e["track"])
 
-        # 文件字幕（外挂 / AI 译文）：同语言同来源只留一条，AI 译文与外挂原文并存。
-        # 语言未知时改用文件名做键，避免把内容不同的两条字幕合并成一条。
-        seen_file: set = set()
+        # 文件字幕（外挂 / AI 译文 / 语音识别 / 在线下载）：同语言同来源只留
+        # 质检分最高的那条。语言统一归一到标准码后再比较，避免「简体中文」与
+        # zh-Hans 被当成两种语言、或把不同内容的字幕折叠掉。
+        seen_file: Dict[Tuple[str, str], Dict[str, Any]] = {}
         for s in mv.get("subtitles") or []:
             name = os.path.splitext(s.get("filename") or "")[0]
-            lang_raw = (s.get("lang") or "").strip()
-            key_lang = lang_raw.lower() if lang_raw and lang_raw != "未知" else (name.lower() or str(s.get("id")))
+            code = subqc.normalize_lang(s.get("lang"))
+            key_lang = code if code != "und" else (name.lower() or str(s.get("id")))
             # 0 字节 / 已丢失的字幕文件不进播放器菜单（登记记录仍保留，可在详情页删除）
             try:
                 if os.path.getsize(s.get("path") or "") <= 0:
@@ -2445,23 +2482,59 @@ def movie_subtitle_tracks(movie_id: int) -> Dict[str, Any]:
             except OSError:
                 continue
             key = (key_lang, s.get("source") or "")
-            if key in seen_file:
+            prev = seen_file.get(key)
+            if prev and int(prev.get("score") or 0) >= int(s.get("score") or 0):
                 continue
-            seen_file.add(key)
+            seen_file[key] = s
+        for s in seen_file.values():
+            name = os.path.splitext(s.get("filename") or "")[0]
             src = s.get("source") or ""
             prefix = "AI 译文 · " if src == "ai-translate" else ""
             if src.startswith("external:"):
                 pid = (s.get("provider") or "").split(":", 1)[-1] or src.split(":", 1)[-1]
                 prefix = "在线 · %s · " % _ONLINE_SUB_LABELS.get(pid, pid)
+            elif src == "asr":
+                prefix = "语音识别 · "
+            elif src in ("sidecar", "matched"):
+                prefix = "本地 · "
+            label = subqc.lang_label(s.get("lang")) if (s.get("lang") or "").strip() else (name or "字幕")
             tracks.append({
                 "kind": "file",
                 "id": str(s["id"]),
-                "label": prefix + (s.get("lang") or name or "字幕"),
-                "lang": s.get("lang") or "",
-                "source": s.get("source") or "",
+                "label": prefix + label,
+                "lang": subqc.normalize_lang(s.get("lang")),
+                "source": src,
                 "url": "/api/movies/%d/subtitles/%d/vtt" % (movie_id, s["id"]),
             })
-        out = {"tracks": tracks,
+        # 字幕校准元数据：播放器字幕台据此显示「已校准 / 未校准」并恢复上次的偏移
+        sync_map: Dict[str, Dict[str, Any]] = {}
+        try:
+            for r in conn.execute(
+                    "SELECT sub_id, offset_ms, scale, anchor_sec, pos_y, method, confidence "
+                    "FROM subtitle_sync").fetchall():
+                sync_map[str(r["sub_id"])] = {
+                    "offset_ms": int(r["offset_ms"] or 0),
+                    "scale": float(r["scale"] or 1.0),
+                    "anchor_sec": float(r["anchor_sec"] or 0),
+                    "pos_y": int(r["pos_y"] or 0),
+                    "method": r["method"] or "",
+                    "confidence": float(r["confidence"] or 0),
+                }
+        except Exception:
+            pass            # 老库尚未迁移时不影响播放
+        file_tracks = []
+        for tr in tracks:
+            if tr.get("kind") != "file":
+                continue
+            tr["sync"] = sync_map.get(tr["id"])
+            file_tracks.append(tr)
+        if not tracks:
+            sub_status = "none"
+        elif file_tracks and all(t.get("sync") for t in file_tracks):
+            sub_status = "ready"
+        else:
+            sub_status = "unchecked"
+        out = {"tracks": tracks, "status": sub_status,
                "skip_intro": float(mv.get("skip_intro") or 0),
                "skip_outro": float(mv.get("skip_outro") or 0)}
     return out
@@ -2498,22 +2571,52 @@ def embedded_subtitle_vtt(movie_id: int, file_id: int, si: int):
 
 
 @router.get("/movies/{movie_id}/subtitles/{sub_id}/vtt")
-def file_subtitle_vtt(movie_id: int, sub_id: int):
-    """已登记字幕（外挂 / AI 译文）转 VTT，供 `<track>` 使用。"""
+def file_subtitle_vtt(movie_id: int, sub_id: int,
+                      offset_ms: Optional[int] = None,
+                      scale: Optional[float] = None,
+                      anchor: Optional[float] = None):
+    """已登记字幕（外挂 / AI 译文）转 VTT，供 `<track>` 使用。
+
+    带 offset_ms / scale / anchor 查询参数时按参数渲染（播放器实时预览用），
+    不带则用库里保存的校准值。参数不写库，只有 PATCH sync 才会落盘。
+    渲染始终由后端生成，前端只换 URL——浏览器原生解析 VTT 才能保证
+    时间轴顺序与显示区间正确，这比在内存里改 cue 时间可靠得多。
+    """
     with db() as conn:
         row = conn.execute(
             "SELECT file_path FROM movie_subtitles WHERE id=? AND movie_id=?",
             (int(sub_id), int(movie_id))).fetchone()
+        try:
+            sync = conn.execute(
+                "SELECT offset_ms, scale, anchor_sec FROM subtitle_sync WHERE sub_id=?",
+                (int(sub_id),)).fetchone()
+        except Exception:
+            sync = None
     if not row:
         raise HTTPException(status_code=404, detail="字幕不存在")
     path = row["file_path"]
-    # 缓存名带上 mtime：字幕文件被替换/重新翻译后不会继续返回旧 VTT
+    if offset_ms is not None:
+        offset_ms = max(-600000, min(600000, int(offset_ms)))
+    else:
+        offset_ms = int(sync["offset_ms"] or 0) if sync else 0
+    if scale is not None:
+        scale = max(0.90, min(1.10, float(scale)))
+    else:
+        scale = float(sync["scale"] or 1.0) if sync else 1.0
+    if anchor is not None:
+        anchor = max(0.0, float(anchor))
+    else:
+        anchor = float(sync["anchor_sec"] or 0) if sync else 0.0
+    # 缓存名带上 mtime 与校准参数：字幕被替换、或用户微调后都要重新生成，
+    # 否则会一直返回旧 VTT，表现为「调了偏移却没反应」。
     try:
         mtime = int(os.path.getmtime(path)) if os.path.isfile(path) else 0
     except OSError:
         mtime = 0
-    cache = os.path.join(_vtt_cache_dir(movie_id), "sub-%d-%d.vtt" % (sub_id, mtime))
-    return _serve_vtt(cache, lambda: vtt.file_to_vtt(path))
+    tag = "%d-%d-%d-%d-%d" % (sub_id, mtime, offset_ms,
+                              int(round(scale * 10000)), int(round(anchor * 10)))
+    cache = os.path.join(_vtt_cache_dir(movie_id), "sub-%s.vtt" % tag)
+    return _serve_vtt(cache, lambda: vtt.file_to_vtt(path, offset_ms, scale, anchor))
 
 
 @router.put("/movies/{movie_id}/skip")
@@ -2561,9 +2664,14 @@ def delete_movie_subtitle(movie_id: int, sub_id: int) -> Dict[str, Any]:
             shared = bool(conn.execute(
                 "SELECT 1 FROM movie_subtitles WHERE file_path=? LIMIT 1", (path,)).fetchone())
         conn.commit()
-    if path and not shared and "/subs/" in path.replace("\\", "/"):
+    # 只删本程序产物：按路径是否真的在 data/subs 下判断，不能靠路径里出现
+    # "/subs/" 字符串——用户视频目录里若有同名文件夹，外挂原字幕会被误删。
+    if path and not shared:
         try:
-            os.remove(path)
+            subs_root = (Path(str(DATA_DIR)) / "subs").resolve()
+            target = Path(path).resolve()
+            if target == subs_root or subs_root in target.parents:
+                os.remove(path)
         except OSError:
             pass
     return {"ok": True}
@@ -3509,6 +3617,15 @@ def get_config() -> Dict[str, Any]:
         for m in (ai_section.get("models") or []):
             if isinstance(m, dict):
                 m.pop("api_key", None)
+    # 字幕源凭据：opensubtitles / assrt 的 Key 与自定义源请求头里的密钥都不下发，
+    # 前端只知道「是否已设置」（/api/subtitles/sources）。
+    sub_section = cfg.get("subtitles")
+    if isinstance(sub_section, dict):
+        sub_section.pop("opensubtitles_key", None)
+        sub_section.pop("assrt_token", None)
+        for s in (sub_section.get("custom_sources") or []):
+            if isinstance(s, dict):
+                s.pop("headers", None)
     return cfg
 
 
@@ -3547,6 +3664,28 @@ def put_config(payload: Dict[str, Any] = Body(default={})) -> Dict[str, Any]:
                     m["api_key"] = keep
                 else:
                     m.pop("api_key", None)
+    # 字幕源凭据同样不下发前端：空串 = 没改；自定义源的 headers 可能含密钥，
+    # 按 name 沿用已保存的值，避免「把整份配置 PUT 回来」把密钥抹掉。
+    sub_patch = payload.get("subtitles")
+    if isinstance(sub_patch, dict):
+        for field in ("opensubtitles_key", "assrt_token"):
+            if not str(sub_patch.get(field) or "").strip():
+                sub_patch.pop(field, None)
+        customs = sub_patch.get("custom_sources")
+        if isinstance(customs, list) and customs:
+            saved = {
+                str(s.get("name") or ""): s.get("headers")
+                for s in ((load_config().get("subtitles") or {}).get("custom_sources") or [])
+                if isinstance(s, dict)
+            }
+            for s in customs:
+                if not isinstance(s, dict):
+                    continue
+                keep = saved.get(str(s.get("name") or ""))
+                if keep and not (s.get("headers") or {}):
+                    s["headers"] = keep
+                elif not s.get("headers"):
+                    s.pop("headers", None)
     return update_config(payload)
 
 
@@ -4222,18 +4361,19 @@ def storage() -> Dict[str, Any]:
 
 @router.get("/storage/software")
 def software_storage() -> Dict[str, Any]:
-    """软件自身数据目录占用（封面/预览/头像/背景/临时/数据库）+ 可清理项。"""
+    """软件自身数据目录占用（数据 / 缓存 / 组件三组）+ 可清理项。"""
     with db() as conn:
         return store.software_storage_stats(conn)
 
 
 @router.post("/storage/software/clean")
 def clean_software_storage_api(payload: Dict[str, Any] = Body(default={})) -> Dict[str, Any]:
-    """清理软件数据：targets 可取 temp / preview_orphan / preview_all / db_vacuum。"""
+    """清理软件数据。targets 取值见 store.clean_software_storage 的注释。"""
     targets = payload.get("targets") or []
     if isinstance(targets, str):
         targets = [targets]
-    valid = {"temp", "preview_orphan", "preview_all", "db_vacuum"}
+    valid = {"temp", "preview_orphan", "preview_all", "db_vacuum",
+             "subs_orphan", "ad_orphan", "asr", "remux", "chrome", "logs", "backup"}
     targets = [t for t in targets if t in valid]
     if not targets:
         raise HTTPException(400, "没有可清理的目标")

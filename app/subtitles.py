@@ -131,13 +131,25 @@ def match_subtitle_files(conn, paths: List[str]) -> Dict[str, Any]:
 
 
 def _register_subtitle(conn, movie_id: int, path: str, source: str = "matched",
-                       lang: str = "", provider: str = "", score: int = 0,
-                       origin_url: str = "", sub_duration_ms: int = 0) -> bool:
+                       lang: str = "", provider: str = "",
+                       score: Optional[int] = None,
+                       origin_url: str = "", sub_duration_ms: int = 0,
+                       auto_qa: bool = True) -> bool:
     """登记一条字幕（幂等）。返回是否真的新增。
 
-    在线下载的字幕会额外带上来源 / 质检分 / 原始地址；老调用方只传前四个
-    位置参数，行为完全不变（文件名猜语言、其余字段走数据库默认值）。
+    五条来源都走这里，默认补一次**只读**质检，让 score / 语言 / 时长不再
+    只有在线下载才有值（播放器按质检分择优依赖这些字段）。在线下载已经
+    跑过 normalize_and_save，用 auto_qa=False 跳过以免重复解析。
     """
+    from . import subqc
+    lang = subqc.normalize_lang(lang) if lang else ""
+    if auto_qa and score is None:
+        qa = subqc.qa_file(path, lang)
+        if qa.get("score"):
+            score = qa["score"]
+            sub_duration_ms = sub_duration_ms or qa.get("sub_duration_ms") or 0
+            if not lang:
+                lang = qa.get("lang") or ""
     existing = query_one(
         conn,
         "SELECT id FROM movie_subtitles WHERE movie_id=? AND file_path=?",
@@ -149,7 +161,7 @@ def _register_subtitle(conn, movie_id: int, path: str, source: str = "matched",
         "INSERT INTO movie_subtitles(movie_id, file_path, filename, lang, source, "
         "provider, score, origin_url, sub_duration_ms) VALUES(?,?,?,?,?,?,?,?,?)",
         (movie_id, path, os.path.basename(path),
-         lang or _lang_of(os.path.basename(path)), source,
+         lang or subqc.normalize_lang(_lang_of(os.path.basename(path))), source,
          provider or "", int(score or 0), origin_url or "", int(sub_duration_ms or 0)),
     )
     return True
@@ -248,26 +260,40 @@ def align_subtitle(conn, subtitle_path: str, movie_id: int,
     video = video_path or store.movie_primary_file(conn, movie_id)
     if not video or not os.path.exists(video):
         raise FileNotFoundError("影片主视频不存在，无法对齐字幕")
+    from . import subqc
     vid_path = Path(video)
     sub_path = Path(subtitle_path)
     target_dir = vid_path.parent
-    target_name = vid_path.stem + sub_path.suffix.lower()
-    target_path = target_dir / target_name
+    ext = sub_path.suffix.lower()
+    src_lang = subqc.normalize_lang(_lang_of(sub_path.name))
+    # 第一部字幕沿用「视频同名」，系统播放器才会自动加载。已有同名文件时
+    # 换一个带语言标记/序号的名字——旧实现无条件 copy2/rename，第二条不同
+    # 语言的字幕会静默覆盖第一条，且因 file_path 相同而登记失败。
+    target_path = target_dir / (vid_path.stem + ext)
+    if target_path.exists() and target_path.resolve() != sub_path.resolve():
+        tag = "." + src_lang if src_lang != "und" else ""
+        n = 2
+        while True:
+            candidate = target_dir / ("%s%s-%d%s" % (vid_path.stem, tag, n, ext))
+            if not candidate.exists() or candidate.resolve() == sub_path.resolve():
+                target_path = candidate
+                break
+            n += 1
 
     if sub_path.resolve() == target_path.resolve():
         # 已是同名同目录，直接登记
-        _register_subtitle(conn, movie_id, str(sub_path), "matched")
+        _register_subtitle(conn, movie_id, str(sub_path), "matched", lang=src_lang)
         return {"ok": True, "path": str(sub_path), "already": True}
 
     if copy or sub_path.parent.resolve() != target_dir.resolve():
         # 复制到视频同目录并重命名（原字幕包不动）
         shutil.copy2(sub_path, target_path)
-        _register_subtitle(conn, movie_id, str(target_path), "matched")
+        _register_subtitle(conn, movie_id, str(target_path), "matched", lang=src_lang)
         return {"ok": True, "path": str(target_path), "copied": True}
 
     # 同目录但文件名不同：直接重命名
     os.rename(sub_path, target_path)
-    _register_subtitle(conn, movie_id, str(target_path), "matched")
+    _register_subtitle(conn, movie_id, str(target_path), "matched", lang=src_lang)
     return {"ok": True, "path": str(target_path), "renamed": True}
 
 

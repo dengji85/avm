@@ -18,11 +18,96 @@ _CUE_TS = re.compile(
     r"(\d{1,2}):(\d{2}):(\d{2})[,.](\d{1,3})\s*-->\s*"
     r"(\d{1,2}):(\d{2}):(\d{2})[,.](\d{1,3})")
 _ASS_MARK = re.compile(r"(?:\[Script Info\]|^Dialogue:)", re.I | re.M)
+# 不限语言：任何语种都保留（非中文可以交给 AI 翻译），语言只影响排序。
+# 其它语种给接近日文的分数，避免冷门番号仅有的外文字幕被压到列表最底下。
 _LANG_POINTS = {
-    "简体中文": 30, "日中双语": 26, "繁体中文": 24,
-    "中文": 22, "日文": 18, "英文": 10, "未知": 4,
+    "简体中文": 30, "日中双语": 26, "繁体中文": 24, "中文": 22,
+    "日文": 18, "英文": 14,
+    "韩文": 13, "俄文": 13, "法文": 13, "德文": 13, "西班牙文": 13,
+    "葡萄牙文": 13, "意大利文": 13, "泰文": 13, "越南文": 13,
+    "印尼文": 13, "阿拉伯文": 13, "土耳其文": 13,
+    "未知": 8, "其他语言": 9,
 }
-_TRUST = {"subtitlecat": 8, "thunder": 5, "local": 10, "embedded": 10}
+_TRUST = {
+    "subtitlecat": 8, "thunder": 5, "opensubtitles": 9, "assrt": 7,
+    "custom": 5, "local": 10, "embedded": 10,
+}
+
+# ---- 语言码单一真源 ----------------------------------------------------
+# 五条字幕途径历史上各写各的：在线下载写「简体中文」、内嵌轨写 jpn、
+# AI 译文写 zh-Hans，导致排序、批量筛选、播放器去重、srclang 全部误判。
+# 约定：DB 统一存 BCP47 短码，展示层用 lang_label() 本地化；旧数据靠
+# normalize_lang() 兼容读取，不需要破坏性迁移。
+_LANG_ALIASES = {
+    "简体中文": "zh-Hans", "简中": "zh-Hans", "chs": "zh-Hans", "gb": "zh-Hans",
+    "sc": "zh-Hans", "zh-cn": "zh-Hans", "zh-hans": "zh-Hans", "zh": "zh-Hans",
+    "cn": "zh-Hans", "chinese": "zh-Hans", "中文": "zh-Hans", "日中双语": "zh-Hans",
+    "繁体中文": "zh-Hant", "繁中": "zh-Hant", "cht": "zh-Hant", "big5": "zh-Hant",
+    "tc": "zh-Hant", "zh-tw": "zh-Hant", "zh-hant": "zh-Hant", "zh-hk": "zh-Hant",
+    "日文": "ja", "日语": "ja", "ja": "ja", "jp": "ja", "jpn": "ja",
+    "英文": "en", "英语": "en", "en": "en", "eng": "en",
+    "韩文": "ko", "韩语": "ko", "ko": "ko", "kor": "ko",
+    "俄文": "ru", "ru": "ru", "法文": "fr", "fr": "fr", "德文": "de", "de": "de",
+    "西班牙文": "es", "es": "es", "葡萄牙文": "pt", "pt": "pt",
+    "意大利文": "it", "it": "it", "泰文": "th", "th": "th",
+    "越南文": "vi", "vi": "vi", "印尼文": "id", "id": "id",
+    "阿拉伯文": "ar", "ar": "ar", "土耳其文": "tr", "tr": "tr",
+    "未知": "und", "其他语言": "und", "und": "und", "": "und",
+}
+_LANG_LABELS = {
+    "zh-Hans": "简体中文", "zh-Hant": "繁体中文", "ja": "日文", "en": "英文",
+    "ko": "韩文", "ru": "俄文", "fr": "法文", "de": "德文", "es": "西班牙文",
+    "pt": "葡萄牙文", "it": "意大利文", "th": "泰文", "vi": "越南文",
+    "id": "印尼文", "ar": "阿拉伯文", "tr": "土耳其文", "und": "未知",
+}
+_LANG_CODE_RE = re.compile(r"[a-z]{2,3}(-[a-z0-9]{2,8})*")
+
+
+def normalize_lang(value: Any) -> str:
+    """任意历史写法 → 标准 BCP47 短码；认不出来返回 und。"""
+    s = str(value or "").strip().lower()
+    if s in _LANG_ALIASES:
+        return _LANG_ALIASES[s]
+    if s.startswith("zh"):
+        return "zh-Hant" if any(x in s for x in ("hant", "tw", "hk", "cht", "tc")) else "zh-Hans"
+    return s[:12] if _LANG_CODE_RE.fullmatch(s) else "und"
+
+
+def lang_label(value: Any) -> str:
+    """标准码 → 中文展示名；已是中文展示名的原样返回。"""
+    raw = str(value or "").strip()
+    return _LANG_LABELS.get(normalize_lang(raw), raw or "未知")
+
+
+def is_zh_lang(value: Any) -> bool:
+    return normalize_lang(value).startswith("zh")
+
+
+def lang_equivalents(target: str) -> List[str]:
+    """批量筛选「已有目标语言字幕」时，把历史写法一并算进去。"""
+    code = normalize_lang(target)
+    out = {code, str(target or "")}
+    for alias, canonical in _LANG_ALIASES.items():
+        if canonical == code:
+            out.add(alias)
+    return sorted(x for x in out if x)
+
+
+def rank_subtitle_sources(subs: List[Dict[str, Any]], prefer_original: bool = True,
+                          exclude: Tuple[str, ...] = ()) -> List[Dict[str, Any]]:
+    """翻译 / 剧情问答共用的外挂字幕排序：原文优先（或中文优先），再看质检分。
+
+    排除自身产物（AI 译文）由调用方通过 exclude 指定，避免「把自己译过的
+    中文字幕再翻一遍」。库里旧记录 score 为 0，排序稳定不会改变它们的行为。
+    """
+    pool = [s for s in (subs or [])
+            if (s.get("path") or "") and (s.get("source") or "") not in exclude]
+    pool.sort(key=lambda s: (
+        1 if (is_zh_lang(s.get("lang")) == prefer_original) else 0,
+        -int(s.get("score") or 0),
+        int(s.get("id") or 0),
+    ))
+    return pool
 
 
 def _sec(h: str, m: str, s: str, ms: str) -> float:
@@ -104,7 +189,7 @@ def analyze(text: str, *, video_seconds: float = 0, lang: str = "",
     joined = "\n".join(c[2] for c in cues)
     last_end = max(c[1] for c in cues)
     lang = lang or detect_lang(joined)
-    lang_pts = _LANG_POINTS.get(lang, 4)
+    lang_pts = _LANG_POINTS.get(lang, 10)
     fit_pts, _ = _fit_points(last_end, video_seconds, notes)
 
     minutes = max((video_seconds or last_end) / 60.0, 1.0)
@@ -156,12 +241,42 @@ def analyze(text: str, *, video_seconds: float = 0, lang: str = "",
     }
 
 
-def estimate_score(cand: Dict[str, Any], video_seconds: float) -> int:
-    """下载前预估匹配度：只有语言 / 时长 / 来源可用，按可用维度归一到 100。"""
-    lang_pts = _LANG_POINTS.get(cand.get("lang") or "未知", 4)
-    trust = _TRUST.get(cand.get("provider") or "", 5)
+def qa_file(path: str, lang: str = "", video_seconds: float = 0) -> Dict[str, Any]:
+    """只读质检本地字幕文件，返回可登记的 score / lang / sub_duration_ms。
+
+    与 normalize_and_save 的区别：不改写磁盘文件。ASR 草稿、AI 译文、本地
+    外挂都是本程序自己生成或用户原有的文件，重写它们反而有风险；这里只
+    补元数据，让五条来源的质检分可以互相比较。
+    """
+    try:
+        with open(path, "rb") as f:
+            text, enc = vtt.decode_bytes(f.read(4_000_000))
+        info = analyze(text, video_seconds=video_seconds,
+                       lang=lang_label(lang) if lang else "", encoding=enc)
+        detected = normalize_lang(info.get("lang_detected") or "")
+        # 文本太短时判不出语言（返回「未知」），这里留空让登记层回退到
+        # 文件名推断 / 调用方传入的语言，不要把已有的 ja、zh-Hans 冲成 und。
+        return {"score": int(info.get("score") or 0),
+                "lang": "" if detected == "und" else detected,
+                "sub_duration_ms": int(info.get("sub_duration_ms") or 0)}
+    except Exception:
+        # 图形字幕 / 非字幕文本 / 读不到文件都只是拿不到分数，不该阻断登记
+        return {}
+
+
+def estimate_score(cand: Dict[str, Any], video_seconds: float,
+                   lang_priority: List[str] | None = None) -> int:
+    """下载前预估匹配度：语言 / 语言偏好 / 时长 / 来源，按可用维度归一到 100。"""
+    lang = cand.get("lang") or "其他语言"
+    lang_pts = _LANG_POINTS.get(lang, 10)
+    trust = _TRUST.get(str(cand.get("provider") or "").split(":", 1)[0], 5)
     avail = 30 + 10
     got = lang_pts + trust
+    if lang_priority and lang in lang_priority:
+        # 用户偏好（默认中文优先）最多再加 8 分，不改变量级
+        bonus = max(0, 8 - 2 * lang_priority.index(lang))
+        got += bonus
+        avail += 8
     if video_seconds > 0:
         avail += 25
         if (cand.get("duration_ms") or 0) > 0:
@@ -191,6 +306,48 @@ def dedupe(cands: List[Dict[str, Any]], limit: int = 24) -> List[Dict[str, Any]]
         if len(out) >= limit:
             break
     return out
+
+
+def _fingerprint(cand: Dict[str, Any]) -> Tuple[str, str, int]:
+    name = re.sub(r"\.(srt|ass|ssa|vtt|sub)$", "",
+                  (cand.get("name") or "").lower(), flags=re.I)
+    name = re.sub(r"[^a-z0-9\u4e00-\u9fff]", "", name)
+    return (name, cand.get("lang") or "",
+            int(cand.get("duration_ms") or 0) // 30000)
+
+
+def merge_similar(cands: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """跨源择优：不同站点常转发同一份字幕，同内容只留估分最高的那条。
+
+    发生在估分之后、排序之前；调用方需要已给每条候选写好 estimate。
+    """
+    best: Dict[Tuple[str, str, int], Dict[str, Any]] = {}
+    order: List[Tuple[str, str, int]] = []
+    for c in cands:
+        key = _fingerprint(c)
+        prev = best.get(key)
+        if prev is None:
+            best[key] = c
+            order.append(key)
+        elif int(c.get("estimate") or 0) > int(prev.get("estimate") or 0):
+            best[key] = c
+    return [best[k] for k in order]
+
+
+def cues_from_bytes(raw: bytes, ext: str = "") -> List[Tuple[float, float, str]]:
+    """下载字节 → 编码/时间轴归一 → [(start, end, text)]，**只读、不落盘**。
+
+    在线候选「先看内容再采纳」用这条路径；与 normalize_and_save 保持同一套
+    解码和归一规则，避免预览看到的和采纳后的字幕不一致。
+    """
+    text, _ = vtt.decode_bytes(raw)
+    if _ASS_MARK.search(text[:4000]):
+        normalized = text          # ASS 靠逗号分列，插入换行会破坏结构
+    else:
+        normalized, _ = vtt.normalize_timeline(text)
+    suffix = str(ext or "").lower().lstrip(".")
+    built = vtt.ass_to_vtt(normalized) if suffix in ("ass", "ssa") else vtt.srt_to_vtt(normalized)
+    return parse_cues(built)
 
 
 def normalize_and_save(raw: bytes, path: str, *, video_seconds: float = 0,

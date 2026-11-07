@@ -133,11 +133,15 @@ def apply_metadata(conn, movie_id: int, meta: Dict[str, Any], cfg: Dict[str, Any
     if cfg.get("cover", {}).get("download", True) and meta.get("cover"):
         # 覆盖策略交给 save_cover：force（重刮覆盖）/ 抽帧占位 / 新图明显更好，三者之一才换
         before_cover = str(current.get("cover") or "")
+        before_sig = images.cover_signature(before_cover)
         saved = save_cover(conn, current, str(meta["cover"]), cfg,
                            source=meta.get("source", "scrape"),
                            force=bool(overwrite) or bool(force_cover),
                            replace_placeholder=(current.get("cover_source") == "video"))
-        cover_changed = bool(saved) and saved != before_cover
+        # 封面文件名由 safe_key(key) 决定，替换后往往同名覆盖，光比文件名会把
+        # 成功的替换记成「封面 0」；用文件签名（大小 + mtime）判断才准。
+        cover_changed = bool(saved) and (
+            saved != before_cover or images.cover_signature(saved) != before_sig)
 
     fanart_changed = False
     if cfg.get("media", {}).get("fanart_download", True) and meta.get("fanart"):
@@ -225,8 +229,11 @@ def save_cover(conn, movie: Dict[str, Any], location: str, cfg: Dict[str, Any],
         return None
 
     code = str(movie.get("code") or "").strip()
-    # 1) 先尝试把横版封面升级成 DMM 大图（2184×1468），质量不足则不换
-    if source in ("scrape", "matched", "local") and code:
+    # 1) 先尝试把横版封面升级成 DMM 大图（2184×1468），质量不足则不换。
+    # 原来只认 scrape / matched / local 三种 source，多源合并后 source 会变成
+    # "local_nfo+javdb" 这类复合名，反而被跳过，站点给的小图（800×538）就没升级。
+    # 改为「只要不是用户手动上传的图」都允许尝试。
+    if code and source not in ("manual", "upload", "user"):
         up = images.upgrade_from_dmm(str(key), code, cfg, cover_file=name)
         if up.get("cover") and up["cover"] != name:
             name = up["cover"]

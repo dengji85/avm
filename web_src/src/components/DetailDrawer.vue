@@ -8,8 +8,9 @@ import {
   listTags, renameTag, deleteTag, aiPromoteTags, cleanupTags,
   dlnaDevices, dlnaAddDevice, dlnaCast, dlnaStop,
   getActress, avatarUrl, getConfig, scanMovieSubtitles, extStatus,
-  searchOnlineSubtitles, fetchOnlineSubtitle,
+  adCheckResult, adCheckRunOne, adSheetUrl,
 } from '../api.js'
+import SubtitleSummary from './SubtitleSummary.vue'
 import AddToCollectionBtn from './AddToCollectionBtn.vue'
 import {
   toast, confirmDialog, copyText, coverFallback, avatarFallback, fmtSize, fmtDuration,
@@ -148,6 +149,13 @@ function openExt() {
   state.settingsTab = 'ext'
 }
 
+/** 字幕区「去字幕源设置」：收起抽屉再跳，避免抽屉挡住设置页 */
+function openSubtitleSettings() {
+  close()
+  state.view = 'settings'
+  state.settingsTab = 'subtitles'
+}
+
 /**
  * 提取 / 重新提取对白：入口任何状态下都可点。
  * 未就绪 → 带去扩展组件页；已提取过 → 确认覆盖后再提取。
@@ -182,41 +190,6 @@ async function scanSidecars() {
     scanningSubs.value = false
   }
 }
-/* 在线字幕匹配：按番号搜候选 → 用户选一条，后端负责下载 / 质检 / 登记 */
-const onlineSubs = reactive({ loading: false, picking: '', candidates: [], sources: [], searched: false, error: '' })
-const fmtOnlineMinutes = (ms) => Math.round((ms || 0) / 60000)
-async function searchOnlineSubs() {
-  if (onlineSubs.loading || !id.value) return
-  onlineSubs.loading = true
-  onlineSubs.error = ''
-  onlineSubs.candidates = []
-  onlineSubs.sources = []
-  onlineSubs.searched = false
-  try {
-    const r = await searchOnlineSubtitles(id.value)
-    onlineSubs.candidates = r.candidates || []
-    onlineSubs.sources = r.sources || []
-    onlineSubs.searched = true
-  } catch (e) {
-    onlineSubs.error = e.message
-  } finally {
-    onlineSubs.loading = false
-  }
-}
-async function pickOnlineSub(c) {
-  if (onlineSubs.picking) return
-  onlineSubs.picking = c.id
-  try {
-    const r = await fetchOnlineSubtitle(id.value, c.id)
-    await refreshMovie()
-    toast(t('detail.onlineSubsDone', { score: r.score }), 'ok')
-  } catch (e) {
-    toast(e.message, 'err')
-  } finally {
-    onlineSubs.picking = ''
-  }
-}
-
 /** AI 操作后的轻量刷新：只重取影片数据，不重置当前 tab 与播放状态 */
 async function refreshMovie() {
   if (!state.currentId) return
@@ -354,6 +327,10 @@ async function stopCast() {
 
 const open = computed(() => !!state.currentId)
 const id = computed(() => state.currentId)
+// 封面 / 海报地址上的时间戳版本号：换图（上传、抽帧、刮削替换）时递增，
+// 强制浏览器重新取图。文件名由后端 safe_key 决定、同一部片永远同名，没有版本号
+// 的话浏览器一直用缓存，会看到「刮成功了封面还是旧的」。
+const bust = ref(Date.now())
 // 片单连播是全屏层（--z-player），层级高于普通抽屉。连播途中打开详情时若不提升
 // 层级，抽屉会被播放层完全盖住，看起来像"点了没反应"。
 const overPlayer = computed(() => !!state.playQueue?.open)
@@ -388,6 +365,35 @@ function hostOf(url) {
 const totalSize = computed(() => (mv.value?.files || []).reduce((s, f) => s + (Number(f.size) || 0), 0))
 const quality = computed(() => qualityTag(mv.value?.resolution))
 
+/* ---------- 广告检测（内容级；结果也可能来自 维护 → 广告筛查 的批量） ---------- */
+const adInfo = ref(null)
+const adBusy = ref(false)
+const adSheetOpen = ref(false)
+
+function adLevelLabel(lv) {
+  return lv === 'likely' ? t('detail.adLikely')
+    : lv === 'suspect' ? t('detail.adSuspect') : t('detail.adClean')
+}
+
+async function loadAd() {
+  adInfo.value = null
+  try { adInfo.value = await adCheckResult(id.value) } catch (e) { adInfo.value = null }
+}
+
+async function runAd() {
+  if (adBusy.value) return
+  adBusy.value = true
+  try {
+    const r = await adCheckRunOne(id.value)
+    adInfo.value = r
+    toast(`${adLevelLabel(r.level)} · ${r.score}`, 'ok', 4000)
+  } catch (e) {
+    toast(e.message, 'err')
+  } finally {
+    adBusy.value = false
+  }
+}
+
 async function load() {
   if (!id.value) return
   loading.value = true
@@ -397,6 +403,8 @@ async function load() {
   previews.value = []
   similar.value = []
   editing.value = false
+  adSheetOpen.value = false
+  loadAd()
   try {
     const m = await getMovie(id.value)
     // 后端 tags 可能为数组或逗号分隔字符串，统一规整为数组，避免 .filter 报错
@@ -407,6 +415,9 @@ async function load() {
       m.tags = t
     }
     mv.value = m
+    // 封面 / 海报 URL 上的 ?t= 是版本号，换了图必须一起换，否则浏览器对同一个
+    // URL 直接用缓存，刮削拿到的新封面看起来「没变」。
+    bust.value = Date.now()
   // 首屏即加载预览图：不必等用户切换标签
   if (tab.value === 'preview' && !previews.value.length) loadPreviews(false)
     // 交给全局 AI 浮窗共用同一个影片对象，并顺手探测一次 AI 是否可用（按钮据此高亮）
@@ -477,11 +488,32 @@ async function doScrape(force = false) {
   } catch (e) { toast(e.message, 'err') }
 }
 
-// 刮削任务结束后自动刷新详情（任务中心轮询会在结束时广播 avm-refresh）
+/** 轻量刷新：只重新拉本片数据并合并，不重置标签页 / 不中断播放 / 不清预览图。
+ *
+ *  刮削结束后由任务状态驱动。这里不能用 load()：它会把 tab 打回预览页、把 playing
+ *  置 false，用户正看着片或停在字幕 / 剧照标签上时，观感就是「页面被重置了」。
+ */
+async function reloadMeta() {
+  if (!id.value) return
+  try {
+    const m = await getMovie(id.value)
+    if (!m) return
+    let tags = m.tags
+    if (typeof tags === 'string') tags = tags ? tags.split(',').map((s) => s.trim()).filter(Boolean) : []
+    else if (!Array.isArray(tags)) tags = []
+    m.tags = tags
+    mv.value = m
+    ws.syncMovie(m)
+    bust.value = Date.now()      // 换封面后强制重新取图
+    loadAd()                     // 广告检测结果可能也变了
+  } catch (e) { /* 静默：元数据刷新失败不该打断当前页面 */ }
+}
+
+// 刮削任务结束后自动刷新详情（任务中心轮询在结束时把 running 置 false）
 watch(
   () => state.task.scrape.running,
   (running, was) => {
-    if (was && !running && id.value) load()
+    if (was && !running && id.value) reloadMeta()
   },
 )
 
@@ -513,7 +545,10 @@ async function doDelete(mode) {
   try {
     const r = await deleteMovie(id.value, isPermanent, isTrash)
     const failed = (r && r.failed_files) || []
-    toast(t('detail.deleted'), failed.length ? 'warn' : 'ok')
+    // 删库行的同时会清掉这部片独占的封面 / 预览 / 字幕 / 证据图，顺手报一下回收量
+    const freed = (r && r.assets && r.assets.bytes) || 0
+    const msg = freed ? t('detail.deletedWithAssets', { s: fmtSize(freed) }) : t('detail.deleted')
+    toast(msg, failed.length ? 'warn' : 'ok')
     close()
     window.dispatchEvent(new CustomEvent('avm-refresh'))
   } catch (e) { toast(e.message, 'err') }
@@ -736,7 +771,6 @@ async function onUpload(e) {
   } catch (err) { toast(err.message, 'err') }
   e.target.value = ''
 }
-const bust = ref(Date.now())
 const coverSrc = computed(() => `${coverUrl(id.value)}?t=${bust.value}`)
 // 卡片位是 2:3：用竖版海报填满（横版原图会被居中裁切），灯箱仍给完整原图
 // 详情页顶部大图：有背景大图用 fanart（更宽、更干净），否则用完整横版封面
@@ -1182,6 +1216,36 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', onKey) })
                     </button>
                   </dd>
                 </div>
+                <!-- 广告检测（内容级）：片头/片尾是否拼了宣传片、整片是否带跑马灯 -->
+                <div class="dd-fact wide">
+                  <dt>{{ $t('detail.fAd') }}</dt>
+                  <dd class="chip-list">
+                    <template v-if="adInfo">
+                      <span class="badge"
+                            :class="adInfo.level === 'likely' ? 'err' : (adInfo.level === 'suspect' ? 'warn' : 'ok')">
+                        {{ adLevelLabel(adInfo.level) }}
+                      </span>
+                      <span class="dim">{{ $t('detail.adScore', { n: adInfo.score }) }}</span>
+                      <span v-if="adInfo.signals && adInfo.signals.intro_end" class="dim">
+                        · {{ $t('detail.adIntroEnd', { n: Math.round(adInfo.signals.intro_end) }) }}
+                      </span>
+                      <span class="spacer"></span>
+                      <button v-if="adInfo.sheet" class="btn tiny ghost" @click="adSheetOpen = true">
+                        {{ $t('detail.adEvidence') }}
+                      </button>
+                      <button class="btn tiny ghost" :disabled="adBusy" @click="runAd">
+                        {{ adBusy ? '…' : $t('detail.adRetest') }}
+                      </button>
+                    </template>
+                    <template v-else>
+                      <span class="dim">{{ $t('detail.adUnknown') }}</span>
+                      <span class="spacer"></span>
+                      <button class="btn tiny ghost" :disabled="adBusy" @click="runAd">
+                        {{ adBusy ? $t('detail.adRunning') : $t('detail.adRun') }}
+                      </button>
+                    </template>
+                  </dd>
+                </div>
               </dl>
 
               <!-- 已生成的 AI 字幕译文：下载 / 删除（生成入口统一在 AI 工作台） -->
@@ -1195,45 +1259,10 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', onKey) })
                 </div>
               </div>
 
-              <!-- 在线字幕匹配：只按番号查字幕站，采纳后自动出现在播放器字幕菜单 -->
-              <div class="online-subs">
-                <div class="hstack">
-                  <span class="lbl">{{ $t('detail.onlineSubs') }}</span>
-                  <span class="spacer"></span>
-                  <button class="btn tiny ghost" :disabled="onlineSubs.loading || !mv.code"
-                          @click="searchOnlineSubs">
-                    {{ onlineSubs.loading ? $t('detail.onlineSubsSearching') : $t('detail.onlineSubs') }}
-                  </button>
-                </div>
-                <div class="os-hint">{{ $t('detail.onlineSubsHint') }}</div>
-                <div v-if="onlineSubs.error" class="err">{{ onlineSubs.error }}</div>
-                <div v-if="onlineSubs.searched && !onlineSubs.candidates.length" class="os-hint">
-                  {{ $t('detail.onlineSubsEmpty') }}
-                </div>
-                <div v-if="onlineSubs.candidates.length" class="os-hint">
-                  {{ $t('detail.onlineSubsCount', { n: onlineSubs.candidates.length }) }}
-                </div>
-                <ul v-if="onlineSubs.candidates.length" class="os-rows">
-                  <li v-for="c in onlineSubs.candidates" :key="c.id">
-                    <span class="os-score">{{ $t('detail.onlineSubsEstimate', { n: c.estimate }) }}</span>
-                    <span class="os-name" :title="c.name">{{ c.name }}</span>
-                    <span class="os-meta">{{ c.provider_label }} · {{ c.lang }}</span>
-                    <span class="os-meta" v-if="c.duration_ms">
-                      {{ $t('detail.onlineSubsDuration', { n: fmtOnlineMinutes(c.duration_ms) }) }}
-                    </span>
-                    <span class="spacer"></span>
-                    <button class="btn tiny primary" :disabled="!!onlineSubs.picking"
-                            @click="pickOnlineSub(c)">
-                      {{ onlineSubs.picking === c.id ? $t('detail.onlineSubsPicking') : $t('detail.onlineSubsPick') }}
-                    </button>
-                  </li>
-                </ul>
-                <div v-for="s in onlineSubs.sources.filter(x => x.status !== 'ok')" :key="s.provider" class="os-hint">
-                  {{ s.message || (s.status === 'miss'
-                      ? $t('detail.onlineSubsSourceMiss', { name: s.label })
-                      : $t('detail.onlineSubsSourceOff', { name: s.label })) }}
-                </div>
-              </div>
+              <!-- 字幕：一行状态 + 按需展开的搜索面板；校准在播放现场做 -->
+              <SubtitleSummary :movie-id="id" :subtitles="mv.subtitles || []"
+                               @refresh="refreshMovie" @goto-asr="tab = 'info'"
+                               @goto-settings="openSubtitleSettings" />
 
               <!-- 自定义标签：常驻主区可见，随时增删 -->
               <div class="dd-sec-t">{{ $t('detail.secTags') }}</div>
@@ -1480,8 +1509,12 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', onKey) })
                         @click="onExtractDialog"
                       >{{ ai.dialog.has_text ? $t('ai.reExtract') : $t('ai.extractDialog') }}</button>
                       <span v-if="ai.dialog.status === 'running'" class="badge">{{ ai.dialog.percent }}%</span>
+                      <span v-else-if="ai.dialog.status === 'cancelled'" class="badge">{{ $t('ai.dialogCancelled') }}</span>
                       <span v-else-if="ai.dialog.has_text" class="badge ok">{{ $t('ai.dialogDone', { n: ai.dialog.segments }) }}</span>
                       <span v-else-if="ai.dialog.status === 'error'" class="badge err">{{ $t('ai.dialogFailed') }}</span>
+                      <button v-if="ai.dialog.status === 'running'" class="btn tiny ghost" @click="ai.cancelDialog">
+                        {{ $t('ai.cancelDialog') }}
+                      </button>
                       <button v-if="ai.dialog.has_text" class="btn tiny ghost" @click="ai.toggleDialogText">
                         {{ ai.dialog.show ? $t('ai.hideDialog') : $t('ai.viewDialog') }}
                       </button>
@@ -1614,24 +1647,23 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', onKey) })
       </div>
     </div>
 
+    <!-- 广告证据图：抽帧缩略图墙，红框=被判为带整行文字的帧（片头连续红框即广告段） -->
+    <div v-if="adSheetOpen && mv" class="ad-mask" @click.self="adSheetOpen = false">
+      <div class="ad-box">
+        <div class="ad-head">
+          <span>{{ $t('detail.adEvidence') }}</span>
+          <button class="btn tiny ghost" @click="adSheetOpen = false">{{ $t('common.close') }}</button>
+        </div>
+        <img :src="adSheetUrl(mv.id)" alt="ad-evidence" />
+      </div>
+    </div>
+
     <!-- 女优弹框：在详情页内查看女优介绍，不关闭当前详情 -->
     <ActressModal v-if="actressModal" :ident="actressModal" @close="actressModal = ''" />
   </Teleport>
 </template>
 
 <style scoped>
-/* 在线字幕候选：分数 / 文件名 / 来源 / 时长 一行展示，窄屏另起一行 */
-.online-subs { display: flex; flex-direction: column; gap: 6px; margin-top: var(--sp-2); }
-.online-subs .os-hint { font-size: var(--fs-xs); color: var(--c-text-3); }
-.os-rows { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; max-height: 260px; overflow: auto; }
-.os-rows li { display: flex; align-items: center; gap: 8px; padding: 5px 8px; border: 1px solid var(--c-line); border-radius: var(--r-sm); background: var(--c-surface-2); font-size: var(--fs-sm); }
-.os-score { font-size: var(--fs-xs); color: var(--c-primary); min-width: 78px; white-space: nowrap; }
-.os-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.os-meta { font-size: var(--fs-xs); color: var(--c-text-3); white-space: nowrap; }
-@media (max-width: 640px) {
-  .os-rows li { flex-wrap: wrap; }
-  .os-name { flex-basis: 100%; order: -1; }
-}
 /* 连播（全屏播放层）之上打开详情时，层级需高于 --z-player，否则会被完全盖住。
    .drawer-mask / .drawer 的基础样式在 styles/layout.css，这里只覆盖层级。 */
 .drawer-mask.over-player { z-index: var(--z-drawer-over); }
@@ -2099,6 +2131,17 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', onKey) })
 /* 整组预览图：左右翻页 + 计数 + 底部缩略图，避免一次只能看一张 */
 .lb-box { position: relative; z-index: 1; display: flex; flex-direction: column;
   align-items: center; gap: 0; max-width: 100%; max-height: 100%; min-height: 0; }
+/* 广告证据图弹层：抽帧缩略图墙按宽度铺满，红框含义见 adcheck.py */
+.ad-mask {
+  position: fixed; inset: 0; z-index: 80; background: rgba(0, 0, 0, .82);
+  display: flex; align-items: center; justify-content: center; padding: 24px;
+}
+.ad-box {
+  max-width: min(1500px, 96vw); max-height: 92vh; overflow: auto;
+  background: var(--c-surface); border-radius: var(--r-md, 12px); padding: 12px;
+}
+.ad-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; gap: 16px; }
+.ad-box img { display: block; width: 100%; height: auto; border-radius: 6px; }
 .lb-main { display: flex; align-items: center; gap: 10px; min-width: 0; overflow: hidden; }
 /* 按图片自身比例撑满可用高度：竖图不再被塞进宽盒子导致左右大片黑边；
    宽度给上限，超宽图（2.4:1 等）也能整幅显示 */

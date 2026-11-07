@@ -20,7 +20,7 @@ import sqlite3
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from . import ai_core, ai_prompts, subtext
+from . import ai_core, ai_prompts, subqc, subtext, vtt
 from .ai_core import AIConfig, AiError, chat, log, register_prompt
 from .config import DATA_DIR
 from .db import connect
@@ -50,9 +50,17 @@ MAX_GLOSSARY = 200         # 单批最多注入的术语条数：术语表再大
 
 _SRT_TIME = re.compile(
     r"(\d{1,2}):(\d{2}):(\d{2})[,.](\d{1,3})\s*-->\s*(\d{1,2}):(\d{2}):(\d{2})[,.](\d{1,3})")
-_DIALOGUE_RE = re.compile(r"^dialogue:\s*[^,]*,[^,]*,[^,]*,[^,]*,[^,]*,[^,]*,[^,]*,[^,]*,[^,]*,(.*)$",
-                          re.IGNORECASE)
 _TAG_RE = re.compile(r"\{[^}]*\}|<[^>]+>")
+# ASS 时间是 H:MM:SS.cc（厘秒，两位），不是 SRT 的毫秒
+_ASS_TIME_RE = re.compile(r"^(\d+):(\d{1,2}):(\d{1,2})[.,](\d{1,2})$")
+
+
+def _ass_sec(text: str) -> Optional[float]:
+    m = _ASS_TIME_RE.match(str(text or "").strip())
+    if not m:
+        return None
+    h, mi, s, cs = m.groups()
+    return int(h) * 3600 + int(mi) * 60 + int(s) + int(cs.ljust(2, "0")) / 100.0
 
 
 @dataclass
@@ -99,18 +107,41 @@ def parse_srt(raw: str) -> List[Cue]:
 
 
 def parse_ass(raw: str) -> List[Cue]:
+    """解析 ASS/SSA 的 Dialogue 行，**保留时间轴**。
+
+    旧实现把 start/end 全填 0（当初只给「朗读」取文本用），但翻译链也用了
+    它，导致 ASS 字幕译出的 SRT 所有时间码都是 00:00:00。这里按 [Events]
+    的 Format 行定位 Start/End/Text 列；没有 Format 时退回标准十列布局。
+    """
+    cols: List[str] = []
     cues: List[Cue] = []
     for line in (raw or "").splitlines():
         s = line.strip()
-        if not s.lower().startswith("dialogue:"):
+        low = s.lower()
+        if low.startswith("format:") and "start" in low:
+            cols = [c.strip().lower() for c in s.split(":", 1)[1].split(",")]
             continue
-        m = _DIALOGUE_RE.match(s)
-        if not m:
+        if not low.startswith("dialogue:"):
             continue
-        text = m.group(1).replace("\\N", " ").replace("\\n", " ")
+        parts = s.split(":", 1)[1].strip().split(",")
+        i_start = cols.index("start") if "start" in cols else 1
+        i_end = cols.index("end") if "end" in cols else 2
+        i_text = cols.index("text") if "text" in cols else 9
+        if len(parts) <= max(i_start, i_end, i_text):
+            i_start, i_end, i_text = 1, 2, 9
+        if len(parts) <= i_text:
+            continue
+        text = ",".join(parts[i_text:]).replace("\\N", " ").replace("\\n", " ")
         text = _TAG_RE.sub("", text).strip()
-        if text:
-            cues.append(Cue(0.0, 0.0, text))   # ASS 时间轴在 Format 里，朗读场景用不到
+        if not text:
+            continue
+        start = _ass_sec(parts[i_start])
+        end = _ass_sec(parts[i_end])
+        if start is None:
+            start = 0.0
+        if end is None or end <= start:
+            end = start + 2.0
+        cues.append(Cue(start, end, text))
     return cues
 
 
@@ -198,50 +229,46 @@ def _glossary_block(hits: List[Dict[str, str]]) -> str:
 
 
 def collect_cues(files: List[Dict[str, Any]], sidecar: List[Dict[str, Any]],
-                 cfg: Dict[str, Any]) -> Dict[str, Any]:
-    """取材：返回带时间码的字幕条目（与 subtext.collect 同优先级）。"""
+                 cfg: Dict[str, Any], sub_id: Optional[int] = None) -> Dict[str, Any]:
+    """取材：返回带时间码的字幕条目。
+
+    与 subtext（剧情问答）共用 subqc 的语言判定与排序契约，但翻译场景固定
+    「原文优先」并排除自己的译文——把中文译文再翻成中文毫无意义。
+    sub_id 由前端「翻译这一条」传入，确保刚采纳的在线字幕被选中。
+    """
     from . import subprobe
 
-    candidates: List[Tuple[Tuple[int, int], Dict[str, Any], Dict[str, Any]]] = []
-    for f in files or []:
-        path = f.get("path") or ""
-        if not path or not os.path.isfile(path) or not f.get("sub_tracks"):
-            continue
-        try:
-            info = json.loads(f["sub_tracks"])
-        except (ValueError, TypeError):
-            continue
-        for t in (info.get("tracks") or []):
-            if t.get("kind") != "text":
-                continue
-            bad = 1 if (t.get("forced") or t.get("partial")) else 0
-            zh = 1 if t.get("zh") else 0
-            candidates.append(((0 if zh else 1, bad), f, t))
-    candidates.sort(key=lambda x: x[0])
+    empty = {"cues": [], "source": "", "track": "", "sub_id": None, "lang": ""}
+    pool = subqc.rank_subtitle_sources(sidecar, prefer_original=True,
+                                       exclude=("ai-translate",))
+    if sub_id:
+        pool = [s for s in pool if str(s.get("id")) == str(sub_id)]
 
-    for _, f, t in candidates:
-        raw = subprobe.extract_track_text(f["path"], int(t.get("si") or 0), cfg)
-        cues = parse_srt(raw)
-        if cues:
-            label = "%s%s" % ((t.get("lang") or "").upper() or "UND",
-                              (" · " + t["title"]) if t.get("title") else "")
-            return {"cues": cues[:MAX_CUES], "source": "embedded", "track": label.strip(" ·")}
+    if not sub_id:
+        for _, f, t in subtext._collect_tracks(files, prefer_original=True):
+            raw = subprobe.extract_track_text(f["path"], int(t.get("si") or 0), cfg)
+            cues = parse_srt(raw)
+            if cues:
+                label = "%s%s" % ((t.get("lang") or "").upper() or "UND",
+                                  (" · " + t["title"]) if t.get("title") else "")
+                return {"cues": cues[:MAX_CUES], "source": "embedded",
+                        "track": label.strip(" ·"), "sub_id": None, "lang": ""}
 
-    for s in sorted([s for s in (sidecar or []) if s.get("path")],
-                    key=lambda s: 0 if (s.get("lang") or "").lower().startswith("zh") else 1):
+    for s in pool:
         path = s["path"]
         if not os.path.isfile(path):
             continue
         try:
-            with open(path, "r", encoding="utf-8", errors="replace") as fh:
-                raw = fh.read(4_000_000)
+            with open(path, "rb") as fh:
+                raw = vtt.decode_bytes(fh.read(4_000_000))[0]
         except OSError:
             continue
         cues = parse_any(raw, path)
         if cues:
             return {"cues": cues[:MAX_CUES], "source": "sidecar",
-                    "track": os.path.basename(path)}
-    return {"cues": [], "source": "", "track": ""}
+                    "track": os.path.basename(path), "sub_id": s.get("id"),
+                    "lang": subqc.normalize_lang(s.get("lang"))}
+    return empty
 
 
 def _batches(cues: List[Cue]) -> List[List[int]]:
@@ -367,17 +394,23 @@ def register(conn: sqlite3.Connection, movie_id: int, path: str, lang: str) -> i
     以前每次翻译都 INSERT 一条新记录，而产物文件名固定（<lang>.srt）会被覆盖，
     结果是多条记录指向同一个文件；删除其中一条会把文件删掉，其余记录全部失效
     （播放器菜单里字幕「凭空消失」）。"""
+    lang = subqc.normalize_lang(lang)
+    # 译文与其它来源共用同一套质检分，播放器「同语言同来源留最高分」才有效
+    qa = subqc.qa_file(path, lang)
+    score = int(qa.get("score") or 0)
+    duration = int(qa.get("sub_duration_ms") or 0)
     row = conn.execute(
         "SELECT id FROM movie_subtitles WHERE movie_id=? AND lang=? AND source='ai-translate'",
         (movie_id, lang)).fetchone()
     if row:
-        conn.execute("UPDATE movie_subtitles SET file_path=?, filename=? WHERE id=?",
-                     (path, os.path.basename(path), row["id"]))
+        conn.execute("UPDATE movie_subtitles SET file_path=?, filename=?, lang=?, "
+                     "score=?, sub_duration_ms=? WHERE id=?",
+                     (path, os.path.basename(path), lang, score, duration, row["id"]))
         return int(row["id"])
     cur = conn.execute(
-        "INSERT INTO movie_subtitles(movie_id, file_path, filename, lang, source) "
-        "VALUES(?,?,?,?,'ai-translate')",
-        (movie_id, path, os.path.basename(path), lang))
+        "INSERT INTO movie_subtitles(movie_id, file_path, filename, lang, source, "
+        "score, sub_duration_ms) VALUES(?,?,?,?,'ai-translate',?,?)",
+        (movie_id, path, os.path.basename(path), lang, score, duration))
     return int(cur.lastrowid)
 
 
@@ -398,7 +431,8 @@ def unregister(conn: sqlite3.Connection, movie_id: int, sub_id: int) -> Optional
 
 def translate_movie(movie_id: int, cfg: Dict[str, Any], target: str = "zh-Hans",
                     bilingual: bool = False,
-                    progress: Optional[Callable[[int, int], None]] = None) -> Dict[str, Any]:
+                    progress: Optional[Callable[[int, int], None]] = None,
+                    sub_id: Optional[int] = None) -> Dict[str, Any]:
     """为单部片生成翻译字幕；无可用字幕时抛 ValueError（接口层转 400）。"""
     if target not in TARGETS:
         raise ValueError("不支持的目标语言：%s" % target)
@@ -406,8 +440,10 @@ def translate_movie(movie_id: int, cfg: Dict[str, Any], target: str = "zh-Hans",
         m = _movie_files_and_subs(conn, movie_id)
         if not m:
             raise ValueError("影片不存在或未入库")
-        got = collect_cues(m["files"], m["subtitles"], cfg)
+        got = collect_cues(m["files"], m["subtitles"], cfg, sub_id=sub_id)
         if not got["cues"]:
+            if sub_id:
+                raise ValueError("指定的字幕无法读取或已损坏，请重新采纳一条字幕")
             raise ValueError("没有可用字幕：请先让扫描识别内嵌字幕，或放置 .srt/.ass 外挂字幕")
         # 用「实际送出的 prompt 字符数」计费：包含 system 提示词与术语表，
         # 这样任务明细里的 chars、批次预算和真实消耗是同一个口径。
@@ -429,6 +465,8 @@ def translate_movie(movie_id: int, cfg: Dict[str, Any], target: str = "zh-Hans",
         "ok": True, "subtitle_id": sub_id, "path": path,
         "cues": len(got["cues"]), "chars": used or sent, "cue_chars": sent,
         "target": target, "bilingual": bilingual,
+        "source_track": got["track"], "source_sub_id": got.get("sub_id"),
+        "source_lang": got.get("lang") or "",
         "source": got["source"], "track": got["track"],
     }
 

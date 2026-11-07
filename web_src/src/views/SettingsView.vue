@@ -14,7 +14,7 @@ import {
   setPin, privacyState, privacyLock, trustedDevices, revokeTrusted,
   totpStatus, totpSetup, totpEnable, totpDisable,
   listApiKeys, createApiKey, revokeApiKey,
-  embyStatus, embyTest, embyRefresh,
+  embyStatus, embyTest, embyRefresh, listSubtitleSources,
 } from '../api.js'
 import { toast, confirmDialog, fmtAgo, fmtDateTime, prettyHostPath, setSiteTitle } from '../utils.js'
 import { useTasks } from '../composables/useTasks.js'
@@ -26,6 +26,7 @@ const { runScan, runScrape } = useTasks()
 const TABS = [
   ['library', 'settings.tab.library'],
   ['scraper', 'settings.tab.scraper'],
+  ['subtitles', 'settings.tab.subtitles'],
   ['parser', 'settings.tab.parser'],
   ['appearance', 'settings.tab.appearance'],
   ['sites', 'settings.tab.sites'],
@@ -63,11 +64,18 @@ const cfg = reactive({
   },
   ffmpeg_path: '',
   previews_quality: 'smart',
+  // 广告片检测阈值（判定逻辑与默认值见 app/adcheck.py）
+  adcheck: { enabled: true, threshold_likely: 65, threshold_suspect: 35 },
   ai: { enabled: false, base_url: 'https://api.openai.com/v1', api_key: '', model: 'gpt-4o-mini', temperature: 0.4 },
   asr: { libs_dir: '', model_dir: '', tmp_dir: '', model: 'small', language: 'ja' },
   stream: { auto_remux: true, remux_cache_mb: 4096 },
   wiki: { languages: ['ja', 'zh'] },
   online_sites: [],
+  // GET /config 不下发任何字幕源密钥；Key 输入只放在 subKeys 里，留空 = 不修改
+  subtitles: {
+    enabled: true, providers: [], search_timeout: 12, max_workers: 10,
+    max_candidates: 24, cache_ttl: 300, max_variants: 4, custom_sources: [],
+  },
   server: {
     session_idle_days: 7, session_abs_days: 30, session_persist: false,
     expose_docs: false, trusted_proxies: [],
@@ -94,6 +102,77 @@ const providers = reactive({ available: [], active: [] })
 const provOn = reactive({})
 const saving = ref(false)
 const loading = ref(false)
+
+/* ---------------- 在线字幕源 ---------------- */
+const subSources = ref([])
+const subOn = reactive({})
+// GET /config 不下发密钥：只在用户输入新值时才回写，留空 = 不修改
+const subKeys = reactive({ opensubtitles_key: '', assrt_token: '' })
+const SUB_KEY_OF = { opensubtitles: 'opensubtitles_key', assrt: 'assrt_token' }
+
+async function loadSubSources() {
+  try {
+    const r = await listSubtitleSources()
+    subSources.value = r.sources || []
+    for (const s of subSources.value) subOn[s.id] = !!s.enabled
+    subOn.custom = !!r.custom_enabled
+    cfg.subtitles.custom_sources = (r.custom_sources || []).map((s) => {
+      const f = s.fields || {}
+      return {
+        name: s.name || '', url: s.url || '', root: s.root || '',
+        hosts: typeof s.hosts === 'string' ? s.hosts : (s.hosts || []).join(', '),
+        enabled: s.enabled !== false,
+        field_map: [f.name || 'name', f.url || 'url', f.lang || 'lang', f.ext || 'ext'].join(','),
+      }
+    })
+  } catch (e) { /* 字幕源状态取不到不影响设置页其它分区 */ }
+}
+
+function addCustomSource() {
+  cfg.subtitles.custom_sources.push({
+    name: '', url: '', root: 'data', hosts: '', enabled: true,
+    field_map: 'name,url,lang,ext',
+  })
+}
+
+function saveSubtitles() {
+  saving.value = true
+  const num = (v, lo, hi, dft) => Math.max(lo, Math.min(hi, Number(v) || dft))
+  const fieldsOf = (s) => {
+    const p = String(s.field_map || 'name,url,lang,ext').split(',').map((x) => x.trim())
+    return { name: p[0] || 'name', url: p[1] || 'url',
+             lang: p[2] || 'lang', ext: p[3] || 'ext' }
+  }
+  const patch = {
+    subtitles: {
+      enabled: !!cfg.subtitles.enabled,
+      // 源清单还没加载完时别把已有配置清空
+      providers: subSources.value.length
+        ? Object.keys(subOn).filter((k) => subOn[k])
+        : (cfg.subtitles.providers || []),
+      search_timeout: num(cfg.subtitles.search_timeout, 2, 60, 12),
+      max_workers: num(cfg.subtitles.max_workers, 1, 32, 10),
+      max_candidates: num(cfg.subtitles.max_candidates, 1, 100, 24),
+      cache_ttl: num(cfg.subtitles.cache_ttl, 0, 86400, 300),
+      max_variants: num(cfg.subtitles.max_variants, 1, 8, 4),
+      custom_sources: (cfg.subtitles.custom_sources || [])
+        .filter((s) => (s.name || '').trim() || (s.url || '').trim())
+        .map((s) => ({
+          name: (s.name || '').trim(), url: (s.url || '').trim(),
+          root: (s.root || '').trim(), hosts: (s.hosts || '').trim(),
+          enabled: s.enabled !== false, fields: fieldsOf(s),
+        })),
+    },
+  }
+  if (subKeys.opensubtitles_key.trim()) patch.subtitles.opensubtitles_key = subKeys.opensubtitles_key.trim()
+  if (subKeys.assrt_token.trim()) patch.subtitles.assrt_token = subKeys.assrt_token.trim()
+  return putConfig(patch).then(async () => {
+    subKeys.opensubtitles_key = ''
+    subKeys.assrt_token = ''
+    await load()
+    toast(t('settings.subSaved'), 'ok')
+  }).catch((e) => toast(e.message, 'err')).finally(() => { saving.value = false })
+}
 
 /* 文本镜像（数组 ↔ 逗号串） */
 const ignoreText = ref('')
@@ -129,12 +208,19 @@ async function load() {
     cfg.scraper.javbus = Object.assign({ base_url: '', cookie: '' }, cfg.scraper.javbus)
     cfg.scraper.javdb = Object.assign({ base_url: '', cookie: '' }, cfg.scraper.javdb)
     cfg.wiki = Object.assign({ languages: ['ja', 'zh'] }, c.wiki)
+    cfg.subtitles = Object.assign(
+      { enabled: true, providers: [], search_timeout: 12, max_workers: 10,
+        max_candidates: 24, cache_ttl: 300, max_variants: 4, custom_sources: [] },
+      c.subtitles,
+    )
     cfg.online_sites = Array.isArray(c.online_sites) ? c.online_sites : []
     // 首次使用（后端尚无任何站点配置）时，预填一组常见站点，用户可自由增删改
     if (!cfg.online_sites.length && !c.online_sites) {
       cfg.online_sites = PRESET_SITES.map((s) => ({ ...s }))
     }
     cfg.previews_quality = c.previews_quality || 'smart'
+    cfg.adcheck = Object.assign(
+      { enabled: true, threshold_likely: 65, threshold_suspect: 35 }, c.adcheck)
 
     ignoreText.value = (cfg.library.ignore_keywords || []).join(', ')
     extText.value = (cfg.library.video_extensions || []).join(', ')
@@ -176,6 +262,7 @@ async function load() {
     loadSecurity()
     loadAsr()
     loadExtStatus()
+    loadSubSources()
     // 先拿到「是否已设置简单密码」，否则解锁方式下拉的校验会误判
     await loadPinStatus()
     state.config = cfg
@@ -191,6 +278,11 @@ async function saveLibrary() {
     const patch = {
       // ffmpeg_path 已迁到「AI 中心 → 扩展组件」编辑；这里不回写，避免用旧值覆盖
       previews_quality: cfg.previews_quality || 'smart',
+      adcheck: {
+        enabled: !!cfg.adcheck.enabled,
+        threshold_likely: Math.max(10, Math.min(100, Number(cfg.adcheck.threshold_likely) || 65)),
+        threshold_suspect: Math.max(5, Math.min(100, Number(cfg.adcheck.threshold_suspect) || 35)),
+      },
       library: {
         paths: cfg.library.paths || [],
         min_size_mb: Number(cfg.library.min_size_mb) || 0,
@@ -1355,6 +1447,22 @@ onMounted(async () => {
               <button class="btn" :disabled="regenPv" @click="regeneratePreviews">{{ $t('settings.regenPreviewBtn') }}</button>
               <span class="hint">{{ $t('settings.regenPreviewHint') }}</span>
             </div>
+            <!-- 广告片检测：判定阈值（真正的检测入口在 维护 → 广告筛查） -->
+            <div class="field">
+              <label class="toggle">
+                <input type="checkbox" v-model="cfg.adcheck.enabled" @change="saveLibrary" /><span class="track"></span>
+              </label>
+              <span>{{ $t('settings.adCheck') }}</span>
+              <div class="hstack">
+                <input type="number" v-model="cfg.adcheck.threshold_likely" min="10" max="100"
+                       style="width:90px" @change="saveLibrary" />
+                <span class="hint">{{ $t('settings.adLikelyAt') }}</span>
+                <input type="number" v-model="cfg.adcheck.threshold_suspect" min="5" max="100"
+                       style="width:90px" @change="saveLibrary" />
+                <span class="hint">{{ $t('settings.adSuspectAt') }}</span>
+              </div>
+              <span class="hint">{{ $t('settings.adCheckHint') }}</span>
+            </div>
             <div class="field">
               <label class="toggle">
                 <input type="checkbox" v-model="autoScan" @change="saveLibrary" /><span class="track"></span>
@@ -1721,6 +1829,102 @@ onMounted(async () => {
           </div>
           <div class="panel-foot">
             <button class="btn primary" :disabled="savingWiki" @click="saveWiki">{{ $t('settings.wikiSave') }}</button>
+          </div>
+        </div>
+      </template>
+
+      <!-- ============ 在线字幕源 ============ -->
+      <template v-else-if="tab === 'subtitles'">
+        <div class="panel">
+          <div class="panel-head">
+            {{ $t('settings.subSourcesTitle') }}
+            <span class="sub">{{ $t('settings.subSourcesSub') }}</span>
+          </div>
+          <div class="panel-body">
+            <div class="field-row checkbox">
+              <label>{{ $t('settings.subEnabled') }}</label>
+              <label class="toggle"><input type="checkbox" v-model="cfg.subtitles.enabled" /><span class="track"></span></label>
+            </div>
+            <div v-for="s in subSources" :key="s.id" class="prov">
+              <label class="toggle"><input type="checkbox" v-model="subOn[s.id]" /><span class="track"></span></label>
+              <div class="prov-main">
+                <div class="prov-name">
+                  {{ s.label }} <code>{{ s.id }}</code>
+                  <span v-if="s.needs_key && s.configured" class="badge ok">{{ $t('settings.subKeySet') }}</span>
+                  <span v-else-if="s.needs_key" class="badge">{{ $t('settings.subKeyMissing') }}</span>
+                </div>
+                <div class="prov-desc">{{ $t('settings.subSourceDesc.' + s.id) }}</div>
+              </div>
+              <div v-if="SUB_KEY_OF[s.id]" class="field">
+                <input v-model="subKeys[SUB_KEY_OF[s.id]]" type="password" autocomplete="new-password"
+                       :placeholder="s.configured ? $t('settings.subKeySaved') : $t('settings.subKeyPh')" />
+              </div>
+            </div>
+            <div class="prov">
+              <label class="toggle"><input type="checkbox" v-model="subOn.custom" /><span class="track"></span></label>
+              <div class="prov-main">
+                <div class="prov-name">{{ $t('settings.subCustom') }} <code>custom</code></div>
+                <div class="prov-desc">{{ $t('settings.subSourceDesc.custom') }}</div>
+              </div>
+            </div>
+            <p class="muted">{{ $t('settings.subParallelHint') }}</p>
+          </div>
+        </div>
+
+        <div v-if="subOn.custom" class="panel">
+          <div class="panel-head">
+            {{ $t('settings.subCustomTitle') }}
+            <span class="sub">{{ $t('settings.subCustomSub') }}</span>
+          </div>
+          <div class="panel-body">
+            <div v-for="(s, i) in cfg.subtitles.custom_sources" :key="i" class="site">
+              <div class="field">
+                <label>{{ $t('settings.subCustomName') }}</label>
+                <input v-model="s.name" :placeholder="$t('settings.subCustomNamePh')" />
+                <label class="toggle"><input type="checkbox" v-model="s.enabled" /><span class="track"></span></label>
+                <button class="btn tiny ghost" @click="cfg.subtitles.custom_sources.splice(i, 1)">
+                  {{ $t('settings.subCustomDel') }}
+                </button>
+              </div>
+              <div class="field"><label>{{ $t('settings.subCustomUrl') }}</label>
+                <input v-model="s.url" placeholder="https://example.com/api?q={code}" /></div>
+              <div class="field"><label>{{ $t('settings.subCustomRoot') }}</label>
+                <input v-model="s.root" placeholder="data.items" /></div>
+              <div class="field"><label>{{ $t('settings.subCustomFields') }}</label>
+                <input v-model="s.field_map" placeholder="name,url,lang,ext" /></div>
+              <div class="field"><label>{{ $t('settings.subCustomHosts') }}</label>
+                <input v-model="s.hosts" placeholder="example.com, cdn.example.com" /></div>
+            </div>
+            <button class="btn tiny" @click="addCustomSource">{{ $t('settings.subCustomAdd') }}</button>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-head">{{ $t('settings.subPerfTitle') }}</div>
+          <div class="panel-body">
+            <div class="field-row">
+              <label>{{ $t('settings.subTimeout') }}</label>
+              <div class="hstack"><input type="number" min="2" max="60" v-model="cfg.subtitles.search_timeout" style="width:100px" /><span class="muted">{{ $t('settings.subTimeoutSub') }}</span></div>
+            </div>
+            <div class="field-row">
+              <label>{{ $t('settings.subWorkers') }}</label>
+              <div class="hstack"><input type="number" min="1" max="32" v-model="cfg.subtitles.max_workers" style="width:100px" /><span class="muted">{{ $t('settings.subWorkersSub') }}</span></div>
+            </div>
+            <div class="field-row">
+              <label>{{ $t('settings.subVariants') }}</label>
+              <div class="hstack"><input type="number" min="1" max="8" v-model="cfg.subtitles.max_variants" style="width:100px" /><span class="muted">{{ $t('settings.subVariantsSub') }}</span></div>
+            </div>
+            <div class="field-row">
+              <label>{{ $t('settings.subMaxCandidates') }}</label>
+              <div class="hstack"><input type="number" min="1" max="100" v-model="cfg.subtitles.max_candidates" style="width:100px" /><span class="muted">{{ $t('settings.subMaxCandidatesSub') }}</span></div>
+            </div>
+            <div class="field-row">
+              <label>{{ $t('settings.subCacheTtl') }}</label>
+              <div class="hstack"><input type="number" min="0" max="86400" v-model="cfg.subtitles.cache_ttl" style="width:100px" /><span class="muted">{{ $t('settings.subCacheTtlSub') }}</span></div>
+            </div>
+          </div>
+          <div class="panel-foot">
+            <button class="btn primary" :disabled="saving" @click="saveSubtitles">{{ $t('settings.subSave') }}</button>
           </div>
         </div>
       </template>

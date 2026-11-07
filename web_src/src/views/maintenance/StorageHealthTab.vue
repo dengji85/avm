@@ -66,10 +66,20 @@ async function runMergeGenres() {
   } catch (e) { toast(e.message, 'err') } finally { gnBusy.value = false }
 }
 
-/* 孤儿数据：数据库里指向已删影片的悬空行 + 磁盘上无主的封面 / 背景。
-   磁盘文件在删除前会按库内引用重新核对一遍，不依赖前端这份统计。 */
+/* 孤儿与残留：正常删除影片时媒体文件会一起清掉，这里只兜底「历史遗留 / 手动改库 /
+   程序异常退出」。磁盘文件在删除前会按库内引用重新核对一遍，不依赖前端这份统计。 */
 const orphans = ref(null)
 const orphanBusy = ref(false)
+// 与后端 orphan_media_stats 的键一一对应；db 那一项是数据库悬空行，不带体积
+const ORPHAN_KINDS = [
+  { key: 'covers', label: 'maint.orphanCovers', withSize: true },
+  { key: 'fanarts', label: 'maint.orphanFanarts', withSize: true },
+  { key: 'previews', label: 'maint.orphanPreviews', withSize: true },
+  { key: 'subs', label: 'maint.orphanSubs', withSize: true },
+  { key: 'adcheck', label: 'maint.orphanAdcheck', withSize: true },
+  { key: 'remux', label: 'maint.orphanRemux', withSize: true },
+  { key: 'db', label: 'maint.orphanDb' },
+]
 async function loadOrphans() {
   try { orphans.value = await getOrphans() } catch (e) { orphans.value = null }
 }
@@ -82,6 +92,20 @@ function orphanCount(kind) {
   }
   return ((o[kind] && o[kind].files) || 0)
 }
+const orphanBytes = (kind) => ((orphans.value && orphans.value[kind] && orphans.value[kind].bytes) || 0)
+const orphanFiles = computed(() => (orphans.value && orphans.value.total && orphans.value.total.files) || 0)
+const orphanSize = computed(() => (orphans.value && orphans.value.total && orphans.value.total.bytes) || 0)
+const orphanHasAny = computed(() => orphanFiles.value > 0 || orphanCount('db') > 0)
+
+/* 清理成功后就地刷新两个面板：孤儿少了，「软件数据占用」的数字也变了 */
+async function afterOrphanClean(r) {
+  const dbN = Object.values(r.db || {}).reduce((a, b) => a + (Number(b) || 0), 0)
+  const mediaN = ORPHAN_KINDS.filter((k) => k.key !== 'db')
+    .reduce((a, k) => a + (Number(r[k.key]) || 0), 0)
+  toast(t('maint.orphanCleaned', { n: dbN + mediaN }), 'ok')
+  await loadOrphans()
+  await loadSoftware()
+}
 async function cleanOrph(kind) {
   const n = orphanCount(kind)
   if (!n) return
@@ -90,13 +114,19 @@ async function cleanOrph(kind) {
   if (!ok) return
   orphanBusy.value = true
   try {
-    const r = await cleanOrphans({ targets: [kind] })
-    const done = kind === 'db'
-      ? Object.values(r.db || {}).reduce((a, b) => a + (Number(b) || 0), 0)
-      : (Number(r[kind]) || 0)
-    toast(t('maint.orphanCleaned', { n: done }), 'ok')
-    await loadOrphans()
-    if (kind !== 'db') await loadSoftware()
+    await afterOrphanClean(await cleanOrphans({ targets: [kind] }))
+  } catch (e) { toast(e.message, 'err') } finally { orphanBusy.value = false }
+}
+async function cleanAllOrphans() {
+  const kinds = ORPHAN_KINDS.filter((k) => orphanCount(k.key)).map((k) => k.key)
+  if (!kinds.length) return
+  const ok = await confirmDialog(t('maint.orphanCleanAllTitle'),
+    t('maint.orphanCleanAllDesc', { n: orphanFiles.value, s: fmtSize(orphanSize.value) }),
+    { danger: true, okText: t('maint.confirmClean') })
+  if (!ok) return
+  orphanBusy.value = true
+  try {
+    await afterOrphanClean(await cleanOrphans({ targets: kinds }))
   } catch (e) { toast(e.message, 'err') } finally { orphanBusy.value = false }
 }
 
@@ -140,26 +170,63 @@ async function loadSoftware() {
   try { sw.value = await getSoftwareStorage() } catch (e) { toast(e.message, 'err') }
   finally { swLoading.value = false }
 }
-const DIR_ORDER = ['covers', 'previews', 'avatars', 'fanarts', 'temp', 'db', 'config']
 const DIR_LABELS = {
   covers: 'maint.swCovers', previews: 'maint.swPreviews', avatars: 'maint.swAvatars',
-  fanarts: 'maint.swFanarts', temp: 'maint.swTemp', db: 'maint.swDb', config: 'maint.swConfig',
+  fanarts: 'maint.swFanarts', subs: 'maint.swSubs', adcheck: 'maint.swAdcheck',
+  db: 'maint.swDb', config: 'maint.swConfig',
+  temp: 'maint.swTemp', remux: 'maint.swRemux', asr: 'maint.swAsr',
+  chrome: 'maint.swChrome', logs: 'maint.swLogs', backup: 'maint.swBackup',
+  ext: 'maint.swExt', models: 'maint.swModels',
 }
+const DIR_ORDER = ['covers', 'previews', 'avatars', 'fanarts', 'subs', 'adcheck', 'db', 'config',
+  'temp', 'remux', 'asr', 'chrome', 'logs', 'backup', 'ext', 'models']
+/* 三组分开看：内容数据动不得、缓存可清、组件删了功能就坏（只展示不清理） */
+const SW_GROUPS = [
+  ['data', 'maint.swGroupData', 'maint.swGroupDataHint'],
+  ['cache', 'maint.swGroupCache', 'maint.swGroupCacheHint'],
+  ['component', 'maint.swGroupComponent', 'maint.swGroupComponentHint'],
+]
 const swDirs = computed(() => {
   if (!sw.value) return []
   const map = {}
   ;(sw.value.dirs || []).forEach((d) => { map[d.label] = d })
   return DIR_ORDER.filter((k) => map[k]).map((k) => map[k])
 })
+const swDirsOf = (g) => swDirs.value.filter((d) => (d.group || 'data') === g)
+const swGroupBytes = (g) => swDirsOf(g).reduce((s, d) => s + (Number(d.bytes) || 0), 0)
+const swGroupFiles = (g) => swDirsOf(g).reduce((s, d) => s + (Number(d.files) || 0), 0)
+
+/* 可清理项：这里只放「缓存 / 临时 / 日志」这类删了不影响任何数据的；
+   孤儿（无主封面、孤儿预览图、孤儿字幕、孤儿证据图等）统一在下方「孤儿与残留」面板处理，
+   避免同一个东西在两个地方各有一个清理按钮。 */
+const CLEAN_ITEMS = [
+  { key: 'temp', label: 'maint.cleanTemp', safe: true },
+  { key: 'asr', label: 'maint.cleanAsr', safe: true },
+  { key: 'remux', label: 'maint.cleanRemux', safe: false, desc: 'maint.cleanRemuxDesc' },
+  { key: 'chrome', label: 'maint.cleanChrome', safe: false, desc: 'maint.cleanChromeDesc' },
+  { key: 'logs', label: 'maint.cleanLogs', safe: false },
+  { key: 'backup', label: 'maint.cleanBackup', safe: false, desc: 'maint.cleanBackupDesc' },
+]
+const SAFE_KEYS = CLEAN_ITEMS.filter((i) => i.safe).map((i) => i.key)
+const cleanItems = computed(() => {
+  const c = sw.value && sw.value.cleanable
+  if (!c) return []
+  return CLEAN_ITEMS.map((i) => ({
+    key: i.key, label: i.label,
+    files: (c[i.key] && c[i.key].files) || 0,
+    bytes: (c[i.key] && c[i.key].bytes) || 0,
+  })).filter((it) => it.files || it.bytes)
+})
+
 async function cleanOne(target, key) {
-  const cfg = {
-    temp: { title: t('maint.cleanTempTitle'), desc: t('maint.cleanTempDesc') },
-    preview_orphan: { title: t('maint.cleanOrphanTitle'), desc: t('maint.cleanOrphanDesc') },
-    preview_all: { title: t('maint.cleanPreviewTitle'), desc: t('maint.cleanPreviewDesc'), danger: true },
+  const special = {
+    preview_all: { title: t('maint.cleanPreviewTitle'), desc: t('maint.cleanPreviewDesc') },
     db_vacuum: { title: t('maint.cleanDbTitle'), desc: t('maint.cleanDbDesc') },
   }[key]
-  const size = (sw.value && sw.value.cleanable[key] && sw.value.cleanable[key].bytes) || 0
-  const ok = await confirmDialog(cfg.title, cfg.desc, { danger: !!cfg.danger, okText: t('maint.confirmClean') })
+  const item = CLEAN_ITEMS.find((i) => i.key === key)
+  const title = special ? special.title : (item ? t(item.label) : t('maint.swCleanable'))
+  const desc = special ? special.desc : t((item && item.desc) || 'maint.cleanGenericDesc')
+  const ok = await confirmDialog(title, desc, { danger: true, okText: t('maint.confirmClean') })
   if (!ok) return
   swCleaning.value = true
   try {
@@ -170,25 +237,18 @@ async function cleanOne(target, key) {
   finally { swCleaning.value = false }
 }
 async function cleanAllSafe() {
-  const clean = sw.value && sw.value.cleanable
-  const n = (clean && clean.temp ? clean.temp.files : 0) + (clean && clean.preview_orphan ? clean.preview_orphan.files : 0)
-  const ok = await confirmDialog(t('maint.cleanSafeTitle'), t('maint.cleanSafeDesc', { n }), { danger: true, okText: t('maint.confirmClean') })
+  const n = cleanItems.value.filter((it) => SAFE_KEYS.includes(it.key))
+    .reduce((s, it) => s + it.files, 0)
+  const ok = await confirmDialog(t('maint.cleanSafeTitle'), t('maint.cleanSafeDesc', { n }),
+    { danger: true, okText: t('maint.confirmClean') })
   if (!ok) return
   swCleaning.value = true
   try {
-    const r = await cleanSoftwareStorage(['temp', 'preview_orphan', 'db_vacuum'])
+    const r = await cleanSoftwareStorage([...SAFE_KEYS, 'db_vacuum'])
     toast(t('maint.cleaned', { n: r.removed || 0 }), 'ok')
     await loadSoftware(); await load()
   } catch (e) { toast(e.message, 'err') }
   finally { swCleaning.value = false }
-}
-function cleanableFiles(key) {
-  const c = sw.value && sw.value.cleanable && sw.value.cleanable[key]
-  return (c && c.files) || 0
-}
-function cleanableBytes(key) {
-  const c = sw.value && sw.value.cleanable && sw.value.cleanable[key]
-  return (c && c.bytes) || 0
 }
 
 const QUALITY_GROUPS = [
@@ -242,11 +302,18 @@ onMounted(() => { load(); loadSoftware(); loadRoots(); loadOrphans() })
       <div class="panel-body">
         <div v-if="swLoading" class="empty compact"><span class="spinner large"></span></div>
         <template v-else-if="sw">
-          <div class="sw-cards">
-            <div v-for="d in swDirs" :key="d.label" class="sw-card">
-              <div class="sw-name">{{ $t(DIR_LABELS[d.label] || d.label) }}</div>
-              <div class="sw-size">{{ fmtSize(d.bytes) }}</div>
-              <div class="sw-files">{{ d.files }} {{ $t('maint.files') }}</div>
+          <div v-for="g in SW_GROUPS" :key="g[0]" class="sw-group">
+            <div v-if="swDirsOf(g[0]).length" class="sw-group-head">
+              <b>{{ $t(g[1]) }}</b>
+              <span class="muted">{{ fmtSize(swGroupBytes(g[0])) }} · {{ swGroupFiles(g[0]) }} {{ $t('maint.files') }}</span>
+              <span class="sw-group-hint">{{ $t(g[2]) }}</span>
+            </div>
+            <div v-if="swDirsOf(g[0]).length" class="sw-cards">
+              <div v-for="d in swDirsOf(g[0])" :key="d.label" class="sw-card">
+                <div class="sw-name">{{ $t(DIR_LABELS[d.label] || d.label) }}</div>
+                <div class="sw-size">{{ fmtSize(d.bytes) }}</div>
+                <div class="sw-files">{{ d.files }} {{ $t('maint.files') }}</div>
+              </div>
             </div>
           </div>
           <div class="sw-total">
@@ -256,14 +323,13 @@ onMounted(() => { load(); loadSoftware(); loadRoots(); loadOrphans() })
 
           <div class="sw-clean">
             <div class="sw-clean-title">{{ $t('maint.swCleanable') }}</div>
-            <div v-if="!cleanableFiles('temp') && !cleanableFiles('preview_orphan')" class="muted sm">{{ $t('maint.swCleanNone') }}</div>
-            <div v-if="cleanableFiles('temp')" class="sw-clean-item">
-              <span>{{ $t('maint.cleanTemp') }} · {{ fmtSize(cleanableBytes('temp')) }}</span>
-              <button class="btn tiny" :disabled="swCleaning" @click="cleanOne('temp','temp')">{{ $t('maint.clean') }}</button>
-            </div>
-            <div v-if="cleanableFiles('preview_orphan')" class="sw-clean-item">
-              <span>{{ $t('maint.cleanOrphan') }} · {{ fmtSize(cleanableBytes('preview_orphan')) }}</span>
-              <button class="btn tiny" :disabled="swCleaning" @click="cleanOne('preview_orphan','preview_orphan')">{{ $t('maint.clean') }}</button>
+            <div v-if="!cleanItems.length" class="muted sm">{{ $t('maint.swCleanNone') }}</div>
+            <div v-for="it in cleanItems" :key="it.key" class="sw-clean-item">
+              <span>
+                {{ $t(it.label) }} · {{ fmtSize(it.bytes) }}
+                <span class="muted">（{{ it.files }} {{ $t('maint.files') }}）</span>
+              </span>
+              <button class="btn tiny" :disabled="swCleaning" @click="cleanOne(it.key, it.key)">{{ $t('maint.clean') }}</button>
             </div>
             <div class="sw-clean-row">
               <button class="btn tiny danger" :disabled="swCleaning" @click="cleanAllSafe">{{ $t('maint.cleanSafe') }}</button>
@@ -413,20 +479,20 @@ onMounted(() => { load(); loadSoftware(); loadRoots(); loadOrphans() })
         <div v-if="!orphans" class="empty compact"><div class="desc">{{ $t('maint.orphanHint') }}</div></div>
         <template v-else>
           <div class="orph-row">
-            <button class="orph-card" :class="{ zero: !orphanCount('db') }"
-                    :disabled="orphanBusy || !orphanCount('db')" @click="cleanOrph('db')">
-              <b class="tabular">{{ orphanCount('db') }}</b>
-              <span>{{ $t('maint.orphanDb') }}</span>
+            <button v-for="k in ORPHAN_KINDS" :key="k.key" class="orph-card"
+                    :class="{ zero: !orphanCount(k.key) }"
+                    :disabled="orphanBusy || !orphanCount(k.key)" @click="cleanOrph(k.key)">
+              <b class="tabular">{{ orphanCount(k.key) }}</b>
+              <span>
+                {{ $t(k.label) }}
+                <template v-if="k.withSize && orphanBytes(k.key)"> · {{ fmtSize(orphanBytes(k.key)) }}</template>
+              </span>
             </button>
-            <button class="orph-card" :class="{ zero: !orphanCount('covers') }"
-                    :disabled="orphanBusy || !orphanCount('covers')" @click="cleanOrph('covers')">
-              <b class="tabular">{{ orphanCount('covers') }}</b>
-              <span>{{ $t('maint.orphanCovers', { s: fmtSize((orphans.covers || {}).bytes) }) }}</span>
-            </button>
-            <button class="orph-card" :class="{ zero: !orphanCount('fanarts') }"
-                    :disabled="orphanBusy || !orphanCount('fanarts')" @click="cleanOrph('fanarts')">
-              <b class="tabular">{{ orphanCount('fanarts') }}</b>
-              <span>{{ $t('maint.orphanFanarts', { s: fmtSize((orphans.fanarts || {}).bytes) }) }}</span>
+          </div>
+          <div class="orph-sum">
+            <span class="muted sm">{{ $t('maint.orphanTotal', { n: orphanFiles, s: fmtSize(orphanSize) }) }}</span>
+            <button class="btn tiny danger" :disabled="orphanBusy || !orphanHasAny" @click="cleanAllOrphans">
+              {{ orphanBusy ? $t('maint.checking') : $t('maint.orphanCleanAll') }}
             </button>
           </div>
           <p class="muted sm orph-tip">{{ $t('maint.orphanTip') }}</p>
@@ -468,6 +534,11 @@ onMounted(() => { load(); loadSoftware(); loadRoots(); loadOrphans() })
             </div>
           </div>
         </template>
+        <!-- 边界说明：这里只按文件名 / 体积判，认不出「正片内嵌广告」，给出入口 -->
+        <div class="q-scope">
+          <span>{{ $t('maint.qualityAdHint') }}</span>
+          <button class="btn tiny ghost" @click="state.maintTab = 'ad'">{{ $t('maint.gotoAdCheck') }} →</button>
+        </div>
       </div>
     </div>
 
@@ -481,6 +552,11 @@ onMounted(() => { load(); loadSoftware(); loadRoots(); loadOrphans() })
 .sh { display: flex; flex-direction: column; gap: var(--sp-4); }
 .dist-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: var(--sp-4); }
 .sw-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: var(--sp-2); margin-bottom: var(--sp-3); }
+/* 数据 / 缓存 / 组件三组：每组一行标题 + 合计，避免十几张卡片平铺分不清性质 */
+.sw-group { margin-bottom: var(--sp-2); }
+.sw-group-head { display: flex; align-items: baseline; gap: var(--sp-2); flex-wrap: wrap; margin-bottom: var(--sp-2); }
+.sw-group-head b { font-size: var(--fs-sm); color: var(--c-text-2); }
+.sw-group-hint { flex: 1 1 100%; font-size: var(--fs-xs); color: var(--c-text-3); }
 .sw-card { display: flex; flex-direction: column; gap: 2px; padding: var(--sp-2) var(--sp-3); border-radius: var(--r-md); background: var(--c-surface-2); border: 1px solid var(--c-line); }
 .sw-name { font-size: var(--fs-xs); color: var(--c-text-3); }
 .sw-size { font-size: var(--fs-md); font-weight: 650; color: var(--c-text); font-family: var(--font-mono, monospace); }
@@ -495,6 +571,14 @@ onMounted(() => { load(); loadSoftware(); loadRoots(); loadOrphans() })
 /* 类型归一按钮行 */
 .gn-row { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; padding-top: var(--sp-2); border-top: 1px dashed var(--c-line); }
 .gn-row .muted { flex: 1; min-width: 220px; }
+/* 劣质片面板底部的边界说明：指向内容级广告筛查 */
+.q-scope {
+  display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap;
+  margin-top: var(--sp-3); padding-top: var(--sp-3);
+  border-top: 1px dashed var(--c-line);
+  font-size: var(--fs-xs); color: var(--c-text-3);
+}
+.q-scope > span { flex: 1; min-width: 240px; }
 
 /* 孤儿数据卡片 */
 .orph-row { display: flex; gap: var(--sp-2); flex-wrap: wrap; }
@@ -503,6 +587,8 @@ onMounted(() => { load(); loadSoftware(); loadRoots(); loadOrphans() })
 .orph-card.zero { opacity: .5; cursor: default; }
 .orph-card b { font-size: var(--fs-xl); font-weight: 650; }
 .orph-card span { font-size: var(--fs-xs); color: var(--c-text-3); text-align: center; }
+.orph-sum { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; margin-top: var(--sp-3); }
+.orph-sum > span { flex: 1; min-width: 200px; }
 .orph-tip { margin-top: var(--sp-2); }
 
 /* 存储位置不可用提示条 */

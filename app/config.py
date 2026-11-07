@@ -85,6 +85,21 @@ DEFAULT_ONLINE_SITES: List[Dict[str, Any]] = [
 DEFAULT_CONFIG: Dict[str, Any] = {
     # 预览图密度：smart=按时长自适应 / low=稀疏省空间 / high=精细（影响抽帧张数）
     "previews_quality": "smart",
+    # 广告片检测（内容级，见 app/adcheck.py）：抽帧统计「片头/片尾/整片的文字条比例」，
+    # 用于找出片头拼宣传片、全程带跑马灯的劣质片源。阈值越高越保守。
+    "adcheck": {
+        "enabled": True,
+        "head_seconds": 240.0,      # 片头扫描时长（秒）
+        "head_interval": 2.0,       # 片头抽帧间隔（秒）：越小定位越准，加密几乎不增加耗时
+        "tail_seconds": 110.0,      # 片尾扫描时长（秒）
+        "tail_interval": 4.0,       # 片尾抽帧间隔（秒）
+        "body_frames": 8,           # 片中基准帧数（用于算「片头 vs 片中」比值）
+        "workers": 4,               # 片中基准段的 seek 并发
+        "threshold_likely": 65,     # ≥ 该分：高度疑似广告片
+        "threshold_suspect": 35,    # ≥ 该分：可疑
+        "keep_sheet": True,         # 保留证据拼版（data/adcheck/<movie_id>.jpg）
+        "max_sheet_width": 2400,    # 证据拼版最大宽度（像素）
+    },
     # 常用在线站点：详情页一键打开该影片在各站的页面
     "online_sites": copy.deepcopy(DEFAULT_ONLINE_SITES),
     "library": {
@@ -119,16 +134,40 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "follow_symlinks": False,
     },
     # 在线字幕匹配：只按番号出站查询，绝不上传文件名 / 路径 / 视频内容。
-    # P0 提供单部影片的手动搜索 / 选择 / 下载；批量任务与自动策略后续阶段再加。
+    # 多个源并行检索、限时返回结果，再跨源择优；任何单源失败都不影响其它源。
     "subtitles": {
         "enabled": True,
-        # 内置源：subtitlecat（按番号索引，主力）/ thunder（迅雷，补充且偶发返回空）
-        "providers": ["subtitlecat", "thunder"],
-        # 单次请求超时（秒）与每个源的请求间隔（毫秒），避免把字幕站打挂
+        # 内置源：subtitlecat（按番号聚合，主力）/ thunder（迅雷中文补充）
+        # opensubtitles（全球多语言，需免费 API Key）/ assrt（伪射手中文，需免费 Token）
+        # custom（自定义 JSON 字幕 API，可配多个实例）
+        "providers": ["subtitlecat", "thunder", "opensubtitles", "assrt", "custom"],
+        # 升级前只启用过旧的两源时，由 _migrate_legacy 一次性补齐新源
+        "sources_migrated_v2": False,
+        # 单次 HTTP 超时（秒）与每个源的请求间隔（毫秒），避免把字幕站打挂
         "timeout": 15,
         "delay_ms": 800,
         # 单部影片最多展示多少条候选
         "max_candidates": 24,
+        # 一次搜索的总时限（秒）：源再多也只等这么久，慢源到点直接放弃
+        "search_timeout": 12,
+        "max_workers": 10,
+        # 番号写法：主写法（原样）查不够才并行试备用写法
+        "max_variants": 4,
+        "variant_rounds": 2,
+        "enough_candidates": 6,
+        # 搜索结果短缓存（秒），重复点「搜索」不再重复出站；0=关闭
+        "cache_ttl": 300,
+        # 单源抓取上限，防止模糊搜索把菜单塞满
+        "max_per_source": 20,
+        "per_page": 6,
+        "max_pages": 4,
+        # 语言偏好只影响排序，不用来过滤：其它语种可交给 AI 翻译
+        "lang_priority": ["简体中文", "日中双语", "繁体中文", "中文", "日文", "英文"],
+        # 凭据：GET /config 不下发，PUT /config 传空串表示不修改
+        "opensubtitles_key": "",
+        "assrt_token": "",
+        # 自定义字幕源实例：[{name,url,root,fields,hosts,headers,require_code,enabled}]
+        "custom_sources": [],
         # 留空则沿用 scraper.proxy
         "proxy": "",
         "user_agent": DEFAULT_UA,
@@ -433,6 +472,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         # 语言：automatic 检测在短音频/环境音上很容易跑偏（实测把日语片判成挪威语），
         # 所以默认固定 ja；英文/中文片请自行改成 en / zh
         "language": "ja",
+        # 识别档位：accurate（beam=5，默认）/ fast（beam=1，快 2~3 倍）
+        "quality": "accurate",
         # 依赖目录（pip --target 的安装位置）。留空则用系统 Python 环境。
         # 例：D:\program my\avm-asr\libs
         "libs_dir": "",
@@ -571,6 +612,18 @@ def _migrate_legacy(cfg: Dict[str, Any]) -> bool:
         if names and str(ai.get("default_model") or "") not in names:
             ai["default_model"] = names[0]
             changed = True
+    # 在线字幕源扩容（OpenSubtitles / ASSRT / 自定义）：旧配置里 providers 只有
+    # 两源，deep merge 不会覆盖已有数组，升级后新源会一直不启用。这里补齐一次并
+    # 打标记，之后用户可以自由增删，不再被改回去。
+    sub = cfg.get("subtitles")
+    if isinstance(sub, dict) and not sub.get("sources_migrated_v2"):
+        providers = [str(x) for x in (sub.get("providers") or [])]
+        for name in ("opensubtitles", "assrt", "custom"):
+            if name not in providers:
+                providers.append(name)
+        sub["providers"] = providers
+        sub["sources_migrated_v2"] = True
+        changed = True
     return changed
 
 

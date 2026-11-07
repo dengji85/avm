@@ -175,8 +175,54 @@ def ass_to_vtt(text: str) -> str:
     return "\n".join(out).strip() + "\n"
 
 
-def file_to_vtt(path: str) -> str:
-    """按扩展名选择转换器；读不到返回空串。"""
+_VTT_TS = re.compile(
+    r"^(\d{1,3}):(\d{2}):(\d{2})\.(\d{3})\s*-->\s*"
+    r"(\d{1,3}):(\d{2}):(\d{2})\.(\d{3})(.*)$")
+
+
+def _vtt_seconds(h: str, m: str, s: str, ms: str) -> float:
+    return int(h) * 3600 + int(m) * 60 + int(s) + int(ms) / 1000.0
+
+
+def _fmt_vtt_ts(sec: float) -> str:
+    ms = max(0, int(round(sec * 1000)))
+    h, rem = divmod(ms, 3600000)
+    m, rem = divmod(rem, 60000)
+    s, ms = divmod(rem, 1000)
+    return "%02d:%02d:%02d.%03d" % (h, m, s, ms)
+
+
+def transform_vtt(text: str, offset_ms: float = 0, scale: float = 1.0,
+                  anchor_sec: float = 0.0) -> str:
+    """在生成好的 WebVTT 上统一平移 / 线性缩放时间轴。
+
+    t' = anchor + (t - anchor) * scale + offset；anchor 点保持不动。
+    放在 VTT 之后是为了 SRT / ASS 两条转换分支共用同一套逻辑，不漏 ASS。
+    不改磁盘上的原字幕文件，也不影响 AI 剧情问答读取的原始时间轴。
+    """
+    if not offset_ms and abs(float(scale or 1.0) - 1.0) < 1e-6:
+        return text
+    scale = float(scale or 1.0)
+    offset = float(offset_ms or 0) / 1000.0
+    anchor = float(anchor_sec or 0)
+    out: List[str] = []
+    for line in (text or "").splitlines():
+        m = _VTT_TS.match(line.strip())
+        if not m:
+            out.append(line)
+            continue
+        g = m.groups()
+        start = max(0.0, anchor + (_vtt_seconds(*g[:4]) - anchor) * scale + offset)
+        end = max(0.0, anchor + (_vtt_seconds(*g[4:8]) - anchor) * scale + offset)
+        if end <= start:
+            end = start + 0.1
+        out.append("%s --> %s%s" % (_fmt_vtt_ts(start), _fmt_vtt_ts(end), g[8] or ""))
+    return "\n".join(out) + "\n"
+
+
+def file_to_vtt(path: str, offset_ms: float = 0, scale: float = 1.0,
+                anchor_sec: float = 0.0) -> str:
+    """按扩展名选择转换器并应用校准参数；读不到返回空串。"""
     try:
         if not os.path.isfile(path):
             return ""
@@ -187,6 +233,5 @@ def file_to_vtt(path: str) -> str:
     except OSError:
         return ""
     ext = os.path.splitext(path)[1].lower()
-    if ext in (".ass", ".ssa"):
-        return ass_to_vtt(raw)
-    return srt_to_vtt(raw)
+    built = ass_to_vtt(raw) if ext in (".ass", ".ssa") else srt_to_vtt(raw)
+    return transform_vtt(built, offset_ms, scale, anchor_sec)

@@ -93,6 +93,7 @@ function qstr(qs) {
 export const get = (p, qs) => api(p + qstr(qs))
 export const post = (p, body) => api(p, { method: 'POST', body })
 export const put = (p, body) => api(p, { method: 'PUT', body })
+export const patch = (p, body) => api(p, { method: 'PATCH', body })
 export const del = (p, qs) => api(p + qstr(qs), { method: 'DELETE' })
 
 /* ---------------- 静态资源地址 ---------------- */
@@ -180,6 +181,22 @@ export const exportNfo = (id, body = {}) => post(`/movies/${id}/nfo`, body)
 export const exportNfoBatch = (body = {}) => post('/nfo/export', body)
 export const exportNfoStatus = () => get('/nfo/export/status')
 export const exportNfoCancel = () => post('/nfo/export/cancel', {})
+
+/* ---------------- 广告片检测（内容级：片头/片尾/全片的文字条抽帧统计） ----------------
+   判据见 app/adcheck.py；结果里 level = clean / suspect / likely，
+   证据图 adSheetUrl(id) 是一张抽帧缩略图墙，可疑帧带红框。 */
+export const adCheckStart = (force = false, movieIds = []) =>
+  post('/adcheck/start', { force, movie_ids: movieIds })
+export const adCheckStatus = () => get('/adcheck/status')
+export const adCheckCancel = () => post('/adcheck/cancel', {})
+export const adCheckResults = (params = {}) => get('/adcheck/results', params)
+export const adCheckCounts = () => get('/adcheck/counts')
+export const adCheckResult = (id) => get(`/adcheck/${id}`)
+export const adCheckRunOne = (id) => post(`/adcheck/${id}/run`, {})
+export const adCheckIgnore = (id, ignored = true) => post(`/adcheck/${id}/ignore`, { ignored })
+export const adCheckDelete = (id) => del(`/adcheck/${id}`)
+export const adCheckClear = () => post('/adcheck/clear', {})
+export const adSheetUrl = (id) => `${API}/adcheck/${id}/sheet`
 /* Emby 联动（只做「刮削后刷新媒体库」，不参与播放） */
 export const embyStatus = () => get('/emby/status')
 export const embyTest = (body = {}) => post('/emby/test', body)
@@ -316,8 +333,10 @@ export const aiSuggestTags = (id) => post(`/ai/suggest-tags/${id}`, {})
 
 /* AI 字幕翻译：单部同步生成 */
 /* 单部字幕翻译：启动后台任务 → 轮询进度 → 可取消 */
-export const aiTranslate = (id, target = 'zh-Hans', bilingual = false) =>
-  post(`/ai/translate/${id}?target=${encodeURIComponent(target)}&bilingual=${bilingual ? '1' : '0'}`, {})
+/* subId：指定翻译某条已登记字幕（在线采纳后「翻译这一条」），不传则自动取材 */
+export const aiTranslate = (id, target = 'zh-Hans', bilingual = false, subId = null) =>
+  post(`/ai/translate/${id}?target=${encodeURIComponent(target)}&bilingual=${bilingual ? '1' : '0'}` +
+       (subId ? `&sub_id=${encodeURIComponent(subId)}` : ''), {})
 export const aiTranslateStatus = (id) => get(`/ai/translate/${id}`)
 export const aiTranslateCancel = (id) => post(`/ai/translate/${id}/cancel`, {})
 export const aiDeleteSubtitle = (id, subId) => del(`/movies/${id}/subtitles/${subId}`)
@@ -336,6 +355,23 @@ export const scanMovieSubtitles = (id) => post(`/movies/${id}/subtitles/scan`, {
 export const searchOnlineSubtitles = (id) => post(`/movies/${id}/subtitles/online-search`, {})
 export const fetchOnlineSubtitle = (id, candidateId) =>
   post(`/movies/${id}/subtitles/online-fetch`, { candidate_id: candidateId })
+/* 采纳前预览候选内容：服务端只下载到内存解析，不落盘、不登记 */
+/* offset/limit/q：滚动到底自动加载下一页；后续页走服务端内存缓存，不再联网 */
+export const previewOnlineSubtitle = (id, candidateId, params = {}) =>
+  post(`/movies/${id}/subtitles/online-preview`, { candidate_id: candidateId, ...params })
+/* 设置页：可选字幕源、启用状态与凭据是否已配置（不回显密钥） */
+export const listSubtitleSources = () => get('/subtitles/sources')
+/* 字幕校准：自动建议（只读）与保存本片偏移 / 缩放 / 屏幕位置 */
+export const suggestSubtitleSync = (id, subId) =>
+  post(`/movies/${id}/subtitles/${subId}/sync/suggest`, {})
+/* 一键锚点：把字幕第 N 条对齐到当前播放时间（只算 offset，不写库） */
+export const anchorSubtitleSync = (id, subId, body) =>
+  post(`/movies/${id}/subtitles/${subId}/sync/anchor`, body)
+/* 字幕条目列表（原始时间轴）：供用户挑出「应该对齐到当前画面」的那一句 */
+export const subtitleCueList = (id, subId, params = {}) =>
+  get(`/movies/${id}/subtitles/${subId}/cues`, params)
+export const saveSubtitleSync = (id, subId, body) =>
+  patch(`/movies/${id}/subtitles/${subId}/sync`, body)
 export const setSkipPoints = (id, body) => put(`/movies/${id}/skip`, body)
 /* AI 剧情问答与相似推荐 */
 export const aiAsk = (id, question) => post(`/ai/ask/${id}`, { question })
@@ -359,6 +395,8 @@ export const mtProviders = () => get('/metatube/providers')
 export const movieDialog = (id, preview = 0) => get(`/movies/${id}/dialog`, { preview })
 export const startMovieDialog = (id, body = {}) => post(`/movies/${id}/dialog`, body)
 export const deleteMovieDialog = (id) => del(`/movies/${id}/dialog`)
+/* 中途停止提取，保留已提取的内容（删除会连结果一起清掉） */
+export const cancelMovieDialog = (id) => post(`/movies/${id}/dialog/cancel`, {})
 /* 把提取的对白导出成草稿 SRT，并登记为字幕 */
 export const exportDialogSrt = (id) => post(`/movies/${id}/dialog/export-srt`, {})
 /* AI 提示词审查 / 修改，以及每次调用的提示词与原始返回 */

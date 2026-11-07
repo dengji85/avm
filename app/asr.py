@@ -261,10 +261,13 @@ def export_srt(movie_id: int, lang: str = "ja") -> Dict[str, Any]:
         raise RuntimeError("没有可导出的对白")
     with open(path, "w", encoding="utf-8") as f:
         f.write("\n".join(blocks))
-    from . import subtitles as subs_mod
+    from . import subqc, subtitles as subs_mod
     conn = connect()
     try:
-        added = subs_mod._register_subtitle(conn, movie_id, path, "asr")
+        # 语言直接写入标准码，不再靠 asr-ja.srt 的文件名反猜；改 asr.language
+        # 后导出的草稿字幕也能正确标成英文/中文。
+        added = subs_mod._register_subtitle(
+            conn, movie_id, path, "asr", lang=subqc.normalize_lang(lang))
         conn.commit()
     finally:
         conn.close()
@@ -733,14 +736,20 @@ def _run(movie_id: int, video: str, cfg: Dict[str, Any], size: str,
         _set_job(movie_id, status="done", percent=100,
                  message="完成：%d 段 / %d 字" % (kept, chars), error="")
     except Exception as e:
-        try:
-            import traceback
-            sys.stderr.write("[asr] extract failed (movie %s): %s\n%s\n"
-                             % (movie_id, e, traceback.format_exc()))
-        except Exception:
-            pass
-        _set_job(movie_id, status="error", percent=0,
-                 message="", error=str(e)[:400])
+        # 用户主动取消走的是「检查点抛 RuntimeError("已取消")」，不该显示成
+        # 提取失败；已写出的部分结果也保留，下次可继续用。
+        if _job_cancelled(movie_id):
+            _set_job(movie_id, status="cancelled", percent=0,
+                     message="已取消", error="")
+        else:
+            try:
+                import traceback
+                sys.stderr.write("[asr] extract failed (movie %s): %s\n%s\n"
+                                 % (movie_id, e, traceback.format_exc()))
+            except Exception:
+                pass
+            _set_job(movie_id, status="error", percent=0,
+                     message="", error=str(e)[:400])
     finally:
         try:
             os.remove(wav)

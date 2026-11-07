@@ -4,7 +4,7 @@ import {
   aiTranslate, aiTranslateStatus, aiTranslateCancel, aiDeleteSubtitle, subtitleFileUrl,
   aiAsk, aiAskHistory, aiSimilar, subtitleTracks, updateMovie,
   aiPrompts, aiSavePrompt, aiResetPrompt, aiTraces,
-  aiAsrStatus, movieDialog, startMovieDialog, deleteMovieDialog, exportDialogSrt,
+  aiAsrStatus, movieDialog, startMovieDialog, deleteMovieDialog, cancelMovieDialog, exportDialogSrt,
 } from '../api.js'
 import { t } from '../i18n/index.js'
 
@@ -224,14 +224,14 @@ export function useAiAssistant({ movieId, movie, toast, confirm, onChange }) {
     }
   }
 
-  async function translateSubs() {
+  async function translateSubs(subId = null) {
     if (subs.loading) return
     subs.loading = true
     subs.error = ''
     subs.percent = 0
     subs.message = ''
     try {
-      await aiTranslate(movieId.value, subs.target, subs.bilingual)
+      await aiTranslate(movieId.value, subs.target, subs.bilingual, subId)
       stopSubsPoll()
       subsTimer = setInterval(pollTransSubs, 1000)
     } catch (e) {
@@ -399,6 +399,17 @@ export function useAiAssistant({ movieId, movie, toast, confirm, onChange }) {
       const r = await startMovieDialog(movieId.value, { max_seconds: Number(maxSeconds) || 0 })
       applyDialog({ ...r, status: r.status || 'running' }, false)
       startDialogPoll()
+    } catch (e) {
+      dialog.error = e.message || t('ai.failed')
+    }
+  }
+
+  /** 中途取消提取：后端置标志，下一个检查点停下，已提取内容不清 */
+  async function cancelDialog() {
+    try {
+      const r = await cancelMovieDialog(movieId.value)
+      applyDialog(r, false)
+      toast(t('ai.dialogCancelled'), 'ok', 2500)
     } catch (e) {
       dialog.error = e.message || t('ai.failed')
     }
@@ -592,7 +603,7 @@ export function useAiAssistant({ movieId, movie, toast, confirm, onChange }) {
     ask, similar, prompts, traces, asr, dialog,
     loadPrompts, startEditPrompt, cancelPrompt, savePrompt, restorePrompt,
     toggleTrace, loadTrace,
-    loadAsrStatus, loadDialog, startDialog, toggleDialogText, deleteDialog, exportSrt, stopDialogPoll,
+    loadAsrStatus, loadDialog, startDialog, cancelDialog, toggleDialogText, deleteDialog, exportSrt, stopDialogPoll,
     refreshStatus, loadTracks, reset, timeToSeconds,
     generatePlot, applyPlot, discardPlot,
     suggestTags, toggleTag, pickAllTags, applyTags,

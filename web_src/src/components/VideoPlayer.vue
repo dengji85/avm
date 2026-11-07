@@ -1,10 +1,14 @@
 <script setup>
-import { ref, computed, onMounted, onBeforeUnmount, watch, nextTick } from 'vue'
+import { ref, reactive, computed, onMounted, onBeforeUnmount, watch, nextTick } from 'vue'
 import videojs from 'video.js'
 import 'video.js/dist/video-js.css'
-import { streamUrl, strmHlsUrl, streamInfo, setProgress, playMovie, markPlayed, startSession, updateSession, endSession, getPreviews, genPreviews, playbackInfo, prepareStream, prepareStreamStatus, subtitleTracks, setSkipPoints } from '../api.js'
+import { streamUrl, strmHlsUrl, streamInfo, setProgress, playMovie, markPlayed, startSession, updateSession, endSession, getPreviews, genPreviews, playbackInfo, prepareStream, prepareStreamStatus, subtitleTracks, setSkipPoints, saveSubtitleSync, anchorSubtitleSync } from '../api.js'
 import { toast, fmtClock } from '../utils.js'
 import { t } from '../i18n/index.js'
+import SubtitleConsole from './player/SubtitleConsole.vue'
+import VideoConsole from './player/VideoConsole.vue'
+import PlayerSettings from './player/PlayerSettings.vue'
+import { useSubtitleSync } from '../composables/useSubtitleSync.js'
 
 const props = defineProps({
   movieId: { type: Number, required: true },
@@ -20,48 +24,82 @@ const cur = ref(0)
 const dur = ref(0)
 let player = null          // video.js player 实例
 let videoEl = null         // 底层 <video> 元素
-/* ---- 播放器浮层：字幕轨 / 片头片尾 ---- */
+/* ---- 播放器浮层：统一设置面板（字幕 / 画面） / 片头片尾 ---- */
 const uiReady = ref(false)
-const subOpen = ref(false)
+const setMenuOpen = ref(false)
 const markOpen = ref(false)
 /* CC 按钮要挂进 video.js 控制条（原生按钮那一排），用 Teleport 渲染进去，
    这样它的位置、显示/隐藏（含自动隐藏）都跟着控制条走，不用自己维护 */
 const ccHost = ref(null)
-/* 字幕菜单：悬停展开、移开延时收起，点一下也能开关。
-   延时是为了「从按钮滑到菜单」这段移动不被打断（触屏没有 hover，走点击）。 */
-let subTimer = 0
-function openSubMenu() {
-  clearTimeout(subTimer)
-  subOpen.value = true
+/* 已播时间：video.js 皮肤把 current-time 和 duration 一起 `display:none` 了
+   （见官方 video-js.css），硬打开会缺配套布局、和右边不齐。这里改用同一套
+   类名（vjs-time-control / vjs-control / vjs-current-time-display）渲染一个
+   节点插到 duration 前面，字号行高内边距全部继承官方样式，天然一致。 */
+const timeHost = ref(null)
+function fmtShort(sec) {
+  const s = Math.max(0, Math.floor(Number(sec) || 0))
+  const h = Math.floor(s / 3600)
+  const m = Math.floor((s % 3600) / 60)
+  const ss = String(s % 60).padStart(2, '0')
+  return h ? h + ':' + String(m).padStart(2, '0') + ':' + ss : m + ':' + ss
 }
-function closeSubMenuSoon() {
-  clearTimeout(subTimer)
-  subTimer = setTimeout(() => { subOpen.value = false }, 200)
-}
-function toggleSubMenu() {
-  if (subOpen.value) {
-    clearTimeout(subTimer)
-    subOpen.value = false
-  } else {
-    openSubMenu()
+function mountTimeHost() {
+  const bar = player && player.controlBar && player.controlBar.el()
+  if (!bar) return
+  let host = bar.querySelector('.vp-time-host')
+  if (!host) {
+    host = document.createElement('div')
+    host.className = 'vp-time-host'
+    // display:contents 让容器不生成盒子，内部控件直接成为控制条的 flex item
+    host.style.display = 'contents'
+    // 必须插在 timeDivider 之前：控制条原生顺序是 current / divider / duration，
+    // 插到 duration 前会跑到分隔符右边，变成「/ 1:54 2:01:44」。
+    const divider = bar.querySelector('.vjs-time-divider')
+    const dur = bar.querySelector('.vjs-duration')
+    if (divider) bar.insertBefore(host, divider)
+    else if (dur) bar.insertBefore(host, dur)
+    else bar.appendChild(host)
   }
+  timeHost.value = host
+}
+/* 设置面板是重交互面板（滑块 / 候选列表 / 分段按钮），不搞悬停展开也不搞
+   悬停收起：鼠标扫过控制条就弹面板、点完按钮又被悬停顶开，都是「关不掉」的来源。
+   统一规则：点击 ⚙ 开 / 再点关；点面板外、Esc、面板右上角 ✕ 都能关；
+   选完字幕轨也自动收起（和原生播放器的轨道菜单行为一致）。 */
+function toggleSetMenu() {
+  setMenuOpen.value = !setMenuOpen.value
 }
 function pickSub(id) {
   selectSub(id)
-  clearTimeout(subTimer)
-  subOpen.value = false
+  setMenuOpen.value = false
 }
-/* 字幕样式：用分段按钮而不是原生下拉——原生 select 又高又和播放器风格不搭 */
-const subSizeOpts = computed(() => [
-  { v: 's', t: t('player.subSizeS') },
-  { v: 'm', t: t('player.subSizeM') },
-  { v: 'l', t: t('player.subSizeL') },
-])
-const subBgOpts = computed(() => [
-  { v: '0', t: t('player.subBgNone') },
-  { v: '1', t: t('player.subBgHalf') },
-  { v: '2', t: t('player.subBgFull') },
-])
+function onDocClick(e) {
+  if (!setMenuOpen.value) return
+  const host = ccHost.value
+  if (host && (host === e.target || host.contains(e.target))) return
+  // 控制条里的其它操作（拖进度条、暂停、调音量）不该收起面板：
+  // 校准时经常要边看画面边调时间，收起后又要重开、重切 tab。
+  const bar = player && player.controlBar && player.controlBar.el()
+  if (bar && (bar === e.target || bar.contains(e.target))) return
+  setMenuOpen.value = false
+}
+/* 右上角浮层跟着控制条同节奏淡出：静止播放时隐藏，鼠标一动就回来 */
+const barActive = ref(true)
+/* 字幕台挂在控制条里，video.js 判定用户静止后会连控制条一起淡出。
+   面板打开期间持续把 player 标成 active，否则看候选列表读到一半就被藏掉。
+   跳过标记菜单不在 player 元素内，鼠标移过去不会触发 useractive，同样要保活。 */
+let barKeepTimer = 0
+function keepBarActive() {
+  barActive.value = true
+  if (player && typeof player.userActive === 'function') player.userActive(true)
+}
+watch([setMenuOpen, markOpen], ([settings, mark]) => {
+  clearInterval(barKeepTimer)
+  if (!settings && !mark) return
+  keepBarActive()
+  barKeepTimer = setInterval(keepBarActive, 1000)
+})
+/* 字幕样式：字号 / 背景 / 垂直位置，控件在 SubtitleConsole 里 */
 function setSubStyle(key, val) {
   subStyle.value[key] = val
   applySubStyle()   // 立即生效，不必关掉播放器再打开
@@ -81,9 +119,127 @@ function mountCcHost() {
   }
   ccHost.value = host
 }
+
+/* ---- 画面调整：旋转 / 翻转 / 缩放（按影片记忆）+ 画质（全局偏好） ----
+ * 全部是显示层调整（CSS transform / filter），实时生效、不转码：
+ * - 方向跟具体片源走（竖拍 / 旋转编码的源），按影片记忆到 localStorage；
+ * - 画质是观看偏好，全局生效；
+ * - 锐化用 SVG feConvolveMatrix 卷积核，强度 0 时是恒等核（等于关闭）。 */
+const ADJ_DEFAULT = {
+  rot: 0, flipH: false, flipV: false, zoom: 1,
+  bright: 100, contrast: 100, sat: 100, hue: 0, sharpen: 0,
+}
+const PICTURE_KEY = 'avm.vp.picture'
+const ORIENT_KEY = 'avm.vp.orient'
+
+function loadAdj() {
+  let pic = {}
+  let orient = {}
+  try { pic = JSON.parse(localStorage.getItem(PICTURE_KEY) || '{}') } catch (e) { /* 忽略 */ }
+  try { orient = JSON.parse(localStorage.getItem(ORIENT_KEY) || '{}') } catch (e) { /* 忽略 */ }
+  const mine = (orient.byKey || {})[String(props.movieId)] || {}
+  return { ...ADJ_DEFAULT, ...(pic || {}), rot: Number(mine.rot) || 0,
+           flipH: !!mine.flipH, flipV: !!mine.flipV }
+}
+const adj = reactive(loadAdj())
+
+watch(() => props.movieId, () => { Object.assign(adj, loadAdj()) })
+
+function savePicture() {
+  const { zoom, bright, contrast, sat, hue, sharpen } = adj
+  try {
+    localStorage.setItem(PICTURE_KEY, JSON.stringify({ zoom, bright, contrast, sat, hue, sharpen }))
+  } catch (e) { /* 隐私模式忽略 */ }
+}
+function saveOrient() {
+  let o = {}
+  try { o = JSON.parse(localStorage.getItem(ORIENT_KEY) || '{}') } catch (e) { /* 忽略 */ }
+  o.byKey = o.byKey || {}
+  o.byKey[String(props.movieId)] = { rot: adj.rot, flipH: adj.flipH, flipV: adj.flipV }
+  try { localStorage.setItem(ORIENT_KEY, JSON.stringify(o)) } catch (e) { /* 忽略 */ }
+}
+function onAdjChange(next) {
+  Object.assign(adj, next)
+  savePicture()
+  saveOrient()
+}
+
+/* 容器尺寸：旋转 90/270 后内容包围盒会转出容器，按「容器高/宽」补偿缩放，
+   转正的画面才能完整放进可视区（等比缩小、左右留黑边，和桌面播放器一致）。 */
+const wrapSize = reactive({ w: 0, h: 0 })
+let wrapRO = null
+function watchWrapSize() {
+  if (!containerEl.value || typeof ResizeObserver === 'undefined') return
+  if (wrapRO) wrapRO.disconnect()
+  wrapRO = new ResizeObserver((entries) => {
+    const r = entries && entries[0]
+    if (!r) return
+    wrapSize.w = Math.round(r.contentRect.width)
+    wrapSize.h = Math.round(r.contentRect.height)
+  })
+  wrapRO.observe(containerEl.value)
+}
+
+const videoVars = computed(() => {
+  const { rot, flipH, flipV, zoom, bright, contrast, sat, hue, sharpen } = adj
+  const deg = Number(rot) || 0
+  const turned = deg % 180 !== 0
+  const comp = turned && wrapSize.w > 0 && wrapSize.h > 0 ? wrapSize.h / wrapSize.w : 1
+  const sx = (flipH ? -1 : 1) * zoom * comp
+  const sy = (flipV ? -1 : 1) * zoom * comp
+  const changed = deg || flipH || flipV || zoom !== 1
+  const fx = []
+  if (bright !== 100) fx.push(`brightness(${(bright / 100).toFixed(2)})`)
+  if (contrast !== 100) fx.push(`contrast(${(contrast / 100).toFixed(2)})`)
+  if (sat !== 100) fx.push(`saturate(${(sat / 100).toFixed(2)})`)
+  if (hue) fx.push(`hue-rotate(${hue}deg)`)
+  if (sharpen > 0) fx.push('url(#vp-sharpen)')
+  return {
+    '--vp-transform': changed ? `rotate(${deg}deg) scale(${sx.toFixed(4)}, ${sy.toFixed(4)})` : 'none',
+    '--vp-filter': fx.length ? fx.join(' ') : 'none',
+  }
+})
+
+/* 锐化卷积核：0 -k 0 / -k 1+4k -k / 0 -k 0，k∈[0,1]。
+ * k=0 是恒等核（等于关闭），k=1 是经典 3×3 锐化；面板上的滑块直接驱动它。 */
+const sharpenKernel = computed(() => {
+  const k = (Number(adj.sharpen) || 0) / 100
+  return `0 ${-k} 0 ${-k} ${1 + 4 * k} ${-k} 0 ${-k} 0`
+})
 const subTracks = ref([])
 const activeSub = ref('')
-const subStyle = ref({ size: 'm', bg: '1' })
+const subStyle = ref({ size: 'm', bg: '1', posY: 0 })
+const subStatus = ref('unchecked')
+/* 当前显示轨的字幕覆盖区间：让用户一眼看到「字幕从第几秒开始」，
+   而不是在画面里干等（校准偏移过大时最需要这个反馈）。 */
+const cueRange = ref(null)
+const sync = useSubtitleSync()
+/* 预览一律走后端：把字幕轨的 src 换成带 offset/scale 的 VTT 地址，
+   浏览器原生解析，时间轴顺序与显示区间都由后端保证。这样暂停也能生效，
+   不存在「改了 cue 浏览器不重算」的问题。拖动滑块时防抖 300ms，避免连续重载。 */
+let syncPreviewTimer = 0
+let syncPreviewBusy = false
+/* 拖动时先直接改 cue（零延迟跟随），停手 450ms 后再让后端重渲染一次做校正。
+   这样既是「拖着字幕就动」的手感，最终值又由后端保证，不依赖浏览器行为。 */
+function scheduleSyncApply() {
+  if (!player || typeof player.textTracks !== 'function') return
+  sync.applyToTracks(player.textTracks())
+  clearTimeout(syncPreviewTimer)
+  // 600ms 是为了让「连续拖动」期间不重载：重载会闪一下，停手后再校正一次最平滑
+  syncPreviewTimer = setTimeout(() => { reloadPreviewTracks() }, 600)
+}
+async function reloadPreviewTracks() {
+  if (!sync.dirty.value || syncPreviewBusy) return
+  syncPreviewBusy = true
+  try {
+    clearRemoteTracks()
+    await loadSubtitleTracks(true)
+  } catch (e) {
+    /* 预览失败保持原状，不影响已保存的轨道 */
+  } finally {
+    syncPreviewBusy = false
+  }
+}
 const skipIntro = ref(0)
 const skipOutro = ref(0)
 const skipToast = ref('')
@@ -119,8 +275,22 @@ function applySubStyle() {
   if (!el) return
   el.style.setProperty('--vp-sub-size', sizes[subStyle.value.size] || sizes.m)
   el.style.setProperty('--vp-sub-bg', bgs[subStyle.value.bg] || bgs['1'])
+  // 正值上移：影片自带烧录硬字幕时把外挂字幕挪开，避免两行字叠在一起
+  el.style.setProperty('--vp-sub-y', (Number(subStyle.value.posY || 0) * 12) + 'px')
   // 无背景时给白字补描边（否则压在亮画面上基本看不清）
   el.classList.toggle('vp-sub-plain', String(subStyle.value.bg) === '0')
+}
+
+function onConsoleStyle(key, val) {
+  if (key === 'posY') {
+    subStyle.value.posY = Number(val) || 0
+    sync.setPosY(Number(val) || 0)
+    applySubStyle()
+    savePrefs()
+    scheduleSyncApply()
+  } else {
+    setSubStyle(key, val)
+  }
 }
 /** 恢复上次的播放偏好（音量 / 倍速 / 字幕），没有则给保守默认 */
 function restorePrefs() {
@@ -151,43 +321,219 @@ function setupMediaSession() {
   } catch (e) { /* 旧浏览器忽略 */ }
 }
 
-async function loadSubtitleTracks() {
+async function loadSubtitleTracks(keepPreview = false) {
+  // 每次重载先清干净：残留的同名轨会让 applySubMode 按 label 匹配到多条，
+  // 轻则重复、重则全都 disabled（字幕整个不见）。初次加载时这里是空操作。
+  clearRemoteTracks()
   try {
     const r = await subtitleTracks(props.movieId)
     subTracks.value = r.tracks || []
     skipIntro.value = r.skip_intro || 0
     skipOutro.value = r.skip_outro || 0
-    applySubStyle()
+    subStatus.value = r.status || (subTracks.value.length ? 'unchecked' : 'none')
     // 偏好命中则用它，否则默认第一条（优先中文）
     const want = activeSub.value
     const pick = (want && subTracks.value.find((x) => x.id === want))
       || subTracks.value.find((x) => (x.lang || '').startsWith('zh'))
       || subTracks.value[0]
+    // 本片校准值优先于全局显示偏好；没有记录时沿用全局。
+    // 预览重载（keepPreview）不能覆盖正在编辑的值。
+    const s = pick && pick.sync
+    if (!keepPreview) {
+      if (s) {
+        subStyle.value.posY = Number(s.pos_y || 0)
+        sync.setPosY(Number(s.pos_y || 0))
+      }
+      sync.load(pick ? pick.id : '', s)
+    }
+    applySubStyle()
     subTracks.value.forEach((track) => {
       player.addRemoteTextTrack({
-        kind: 'subtitles', src: track.url, srclang: track.lang || 'und',
+        kind: 'subtitles', src: sync.trackUrl(track.url),
+        srclang: track.lang || 'und',
         label: track.label, default: !!pick && track.id === pick.id,
       }, false)
     })
     activeSub.value = pick ? pick.id : ''
+    // 动态添加的 track 靠 default 属性并不能保证显示：保存后重载轨道时若不显式
+    // 指定 mode，所有轨都是 disabled，表现就是「校准完字幕整个不见了」。
+    applySubMode(activeSub.value)
+    updateCueRange()
+    // 记下这一轮 VTT 是按什么参数渲染的，后续 drag 的差量以它为原点
+    sync.markRendered()
   } catch (e) { /* 没有字幕轨时忽略 */ }
   finally { uiReady.value = true }
 }
-function selectSub(id) {
-  activeSub.value = id
-  const list = subTracks.value
-  // 远程字幕轨（addRemoteTextTrack）在 video.js 里不一定会生成 <video><track>，
-  // 所以必须走 player.textTracks()；只看 videoEl.textTracks 会得到空列表，
-  // 表现就是「点了字幕没有任何反应」。
+
+/** 刷新字幕覆盖区间（cues 变化不是响应式的，只能在时间推进/重载时主动读）。 */
+function updateCueRange() {
+  if (!player || typeof player.textTracks !== 'function') return
+  const list = player.textTracks()
+  for (let i = 0; i < list.length; i++) {
+    const tt = list[i]
+    if (!tt || tt.mode !== 'showing') continue
+    const cues = tt.cues || []
+    if (!cues.length) continue
+    cueRange.value = {
+      first: cues[0].startTime,
+      last: cues[cues.length - 1].endTime,
+    }
+    return
+  }
+  cueRange.value = null
+}
+
+/** 显式指定哪条字幕轨显示（按 label 对齐，video.js 会在原生轨之后追加远程轨）。 */
+function applySubMode(id) {
   const tracks = (player && typeof player.textTracks === 'function' && player.textTracks())
     || (videoEl && videoEl.textTracks) || []
+  const list = subTracks.value
   for (let i = 0; i < tracks.length; i++) {
     const tt = tracks[i]
     if (tt.kind !== 'subtitles' && tt.kind !== 'captions') continue
-    // 按 label 对齐（video.js 会在原生轨之后追加远程轨，不能按下标猜）
     const hit = list.find((x) => x.label === tt.label)
     tt.mode = (hit && hit.id === id) ? 'showing' : 'disabled'
   }
+}
+
+/** 保存后重新拉轨道：后端 VTT 会带上绝对偏移，前端差量归零，避免双倍平移。 */
+function clearRemoteTracks() {
+  if (!player) return
+  // removeRemoteTextTrack 要传 <track> 元素，传 TextTrack 对象是无效的：
+  // 旧实现用 textTracks() 导致轨删不掉，重载后同名轨越叠越多、mode 也被打乱。
+  try {
+    const els = typeof player.remoteTextTrackEls === 'function' && player.remoteTextTrackEls()
+    if (els) {
+      for (let i = els.length - 1; i >= 0; i--) {
+        if (els[i]) player.removeRemoteTextTrack(els[i])
+      }
+      return
+    }
+  } catch (e) { /* 回退到下面的兜底 */ }
+  if (typeof player.textTracks !== 'function') return
+  const list = player.textTracks()
+  for (let i = list.length - 1; i >= 0; i--) {
+    const tt = list[i]
+    if (tt && (tt.kind === 'subtitles' || tt.kind === 'captions')) {
+      try { player.removeRemoteTextTrack(tt) } catch (e) { /* 原生轨不可移除 */ }
+    }
+  }
+}
+async function saveSyncNow() {
+  if (!sync.subId.value) return false
+  try {
+    const r = await saveSubtitleSync(props.movieId, sync.subId.value, sync.payload())
+    sync.markSaved(r)
+    toast(t('player.scSaved'), 'ok')
+    clearRemoteTracks()
+    await loadSubtitleTracks()
+    return true
+  } catch (e) {
+    toast(e.message, 'err')
+    return false
+  }
+}
+async function reloadTracks() {
+  clearRemoteTracks()
+  await loadSubtitleTracks()
+}
+function onConsoleOffset(ms) {
+  sync.setOffset(ms)
+  scheduleSyncApply()
+}
+function onConsoleSuggest(s) {
+  sync.applySuggestion(s)
+  scheduleSyncApply()
+}
+function onConsoleScale(v) {
+  sync.setScale(v)
+  scheduleSyncApply()
+}
+/* 只重置偏移，保留帧率比：这部片一旦把 0.959 清成 1.0，开头对齐了后面也必然漂 */
+function onConsoleReset() {
+  sync.setOffset(0)
+  sync.setPosY(0)
+  applySubStyle()
+  scheduleSyncApply()
+}
+/* 对齐当前正在显示的那条字幕：用户在画面里看到哪句台词，就把它锚到当前时间。
+   纯前端计算，不需要请求；粗调过偏移、字幕已经在显示时最顺手。 */
+function onConsoleAnchorActive() {
+  if (!sync.subId.value) return
+  const now = (videoEl && videoEl.currentTime) || 0
+  if (!now) {
+    toast(t('player.scAnchorNoTime'), 'err')
+    return
+  }
+  const tracks = (player && typeof player.textTracks === 'function') ? player.textTracks() : null
+  const origStart = sync.activeCueOriginalStart(tracks, now)
+  if (origStart == null) {
+    toast(t('player.scNoActiveCue'), 'err')
+    return
+  }
+  const scale = sync.current.value.scale || 1
+  sync.applySuggestion({
+    offset_ms: Math.round((now - origStart * scale) * 1000),
+    scale,
+    method: 'anchor',
+    confidence: 0.95,
+  })
+  scheduleSyncApply()
+  toast(t('player.scAnchored', { time: fmtClock(now) }), 'ok')
+}
+
+/* 从字幕列表挑一条对齐：用户读出「就是这句」，把它锚到当前画面（纯前端算） */
+function onConsoleAnchorCue(payload) {
+  if (!sync.subId.value) return
+  const now = (videoEl && videoEl.currentTime) || 0
+  if (!now) {
+    toast(t('player.scAnchorNoTime'), 'err')
+    return
+  }
+  const start = Number(payload && payload.start)
+  if (!Number.isFinite(start)) return
+  const scale = sync.current.value.scale || 1
+  sync.applySuggestion({
+    offset_ms: Math.round((now - start * scale) * 1000),
+    scale,
+    method: 'anchor',
+    confidence: 0.95,
+  })
+  scheduleSyncApply()
+  toast(t('player.scAnchored', { time: fmtClock(now) }), 'ok')
+}
+
+/* 一键锚点：用户播到「应该是字幕第 N 条」的画面时点一下，直接解出 offset */
+async function onConsoleAnchor(payload) {
+  if (!sync.subId.value) return
+  const videoTime = (videoEl && videoEl.currentTime) || 0
+  if (!videoTime) {
+    toast(t('player.scAnchorNoTime'), 'err')
+    return
+  }
+  try {
+    const r = await anchorSubtitleSync(props.movieId, sync.subId.value, {
+      video_time: videoTime,
+      cue_index: Number((payload && payload.cueIndex) || 0),
+      scale: sync.current.value.scale,
+    })
+    sync.applySuggestion(r)
+    scheduleSyncApply()
+    toast(t('player.scAnchored', { time: fmtClock(videoTime) }), 'ok')
+  } catch (e) {
+    toast(e.message, 'err')
+  }
+}
+async function selectSub(id) {
+  // 切轨前先落盘未保存的微调，避免用户调好的偏移被悄悄丢掉
+  if (sync.dirty.value && String(id) !== sync.subId.value) await saveSyncNow()
+  activeSub.value = id
+  const chosen = subTracks.value.find((x) => x.id === id)
+  sync.load(id || '', chosen ? chosen.sync : null)
+  // 远程字幕轨（addRemoteTextTrack）在 video.js 里不一定会生成 <video><track>，
+  // 所以必须走 player.textTracks()；只看 videoEl.textTracks 会得到空列表，
+  // 表现就是「点了字幕没有任何反应」。
+  applySubMode(id)
   savePrefs()
 }
 function fmtSkip(sec) {
@@ -344,6 +690,7 @@ function onTime() {
   if (Number.isFinite(v.duration)) dur.value = v.duration
   if (dur.value > 0) canMarkOutro.value = now > dur.value * 0.5
   checkSkip()
+  updateCueRange()
 }
 
 /** 每 10 秒回写一次进度与观看时长 */
@@ -585,6 +932,11 @@ function onKeydown(e) {
   if (!player || !videoEl) return
   const tag = (e.target && e.target.tagName) || ''
   if (tag === 'INPUT' || tag === 'TEXTAREA') return
+  // Esc 优先关设置面板，其次退出网页全屏
+  if (e.key === 'Escape' && setMenuOpen.value) {
+    setMenuOpen.value = false
+    return
+  }
   // 网页全屏兜底态没有浏览器自带的 Esc 退出，这里补上
   if (e.key === 'Escape' && webFs.value) {
     webFs.value = false
@@ -604,6 +956,17 @@ function onKeydown(e) {
     const cur = player.volume()
     const next = Math.min(1, Math.max(0, cur + (e.key === 'ArrowUp' ? 0.1 : -0.1)))
     player.volume(next)
+  } else if (e.code === 'BracketLeft' || e.code === 'BracketRight'
+             || e.key === '[' || e.key === ']' || e.key === '{' || e.key === '}') {
+    // 字幕同步微调：边看边调，不暂停、不发请求（cue 时间在内存里改）
+    // Shift+[ / Shift+] 在标准键盘上 e.key 会变成 { / }，靠 e.code 认同一颗物理键
+    e.preventDefault()
+    const back = e.code === 'BracketLeft' || e.key === '[' || e.key === '{'
+    sync.nudge((back ? -1 : 1) * (e.shiftKey ? 100 : 500))
+    scheduleSyncApply()
+  } else if ((e.key === 's' || e.key === 'S') && sync.dirty.value) {
+    e.preventDefault()
+    saveSyncNow()
   }
 }
 
@@ -851,12 +1214,21 @@ function initPlayer() {
 
     videoEl = player.el().querySelector('video')
     mountCcHost()
+    mountTimeHost()
     detectOwnFullscreen()
 
+    barActive.value = true
     player.on('loadedmetadata', () => { onLoaded() })
     player.on('timeupdate', () => onTime())
     player.on('ended', () => onEnded())
     player.on('error', () => onError())
+    // 右上角浮层跟着控制条同节奏显隐；菜单打开 / 暂停时保持可见
+    player.on('useractive', () => { barActive.value = true })
+    player.on('userinactive', () => {
+      if (setMenuOpen.value || markOpen.value) return
+      if (player && typeof player.paused === 'function' && player.paused()) return
+      barActive.value = false
+    })
 
     // 透明覆盖层：独占画面区域的单击/双击，隔离 video.js 对 video 的内部 click 处理，
     // 避免"暂停又播放"的竞争。覆盖层放在控制条之上、画面区域，控制条按钮仍可点击。
@@ -879,6 +1251,9 @@ function initPlayer() {
     buildSwipeTip()
     // 键盘方向键快进/快退（全局监听，全屏/非全屏均生效）
     document.addEventListener('keydown', onKeydown)
+    // 字幕台：点面板外收起。用捕获阶段的 pointerdown，画面覆盖层即使
+    // stopPropagation 也能收到；target 在 ccHost 内（含菜单）时不关。
+    document.addEventListener('pointerdown', onDocClick, true)
     // 初始化完成后再 resize 一次，确保按当前稳定尺寸渲染
     player.on('ready', () => { player && player.trigger('resize') })
     setTimeout(() => { player && player.trigger('resize') }, 300)
@@ -886,6 +1261,8 @@ function initPlayer() {
 }
 
 function destroyPlayer() {
+  clearInterval(barKeepTimer)
+  barKeepTimer = 0
   if (clickTimer) { clearTimeout(clickTimer); clickTimer = null }
   webFs.value = false  // 兜底全屏态要一起退出，否则页面会一直锁着滚动
   if (player) {
@@ -903,6 +1280,7 @@ function destroyPlayer() {
         overlayEl = null
       }
       document.removeEventListener('keydown', onKeydown)
+      document.removeEventListener('pointerdown', onDocClick, true)
       if (mouseGestBound) {
         document.removeEventListener('mousemove', onMouseMove)
         document.removeEventListener('mouseup', onMouseUp)
@@ -914,6 +1292,8 @@ function destroyPlayer() {
       }
       // 先摘掉 Teleport 目标，避免播放器销毁后 Vue 还往已分离的节点里操作
       ccHost.value = null
+      timeHost.value = null
+      if (wrapRO) { wrapRO.disconnect(); wrapRO = null }
       player.dispose()
     } catch (e) { /* 静默 */ }
     player = null
@@ -1035,12 +1415,14 @@ onMounted(() => {
   // 全屏状态变化：进全屏锁横屏，退出时解锁（iOS 不支持 lock，静默跳过）
   document.addEventListener('fullscreenchange', onFullscreenChange)
   document.addEventListener('webkitfullscreenchange', onFullscreenChange)
+  watchWrapSize()
   nextTick(async () => { await resolveSource(); initPlayer() })
 })
 
 onBeforeUnmount(() => {
   // 离开播放器时保存当前的音量/倍速/字幕偏好（音量拖动过程不写盘，避免频繁 IO）
-  clearTimeout(subTimer)
+  clearInterval(barKeepTimer)
+  clearTimeout(syncPreviewTimer)
   savePrefs()
   window.removeEventListener('avm-pause-player', onPauseRequest)
   window.removeEventListener('avm-seek', onSeekRequest)
@@ -1072,46 +1454,66 @@ watch(() => props.movieId, () => {
 
 <template>
   <div class="player">
-    <div v-show="!failed" ref="containerEl" class="vjs-wrap" :class="{ 'web-fs': webFs }">
-      <!-- 播放器浮层：字幕轨选择/样式、片头片尾跳过标记 -->
-      <!-- 字幕入口挂在 control-bar 里（见 mountCcHost），和原生按钮同一排 -->
+    <div v-show="!failed" ref="containerEl" class="vjs-wrap" :class="{ 'web-fs': webFs }"
+         :style="videoVars">
+      <!-- 锐化滤镜：kernel 由画面控制台的「锐化」滑块驱动，0 时是恒等核（无效果） -->
+      <svg class="vp-svg-filters" aria-hidden="true" focusable="false" width="0" height="0">
+        <filter id="vp-sharpen" x="0" y="0" width="100%" height="100%">
+          <feConvolveMatrix order="3" preserveAlpha="true" :kernel-matrix="sharpenKernel" />
+        </filter>
+      </svg>
+      <!-- 播放器浮层：字幕轨选择/样式、画面调整、片头片尾跳过标记 -->
+      <!-- 播放器浮层：统一设置面板（字幕 / 画面调整）、片头片尾跳过标记 -->
+      <!-- 设置入口挂在 control-bar 里（见 mountCcHost），和原生按钮同一排 -->
       <Teleport v-if="uiReady && ccHost" :to="ccHost">
-        <div class="vp-cc" :class="{ on: subOpen }"
-             @click.stop="toggleSubMenu"
-             @mouseenter="openSubMenu"
-             @mouseleave="closeSubMenuSoon">
-          CC
-          <div v-if="subOpen" class="vp-menu" @click.stop
-               @mouseenter="openSubMenu" @mouseleave="closeSubMenuSoon">
-            <button class="vp-item" :class="{ on: !activeSub }" @click="pickSub(null)">{{ $t('player.subOff') }}</button>
-            <button v-for="t in subTracks" :key="t.id" class="vp-item"
-                    :class="{ on: activeSub === t.id }" @click="pickSub(t.id)">
-              <span class="ellipsis">{{ t.label }}</span>
-            </button>
-            <div class="vp-sep"></div>
-            <div class="vp-row">
-              <span class="vp-row-label">{{ $t('player.subSize') }}</span>
-              <div class="vp-seg">
-                <button v-for="o in subSizeOpts" :key="o.v" :class="{ on: subStyle.size === o.v }"
-                        @click.stop="setSubStyle('size', o.v)">{{ o.t }}</button>
-              </div>
-            </div>
-            <div class="vp-row">
-              <span class="vp-row-label">{{ $t('player.subBg') }}</span>
-              <div class="vp-seg">
-                <button v-for="o in subBgOpts" :key="o.v" :class="{ on: subStyle.bg === o.v }"
-                        @click.stop="setSubStyle('bg', o.v)">{{ o.t }}</button>
-              </div>
-            </div>
+        <div class="vp-cc" :class="{ on: setMenuOpen }" :title="$t('player.psSettings')"
+             @click.stop="toggleSetMenu">
+          <svg class="vp-gear" viewBox="0 0 24 24" aria-hidden="true">
+            <path fill="currentColor" d="M12 15.5A3.5 3.5 0 1 1 15.5 12 3.5 3.5 0 0 1 12 15.5m7.43-2.53c.04-.32.07-.64.07-.97s-.03-.66-.07-.98l2.11-1.65a.5.5 0 0 0 .12-.64l-2-3.46a.5.5 0 0 0-.61-.22l-2.49 1a7.3 7.3 0 0 0-1.69-.98l-.37-2.65A.5.5 0 0 0 14 2.5h-4a.5.5 0 0 0-.5.42l-.37 2.65c-.61.25-1.17.59-1.69.98l-2.49-1a.5.5 0 0 0-.61.22l-2 3.46a.5.5 0 0 0 .12.64l2.11 1.65c-.04.32-.07.65-.07.98s.03.65.07.97l-2.11 1.66a.5.5 0 0 0-.12.64l2 3.46c.13.23.4.31.61.22l2.49-1c.52.39 1.08.73 1.69.98l.37 2.65c.04.24.25.42.5.42h4c.25 0 .46-.18.5-.42l.37-2.65a7.3 7.3 0 0 0 1.69-.98l2.49 1c.21.09.48.01.61-.22l2-3.46a.5.5 0 0 0-.12-.64z" />
+          </svg>
+          <div v-if="setMenuOpen" @click.stop @mousemove="keepBarActive">
+            <PlayerSettings @close="setMenuOpen = false">
+              <template #sub="{ tab }">
+                <SubtitleConsole
+                  :tab="tab"
+                  :movie-id="movieId" :tracks="subTracks" :active-sub-id="activeSub"
+                  :sub-style="subStyle" :sync-current="sync.current.value"
+                  :sync-dirty="sync.dirty.value" :sync-state="subStatus"
+                  :current-time="cur" :duration="dur" :cue-range="cueRange"
+                  @select-sub="pickSub" @set-style="onConsoleStyle"
+                  @offset-change="onConsoleOffset" @apply-suggestion="onConsoleSuggest"
+                  @anchor-now="onConsoleAnchor" @anchor-active="onConsoleAnchorActive"
+                  @anchor-cue="onConsoleAnchorCue" @set-scale="onConsoleScale"
+                  @reset-sync="onConsoleReset"
+                  @save="saveSyncNow" @refresh-tracks="reloadTracks" />
+              </template>
+              <template #pic="{ tab }">
+                <VideoConsole :tab="tab" :model-value="adj" @update:model-value="onAdjChange" />
+              </template>
+            </PlayerSettings>
           </div>
         </div>
       </Teleport>
 
-      <div v-if="uiReady" class="vp-ui">
-        <div v-if="skipIntro" class="vp-btn" :title="$t('player.skipIntroClear')" @click.stop="clearSkip('intro')">片头</div>
-        <div v-if="skipOutro" class="vp-btn" :title="$t('player.skipOutroClear')" @click.stop="clearSkip('outro')">片尾</div>
-        <div v-if="canMarkIntro || canMarkOutro" class="vp-btn" :class="{ on: markOpen }" @click.stop="markOpen = !markOpen">
-          ⚑
+      <!-- 已播时间：复用结束时间的官方类名，字号行高内边距完全一致 -->
+      <Teleport v-if="uiReady && timeHost" :to="timeHost">
+        <div class="vjs-current-time vjs-time-control vjs-control vp-now">
+          <span class="vjs-current-time-display">{{ fmtShort(cur) }}</span>
+        </div>
+      </Teleport>
+
+      <div v-if="uiReady" class="vp-ui" :class="{ 'vp-ui-hidden': !barActive }"
+           @mouseenter="keepBarActive" @mousemove="keepBarActive">
+        <!-- 已标记的跳过点：显示时间点与 ✕，点它清除；标记入口是右边的「⚑ 标记跳过」 -->
+        <div v-if="skipIntro" class="vp-btn vp-tag" :title="$t('player.skipIntroClear')" @click.stop="clearSkip('intro')">
+          {{ $t('player.introTag', { t: fmtSkip(skipIntro) }) }}<span class="vp-x">✕</span>
+        </div>
+        <div v-if="skipOutro" class="vp-btn vp-tag" :title="$t('player.skipOutroClear')" @click.stop="clearSkip('outro')">
+          {{ $t('player.outroTag', { t: fmtSkip(skipOutro) }) }}<span class="vp-x">✕</span>
+        </div>
+        <div v-if="canMarkIntro || canMarkOutro" class="vp-btn vp-mark" :class="{ on: markOpen }"
+             :title="$t('player.markSkipTip')" @click.stop="markOpen = !markOpen">
+          ⚑ <span class="vp-mark-label">{{ $t('player.markSkip') }}</span>
           <div v-if="markOpen" class="vp-menu" @click.stop>
             <button v-if="canMarkIntro" class="vp-item" @click="markIntro">{{ $t('player.markIntro') }}</button>
             <button v-if="canMarkOutro" class="vp-item" @click="markOutro">{{ $t('player.markOutro') }}</button>
@@ -1149,6 +1551,11 @@ watch(() => props.movieId, () => {
 
 <style scoped>
 .player { display: flex; flex-direction: column; background: var(--c-bg-sunken); }
+/* 设置按钮（⚙）：字幕 / 画面高级配置的统一入口 */
+.vp-cc { position: relative; }
+.vp-gear { width: 1.05em; height: 1.05em; display: block; }
+/* 正值把外挂字幕上移，避开画面里烧录的硬字幕 */
+.vjs-wrap :deep(.vjs-text-track-display) { transform: translateY(calc(-1 * var(--vp-sub-y, 0px))); }
 /* 给容器明确高度（16:9 比例），避免 video.js 在抽屉里高度塌缩导致"有声音无画面" */
 .vjs-wrap {
   /* 浮层（字幕 / 片头片尾 / 提示）都锚在这里：缺了 relative 会跑到整个抽屉的右上角，
@@ -1170,7 +1577,13 @@ watch(() => props.movieId, () => {
   height: 100% !important;
   object-fit: contain !important;
   background: #000;
+  /* 画面调整（旋转 / 翻转 / 缩放 / 画质）：变量从 .vjs-wrap 传下来。不用 :style
+     直接绑 video 元素——video.js 会反复重写它的行内宽高，绑在容器上更稳 */
+  transform: var(--vp-transform, none);
+  filter: var(--vp-filter, none);
 }
+/* 锐化用的 SVG 卷积核定义：不占布局 */
+.vp-svg-filters { position: absolute; width: 0; height: 0; }
 /* 进度条 hover 预览浮层：跟随鼠标横向居中显示在进度条上方 */
 .vjs-wrap :deep(.vjs-preview-tip) {
   position: absolute;
@@ -1255,6 +1668,11 @@ watch(() => props.movieId, () => {
 .vp-ui {
   position: absolute; top: 8px; right: 10px; z-index: 12;
   display: flex; align-items: center; gap: 6px;
+  transition: opacity .2s ease, visibility .2s ease;
+}
+/* 桌面端：和 video.js 控制条同节奏淡出；移动端控制条常驻，这里也保持常驻 */
+@media (min-width: 769px) {
+  .vp-ui-hidden { opacity: 0; visibility: hidden; pointer-events: none; }
 }
 .vp-btn {
   position: relative;
@@ -1265,8 +1683,24 @@ watch(() => props.movieId, () => {
   font-size: 12px; cursor: pointer; user-select: none;
 }
 .vp-btn:hover, .vp-btn.on { background: rgba(255,255,255,.18); }
+/* 已标记的跳过点：带时间点与 ✕，一眼看出是「点它清除」而不是标记入口 */
+.vp-tag, .vp-mark { gap: 5px; }
+.vp-x { font-size: 10px; opacity: .6; }
+.vp-tag:hover .vp-x { opacity: 1; }
 /* 字幕按钮挂在控制条里：外观向原生按钮看齐，菜单向上弹 */
 .vjs-cc-host { position: relative; display: flex; align-items: center; align-self: stretch; }
+/* 时间显示：官方皮肤把 .vjs-current-time 与 .vjs-duration 一起隐藏了，
+   这里只放行「我渲染的 current-time（带 .vp-now）+ 总时长 + 分隔符」，
+   三者共用 .vjs-time-control 的字号/行高/内边距，所以高度自动一致。 */
+.vjs-wrap :deep(.video-js .vjs-time-control.vp-now) { display: block !important; }
+.vjs-wrap :deep(.video-js .vjs-duration),
+.vjs-wrap :deep(.video-js .vjs-time-divider) { display: block !important; }
+.vjs-wrap :deep(.video-js .vjs-remaining-time) { display: none !important; }
+/* 收紧时间区间：原生每个 .vjs-time-control 左右各 1em、min-width 2em，
+   两个时间之间会空出 4em 以上。只压内边距与最小宽度，字号行高仍走原生值。 */
+.vjs-wrap :deep(.video-js .vjs-current-time.vp-now) { padding-left: .4em; padding-right: .15em; }
+.vjs-wrap :deep(.video-js .vjs-time-divider) { padding: 0; min-width: 0; }
+.vjs-wrap :deep(.video-js .vjs-duration) { padding-left: .15em; padding-right: .5em; }
 .vjs-cc-host .vp-cc {
   position: relative; height: 100%; min-width: 2.6em; padding: 0 .5em;
   display: flex; align-items: center; justify-content: center;
@@ -1374,6 +1808,8 @@ watch(() => props.movieId, () => {
   /* 加大进度条可点区域，移动端好拖 */
   .vjs-wrap :deep(.video-js .vjs-progress-control) { flex: 1 1 auto; }
   .vjs-wrap :deep(.video-js .vjs-progress-holder) { height: 0.5em; }
+  /* 窄屏只留旗子图标，避免标记按钮和全屏按钮挤满右上角 */
+  .vp-mark-label { display: none; }
 }
 /* 手机横屏：直接铺满视口高度。竖屏那套 56dvh 在横屏下会让画面缩成上下留黑，
    这里按「横屏即全屏」处理（限高 560px，避免影响桌面小窗口） */

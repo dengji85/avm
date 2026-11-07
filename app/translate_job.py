@@ -59,7 +59,7 @@ def state(movie_id: int) -> Dict[str, Any]:
 
 
 def start(movie_id: int, cfg: Dict[str, Any], target: str,
-          bilingual: bool = False) -> Dict[str, Any]:
+          bilingual: bool = False, sub_id: Optional[int] = None) -> Dict[str, Any]:
     """启动（或返回已在跑的那一次）。同一部片同时只跑一个翻译任务。"""
     movie_id = int(movie_id)
     with _LOCK:
@@ -69,7 +69,7 @@ def start(movie_id: int, cfg: Dict[str, Any], target: str,
         job = _blank(movie_id, target, bilingual)
         job.update(status="running", message="准备中…", started_at=int(time.time()))
         _JOBS[movie_id] = job
-    submit_long(_run, movie_id, cfg, target, bool(bilingual))
+    submit_long(_run, movie_id, cfg, target, bool(bilingual), sub_id)
     return state(movie_id)
 
 
@@ -84,7 +84,8 @@ def cancel(movie_id: int) -> Dict[str, Any]:
     return state(movie_id)
 
 
-def _run(movie_id: int, cfg: Dict[str, Any], target: str, bilingual: bool) -> None:
+def _run(movie_id: int, cfg: Dict[str, Any], target: str, bilingual: bool,
+         sub_id: Optional[int] = None) -> None:
     def progress(done: int, total: int) -> None:
         if state(movie_id).get("cancel"):
             raise _Cancelled()
@@ -95,7 +96,8 @@ def _run(movie_id: int, cfg: Dict[str, Any], target: str, bilingual: bool) -> No
 
     try:
         _set(movie_id, message="正在读取字幕…")
-        res = translate.translate_movie(movie_id, cfg, target, bilingual, progress=progress)
+        res = translate.translate_movie(movie_id, cfg, target, bilingual,
+                                        progress=progress, sub_id=sub_id)
         _set(movie_id, status="done", percent=100, message="完成",
              result=res, finished_at=int(time.time()))
     except _Cancelled:

@@ -16,7 +16,7 @@ import os
 import re
 from typing import Any, Dict, List, Tuple
 
-from . import subprobe
+from . import subprobe, subqc
 
 MAX_CHARS = 60000          # 送入 AI 的上限（约 2 部正常影片的字幕量）
 MAX_CUES = 4000            # 问答检索的分句上限
@@ -173,10 +173,8 @@ def collect(files: List[Dict[str, Any]], sidecar: List[Dict[str, Any]],
             return {"text": text[:MAX_CHARS], "source": "embedded",
                     "track": label.strip(" ·"), "chars": len(text)}
 
-    # 外挂字幕：按同样的偏好排序（原文优先时非中文文件排在前面）
-    sidecar = [s for s in (sidecar or []) if (s.get("path") or "")]
-    sidecar.sort(key=lambda s: (1 if (_is_zh(s.get("lang") or "") == prefer_original) else 0))
-    for s in sidecar:
+    # 外挂字幕：与翻译链共用同一套语言判定与排序契约（见 subqc.rank_subtitle_sources）
+    for s in subqc.rank_subtitle_sources(sidecar, prefer_original=prefer_original):
         text = _read_text_file(s["path"])
         if text:
             return {"text": text[:MAX_CHARS], "source": "sidecar",

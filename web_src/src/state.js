@@ -208,7 +208,10 @@ export function clearPlayQueue() {
  */
 const VALID_VIEWS = ['home', 'gallery', 'stats', 'maintenance', 'actress', 'ai',
   'collections', 'rankings', 'swipe', 'settings', 'recent']
-const VALID_MAINT = ['overview', 'storage', 'logs']
+// 与 MaintenanceView 的 TABS 一一对应：白名单不全的话，切到未列出的子标签时
+// hash 不会更新，刷新/分享就回不到那一页。
+const VALID_MAINT = ['overview', 'missing', 'storage', 'ad', 'subtitle',
+  'failures', 'logs', 'export']
 
 function parseHash() {
   const raw = (location.hash || '').replace(/^#\/?/, '')

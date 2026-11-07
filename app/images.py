@@ -256,8 +256,11 @@ def save_poster_from_bytes(data: bytes, cover_file: str,
 
 
 # ---- DMM 无图缓存：素人/无码番号在 DMM 没有条目，反复探测只会白等超时 ----
+# 注意 key 带资源类型后缀（横版 cover / 竖版 poster）：两者是不同文件，一个下载失败
+# 不代表另一个没有 —— 曾经共用 key，结果竖版海报取图时网络抖一下就把番号锁死 7 天，
+# 横版大图（2184×1468）明明存在也拿不到，封面只能停在站点给的 800×538 小图。
 _DMM_MISS_FILE = ".dmm_missing.json"
-_DMM_MISS_TTL = 7 * 24 * 3600
+_DMM_MISS_TTL = 24 * 3600
 
 
 def _dmm_miss_load() -> Dict[str, float]:
@@ -268,29 +271,37 @@ def _dmm_miss_load() -> Dict[str, float]:
         return {}
 
 
-def _dmm_miss_get(code: str) -> bool:
+def _dmm_miss_key(code: str, kind: str = "cover") -> str:
     cid = _dmm_code(code)
     if not cid:
+        return ""
+    # cover 用裸番号（兼容历史数据），poster 加后缀区分
+    return cid + ("" if kind == "cover" else ":" + str(kind))
+
+
+def _dmm_miss_get(code: str, kind: str = "cover") -> bool:
+    key = _dmm_miss_key(code, kind)
+    if not key:
         return True
-    ts = _dmm_miss_load().get(cid) or 0
+    ts = _dmm_miss_load().get(key) or 0
     return (time.time() - ts) < _DMM_MISS_TTL
 
 
-def _dmm_miss_add(code: str) -> None:
-    cid = _dmm_code(code)
-    if not cid:
+def _dmm_miss_add(code: str, kind: str = "cover") -> None:
+    key = _dmm_miss_key(code, kind)
+    if not key:
         return
     data = _dmm_miss_load()
-    data[cid] = time.time()
+    data[key] = time.time()
     try:
         (COVER_DIR / _DMM_MISS_FILE).write_text(json.dumps(data), encoding="utf-8")
     except OSError:
         pass
 
 
-def dmm_available(code: str) -> bool:
-    """该番号近期是否值得再向 DMM 探测（避免反复超时）。"""
-    return bool(_dmm_code(code)) and not _dmm_miss_get(code)
+def dmm_available(code: str, kind: str = "cover") -> bool:
+    """该番号的指定图（cover=横版大图 / poster=竖版海报）近期是否值得再探测。"""
+    return bool(_dmm_code(code)) and not _dmm_miss_get(code, kind)
 
 
 
@@ -326,6 +337,23 @@ def file_size(path: Optional[Path]) -> Optional[Tuple[int, int]]:
 def cover_size(cover_file: str) -> Optional[Tuple[int, int]]:
     """当前封面（data/covers 下）的像素尺寸。"""
     return file_size(cover_path(cover_file))
+
+
+def cover_signature(cover_file: str) -> Optional[Tuple[int, int]]:
+    """封面的 (字节数, 修改时间) 签名。
+
+    封面文件名由 safe_key(key) 决定，同一部影片永远是同一个名字（抽帧占位、
+    刮削图、手动换图都是覆盖写），所以「文件名变没变」判断不出封面有没有换过，
+    统计里就会把成功的替换记成 0。用大小 + mtime 比对才准确。
+    """
+    p = cover_path(cover_file)
+    if not p:
+        return None
+    try:
+        st = p.stat()
+        return (int(st.st_size), int(st.st_mtime))
+    except OSError:
+        return None
 
 
 def better_cover(new: Optional[Tuple[int, int]], old: Optional[Tuple[int, int]]) -> bool:
@@ -401,7 +429,7 @@ def ensure_poster(cover_file: str, cfg: Optional[Dict[str, Any]] = None,
         return dst.name
 
     # 1) 优先 DMM 官方竖版（真海报，比裁横图清晰一个档次）
-    if allow_network and code and dmm_available(code):
+    if allow_network and code and dmm_available(code, "poster"):
         urls = dmm_urls(code)
         if urls:
             data = download(urls["poster"], cfg or {}, referer="https://www.dmm.co.jp/")
@@ -410,7 +438,7 @@ def ensure_poster(cover_file: str, cfg: Optional[Dict[str, Any]] = None,
                 if name:
                     return name
             else:
-                _dmm_miss_add(code)
+                _dmm_miss_add(code, "poster")
 
     # 2) 兜底：从封面裁 / 归一化
     ok = make_poster(src, dst, strategy)
@@ -426,7 +454,7 @@ def upgrade_from_dmm(key: str, code: str, cfg: Dict[str, Any],
     只在刮削路径调用，手工上传 / 抽帧不覆盖用户选择。
     """
     urls = dmm_urls(code)
-    if not urls or not dmm_available(code):
+    if not urls or not dmm_available(code, "cover"):
         return {}
     out: Dict[str, str] = {}
     data = download(urls["cover"], cfg, referer="https://www.dmm.co.jp/")
@@ -441,7 +469,7 @@ def upgrade_from_dmm(key: str, code: str, cfg: Dict[str, Any],
             # 已有更大的图：记住「DMM 查过」避免每次重复请求
             pass
     if not out.get("cover"):
-        _dmm_miss_add(code)
+        _dmm_miss_add(code, "cover")
     return out
 
 

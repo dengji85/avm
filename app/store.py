@@ -390,10 +390,8 @@ def prune_missing(conn: sqlite3.Connection, alive_paths: set[str], roots: Sequen
         conn.execute("DELETE FROM movie_files WHERE id = ?", (row["id"],))
         removed += 1
     # 只清「因为文件没了才变空」的影片；已归档的即使没有文件记录也要保留
-    # （用户明确选择了「保留记录与历史」）。
-    conn.execute(
-        "DELETE FROM movies WHERE id NOT IN (SELECT DISTINCT movie_id FROM movie_files) "
-        "AND COALESCE(archived_at,'') = ''")
+    # （用户明确选择了「保留记录与历史」）。媒体文件随影片一起清掉。
+    _delete_empty_movies(conn)
     return removed
 
 
@@ -465,9 +463,7 @@ def check_missing_files(conn: sqlite3.Connection,
             restored += 1
 
     if marked:
-        conn.execute(
-            "DELETE FROM movies WHERE id NOT IN (SELECT DISTINCT movie_id FROM movie_files) "
-            "AND COALESCE(archived_at,'') = ''")
+        _delete_empty_movies(conn)
     # 记录各根状态，供维护页显示「上次可用时间」
     roots_mod.save_states(conn, states)
     return {"checked": checked, "marked": marked, "restored": restored,
@@ -1444,8 +1440,105 @@ def update_movie(conn: sqlite3.Connection, movie_id: int, payload: Dict[str, Any
                           source=tag_source if kind == "tag" else "")
 
 
-def delete_movie(conn: sqlite3.Connection, movie_id: int) -> None:
+# ------------------------------------------------------- 影片删除时的媒体清理
+#
+# 只删数据库行的话，封面 / 海报 / 预览图 / 字幕 / 证据图 / 转封装缓存会永久留在
+# data/ 里且再没有任何引用（实测某库 247 部影片的 covers 目录里 378 个文件无主，
+# 占 63MB）。这里在删库行之后统一清理，但严格限定在「软件自己管理的目录」内，
+# 且只删「不再被其它影片引用」的文件 —— 用户媒体库里的 NFO / 外挂字幕一律不碰。
+
+def collect_assets(conn: sqlite3.Connection, ids: Sequence[int]) -> List[Dict[str, Any]]:
+    """删除前记下这批影片的封面 / 背景字段值（删完就查不到了）。"""
+    ids = [int(i) for i in (ids or [])]
+    if not ids:
+        return []
+    ph = ",".join("?" * len(ids))
+    return query_all(conn, "SELECT id, cover, fanart FROM movies WHERE id IN (%s)" % ph, ids)
+
+
+def purge_movie_assets(conn: sqlite3.Connection, entries: Sequence[Dict[str, Any]],
+                       keep_covers: bool = False) -> Dict[str, int]:
+    """删除这批影片独占的软件数据文件，返回 {"files", "bytes"}。
+
+    **必须在 DELETE FROM movies 之后调用**：否则「还有没有别的影片引用这张封面」
+    会把自己也算进去，等于永远不删。
+
+    只处理 data/ 下由程序自己生成的东西：
+      covers/preview/<id>/   subs/<id>/   adcheck/<id>.jpg   remux/<id>.mp4
+      covers/<cover> + <stem>_poster.{jpg,json}   <fanart_dir>/<fanart>
+
+    keep_covers=True 时保留封面与背景（「彻底删除」会写 history_archive 快照，
+    「已离库」页要用封面图，留着更好看；这类操作次数少，占不了多少空间）。
+    """
+    from .config import COVER_DIR, DATA_DIR, REMUX_DIR, fanart_dir
+
+    files = 0
+    freed = 0
+
+    def drop(p: Path) -> None:
+        nonlocal files, freed
+        try:
+            if p.is_file():
+                sz = p.stat().st_size
+                p.unlink()
+                files += 1
+                freed += sz
+            elif p.is_dir():
+                n, b = _dir_size(p)
+                shutil.rmtree(p, ignore_errors=True)
+                files += n
+                freed += b
+        except OSError:                     # 被占用 / 权限不足：跳过，不影响删库
+            pass
+
+    for e in entries or []:
+        mid = int(e.get("id") or 0)
+        if mid <= 0:
+            continue
+        # 1) 以影片 id 命名的产物：天生只属于这一部，直接删
+        drop(COVER_DIR / "preview" / str(mid))
+        drop(DATA_DIR / "subs" / str(mid))
+        drop(DATA_DIR / "adcheck" / ("%d.jpg" % mid))
+        drop(REMUX_DIR / ("%d.mp4" % mid))
+        # 2) 以文件名引用的封面 / 背景：还有别的影片在用、或要留给历史快照，就留着
+        for field, base, derived in (
+                ("cover", COVER_DIR, ("_poster.jpg", "_poster.json")),
+                ("fanart", fanart_dir(), ())):
+            if keep_covers:
+                continue
+            raw = str(e.get(field) or "").strip()
+            fname = Path(raw).name           # 只取文件名，杜绝路径穿越
+            if not fname:
+                continue
+            if query_one(conn, "SELECT 1 FROM movies WHERE %s = ? LIMIT 1" % field, (raw,)):
+                continue
+            stem = Path(fname).stem
+            drop(base / fname)
+            for sfx in derived:
+                drop(base / (stem + sfx))
+    return {"files": files, "bytes": freed}
+
+
+def _delete_empty_movies(conn: sqlite3.Connection) -> Dict[str, Any]:
+    """删掉没有任何文件记录的影片（已归档的保留），并清理它们的软件数据文件。"""
+    where = ("id NOT IN (SELECT DISTINCT movie_id FROM movie_files) "
+             "AND COALESCE(archived_at,'') = ''")
+    victims = query_all(conn, "SELECT id, cover, fanart FROM movies WHERE " + where)
+    if not victims:
+        return {"movies": 0, "files": 0, "bytes": 0}
+    conn.execute("DELETE FROM movies WHERE " + where)
+    return {"movies": len(victims), **purge_movie_assets(conn, victims)}
+
+
+def delete_movie(conn: sqlite3.Connection, movie_id: int,
+                 purge_assets: bool = True) -> Dict[str, int]:
+    """删除影片记录；默认一并清理它独占的软件数据文件。
+
+    返回清理统计，调用方可以据此提示「同时回收了多少空间」。
+    """
+    entries = collect_assets(conn, [movie_id]) if purge_assets else []
     conn.execute("DELETE FROM movies WHERE id = ?", (movie_id,))
+    return purge_movie_assets(conn, entries) if entries else {"files": 0, "bytes": 0}
 
 
 # ----------------------------------------------------------------- 归档 / 清理
@@ -1522,20 +1615,23 @@ def _movie_snapshot(conn: sqlite3.Connection, movie_id: int, reason: str) -> boo
 
 def purge_movies(conn: sqlite3.Connection, ids: Sequence[int],
                  reason: str = "user_purge") -> Dict[str, Any]:
-    """彻底删除：**先写历史快照，再删影片**，最后清孤儿元数据。
+    """彻底删除：**先写历史快照，再删影片**，最后清孤儿元数据与媒体文件。
 
-    顺序不能反 —— 快照是观看历史唯一的可重建来源。磁盘上的封面 / 预览图不在这里
-    物理删除（删完即成为孤儿，由「软件数据占用 → 一键清理残留」统一回收，更安全）。
+    顺序不能反 —— 快照是观看历史唯一的可重建来源。
+    媒体清理保留封面（快照里存了文件名，「已离库」页要用），只删预览图 / 字幕 /
+    证据图 / 转封装缓存这些以影片 id 命名的派生产物。
     """
     ids = [int(i) for i in (ids or [])]
-    out: Dict[str, Any] = {"snapshots": 0, "deleted": 0, "orphans": {}}
+    out: Dict[str, Any] = {"snapshots": 0, "deleted": 0, "orphans": {}, "assets": {}}
     if not ids:
         return out
+    entries = collect_assets(conn, ids)
     for mid in ids:
         if _movie_snapshot(conn, mid, reason):
             out["snapshots"] += 1
-        delete_movie(conn, mid)
+        conn.execute("DELETE FROM movies WHERE id = ?", (mid,))
         out["deleted"] += 1
+    out["assets"] = purge_movie_assets(conn, entries, keep_covers=True)
     try:
         out["orphans"] = cleanup_orphans(conn)
     except Exception:
@@ -2125,20 +2221,64 @@ def _list_temp_files() -> List[Path]:
             if f.is_file() and f.name.startswith(("_extract_", "_cand_", "_dbg_"))]
 
 
+# Chrome 用户目录下纯缓存性质的子目录：删掉只是下次重新下载资源，不影响登录态
+_CHROME_CACHE_DIRS = frozenset({
+    "Cache", "Code Cache", "GPUCache", "ShaderCache", "DawnCache",
+    "GrShaderCache", "DawnGraphiteCache", "DawnWebGPUCache", "Media Cache",
+})
+
+
+def _orphan_ids(conn: sqlite3.Connection, base: Path) -> List[str]:
+    """base 下以影片 id 命名的子项（目录或文件主干），id 已不在 movies 表。"""
+    if not base.is_dir():
+        return []
+    valid = {r["id"] for r in query_all(conn, "SELECT id FROM movies")}
+    out: List[str] = []
+    for p in base.iterdir():
+        try:
+            mid = int(p.name if p.is_dir() else os.path.splitext(p.name)[0])
+        except (ValueError, OSError):
+            continue
+        if mid not in valid:
+            out.append(p.name)
+    return out
+
+
 def software_storage_stats(conn: sqlite3.Connection) -> Dict[str, Any]:
-    """统计软件自身的数据目录占用（封面、预览图、头像、背景图、临时文件、数据库等）。
+    """统计软件自身的数据目录占用，按「数据 / 缓存 / 组件」三组返回。
 
-    并识别出可清理项（临时文件、孤儿预览图），供维护页展示。"""
-    from .config import AVATAR_DIR, FANART_DIR, DB_PATH, CONFIG_PATH, COVER_DIR
-    from .config import avatar_dir, fanart_dir
-    cover_n, cover_bytes = _dir_size(COVER_DIR)
-    av_n, av_bytes = _dir_size(avatar_dir())
-    fa_n, fa_bytes = _dir_size(fanart_dir())
+    历史上只统计了封面、预览图、头像、背景图、临时文件、数据库；随着功能增加，
+    字幕下载、广告证据图、播放重封装、刮削浏览器目录、扩展组件与模型都占了不少
+    空间（实测能到 180MB 以上），这里一并补上，并给出一键清理项。
 
-    # 预览图子目录（covers/preview/）
+    covers 已扣除 covers/preview 子目录，避免与 previews 重复计数。
+    """
+    from .config import (AVATAR_DIR, CONFIG_PATH, COVER_DIR, DATA_DIR, DB_PATH,
+                         REMUX_DIR, avatar_dir, fanart_dir)
+
+    def entry(label: str, n: int, b: int, group: str = "data") -> Dict[str, Any]:
+        return {"label": label, "files": n, "bytes": b, "group": group}
+
+    # ---- 数据：封面 / 预览 / 头像 / 背景 / 字幕 / 证据图 / 数据库 / 配置
     preview_dir = COVER_DIR / "preview"
     pv_n, pv_bytes = _dir_size(preview_dir)
+    cover_n, cover_bytes = _dir_size(COVER_DIR)
+    cover_n -= pv_n                       # 预览图单独成项，主目录里扣掉
+    cover_bytes -= pv_bytes
 
+    av_n, av_bytes = _dir_size(avatar_dir())
+    fa_n, fa_bytes = _dir_size(fanart_dir())
+    # 在线字幕 + 语音识别草稿：data/subs/<movie_id>/
+    subs_dir = DATA_DIR / "subs"
+    subs_n, subs_bytes = _dir_size(subs_dir)
+    # 广告证据图：data/adcheck/<movie_id>.jpg
+    ad_dir = DATA_DIR / "adcheck"
+    ad_n, ad_bytes = _dir_size(ad_dir)
+
+    db_bytes = DB_PATH.stat().st_size if DB_PATH.exists() else 0
+    cfg_bytes = CONFIG_PATH.stat().st_size if CONFIG_PATH.exists() else 0
+
+    # ---- 缓存：可随时清理，不影响已入库数据
     temp_files = _list_temp_files()
     temp_n = len(temp_files)
     temp_bytes = 0
@@ -2147,50 +2287,99 @@ def software_storage_stats(conn: sqlite3.Connection) -> Dict[str, Any]:
             temp_bytes += f.stat().st_size
         except OSError:
             pass
-
-    # 孤儿预览图：covers/preview/ 下的子目录 id 不在 movies 表
-    valid_ids = {r["id"] for r in query_all(conn, "SELECT id FROM movies")}
-    orphan_pv = 0
-    orphan_pv_bytes = 0
-    orphan_pv_dirs: List[str] = []
-    if preview_dir.is_dir():
-        for d in preview_dir.iterdir():
-            if not d.is_dir():
-                continue
-            try:
-                mid = int(d.name)
-            except ValueError:
-                mid = -1
-            if mid not in valid_ids:
+    rm_n, rm_bytes = _dir_size(REMUX_DIR)
+    asr_tmp = DATA_DIR / "asr"                # 提取对白的临时音轨（正常情况下提取完即删）
+    at_n, at_bytes = _dir_size(asr_tmp)
+    chrome_dir = DATA_DIR / "chrome_profile"  # 刮削用的浏览器用户目录
+    ch_n, ch_bytes = _dir_size(chrome_dir)
+    # 其中真正可安全清理的只有浏览器自己的缓存目录（登录态 / Cookie 不能动）
+    cc_n = cc_bytes = 0
+    if chrome_dir.is_dir():
+        for d in chrome_dir.rglob("*"):
+            if d.is_dir() and d.name in _CHROME_CACHE_DIRS:
                 n, b = _dir_size(d)
-                orphan_pv += n
-                orphan_pv_bytes += b
-                orphan_pv_dirs.append(d.name)
+                cc_n += n
+                cc_bytes += b
+    log_n = log_bytes = 0
+    for f in sorted(DATA_DIR.glob("*.log")):
+        try:
+            log_bytes += f.stat().st_size
+            log_n += 1
+        except OSError:
+            pass
+    # 数据库备份（library.db.bak20261107 这类），保留最新一份即可
+    bak_files = sorted(p for p in DATA_DIR.glob("*.db.bak*") if p.is_file())
+    bak_n = len(bak_files)
+    bak_bytes = 0
+    for f in bak_files:
+        try:
+            bak_bytes += f.stat().st_size
+        except OSError:
+            pass
 
-    db_bytes = DB_PATH.stat().st_size if DB_PATH.exists() else 0
-    cfg_bytes = CONFIG_PATH.stat().st_size if CONFIG_PATH.exists() else 0
-
-    def entry(label, n, b):
-        return {"label": label, "files": n, "bytes": b}
+    # ---- 组件：功能性二进制与模型，占空间但删了功能就坏，不参与清理
+    ext_n = ext_bytes = 0
+    try:
+        from .ext_components import ext_root
+        ext_n, ext_bytes = _dir_size(Path(ext_root()))
+    except Exception:
+        pass
+    mdl_n, mdl_bytes = _dir_size(DATA_DIR / "models")
 
     dirs = [
         entry("covers", cover_n, cover_bytes),
         entry("previews", pv_n, pv_bytes),
         entry("avatars", av_n, av_bytes),
         entry("fanarts", fa_n, fa_bytes),
-        entry("temp", temp_n, temp_bytes),
+        entry("subs", subs_n, subs_bytes),
+        entry("adcheck", ad_n, ad_bytes),
         entry("db", 1, db_bytes),
         entry("config", 1, cfg_bytes),
+        entry("temp", temp_n, temp_bytes, "cache"),
+        entry("remux", rm_n, rm_bytes, "cache"),
+        entry("asr", at_n, at_bytes, "cache"),
+        entry("chrome", ch_n, ch_bytes, "cache"),
+        entry("logs", log_n, log_bytes, "cache"),
+        entry("backup", bak_n, bak_bytes, "cache"),
+        entry("ext", ext_n, ext_bytes, "component"),
+        entry("models", mdl_n, mdl_bytes, "component"),
     ]
     total_files = sum(d["files"] for d in dirs)
     total_bytes = sum(d["bytes"] for d in dirs)
+
+    # ---- 可清理项（孤儿 / 临时 / 缓存）
+    def orphan_stat(base: Path) -> Dict[str, Any]:
+        names = _orphan_ids(conn, base)
+        n = b = 0
+        for name in names:
+            p = base / name
+            nn, bb = _dir_size(p) if p.is_dir() else (1, p.stat().st_size if p.exists() else 0)
+            n += nn
+            b += bb
+        return {"files": n, "bytes": b, "items": names}
+
     return {
         "dirs": dirs,
+        "groups": {
+            "data": {"files": sum(d["files"] for d in dirs if d["group"] == "data"),
+                     "bytes": sum(d["bytes"] for d in dirs if d["group"] == "data")},
+            "cache": {"files": sum(d["files"] for d in dirs if d["group"] == "cache"),
+                      "bytes": sum(d["bytes"] for d in dirs if d["group"] == "cache")},
+            "component": {"files": sum(d["files"] for d in dirs if d["group"] == "component"),
+                          "bytes": sum(d["bytes"] for d in dirs if d["group"] == "component")},
+        },
         "total": {"files": total_files, "bytes": total_bytes},
         "cleanable": {
             "temp": {"files": temp_n, "bytes": temp_bytes},
-            "preview_orphan": {"files": orphan_pv, "bytes": orphan_pv_bytes,
-                               "dirs": orphan_pv_dirs},
+            "preview_orphan": orphan_stat(preview_dir),
+            "subs_orphan": orphan_stat(subs_dir),
+            "ad_orphan": orphan_stat(ad_dir),
+            "asr": {"files": at_n, "bytes": at_bytes},
+            "remux": {"files": rm_n, "bytes": rm_bytes},
+            "chrome": {"files": cc_n, "bytes": cc_bytes},
+            "logs": {"files": log_n, "bytes": log_bytes},
+            "backup": {"files": max(0, bak_n - 1), "bytes": sum(
+                f.stat().st_size for f in bak_files[1:] if f.exists()) if bak_n > 1 else 0},
         },
     }
 
@@ -2200,6 +2389,13 @@ def clean_software_storage(conn: sqlite3.Connection, targets: List[str]) -> Dict
     - 'temp'            : 临时抽帧/候选文件
     - 'preview_orphan'  : 孤儿预览图（影片已不存在的预览目录）
     - 'preview_all'     : 全部预览图（需在详情页重新生成）
+    - 'subs_orphan'     : 孤儿字幕（影片已删除的 data/subs/<id>/）
+    - 'ad_orphan'       : 孤儿广告证据图（data/adcheck/<id>.jpg）
+    - 'asr'             : 提取对白留下的临时音轨（data/asr/）
+    - 'remux'           : 播放重封装缓存（data/remux/），下次播放自动重建
+    - 'chrome'          : 刮削浏览器的缓存目录（保留登录态与 Cookie）
+    - 'logs'            : data/ 下的运行日志
+    - 'backup'          : 旧数据库备份（保留最新一份）
     - 'db_vacuum'       : 收缩数据库未用空间
     返回清理统计。"""
     from .config import COVER_DIR
@@ -2257,6 +2453,97 @@ def clean_software_storage(conn: sqlite3.Connection, targets: List[str]) -> Dict
         # 清空预览记录，详情页可重新生成
         conn.execute("DELETE FROM movie_previews")
         cleared.append("preview_all")
+
+    if "subs_orphan" in targets or "ad_orphan" in targets:
+        from .config import DATA_DIR as _DD
+        for key, sub in (("subs_orphan", "subs"), ("ad_orphan", "adcheck")):
+            if key not in targets:
+                continue
+            base = _DD / sub
+            for name in _orphan_ids(conn, base):
+                p = base / name
+                try:
+                    if p.is_dir():
+                        n, b = _dir_size(p)
+                        shutil.rmtree(p, ignore_errors=True)
+                    else:
+                        b, n = p.stat().st_size, 1
+                        p.unlink()
+                    removed += n
+                    freed += b
+                except OSError:
+                    pass
+            cleared.append(key)
+
+    if "asr" in targets:
+        from .config import DATA_DIR as _DD
+        d = _DD / "asr"                      # 提取对白的临时音轨，删了不影响成品字幕
+        if d.is_dir():
+            for p in list(d.iterdir()):
+                try:
+                    if p.is_dir():
+                        n, b = _dir_size(p)
+                        shutil.rmtree(p, ignore_errors=True)
+                    else:
+                        b, n = p.stat().st_size, 1
+                        p.unlink()
+                    removed += n
+                    freed += b
+                except OSError:
+                    pass
+        cleared.append("asr")
+
+    if "remux" in targets:
+        from .config import REMUX_DIR as _RD
+        if _RD.is_dir():
+            n, b = _dir_size(_RD)
+            try:
+                shutil.rmtree(_RD, ignore_errors=True)
+                removed += n
+                freed += b
+            except OSError:
+                pass
+        cleared.append("remux")
+
+    if "chrome" in targets:
+        from .config import DATA_DIR as _DD
+        root = _DD / "chrome_profile"        # 只删纯缓存目录，登录态与 Cookie 保留
+        if root.is_dir():
+            for d in [p for p in root.rglob("*")
+                      if p.is_dir() and p.name in _CHROME_CACHE_DIRS]:
+                n, b = _dir_size(d)
+                try:
+                    shutil.rmtree(d, ignore_errors=True)
+                    removed += n
+                    freed += b
+                except OSError:
+                    pass
+        cleared.append("chrome")
+
+    if "logs" in targets:
+        from .config import DATA_DIR as _DD
+        for f in list(_DD.glob("*.log")):
+            try:
+                sz = f.stat().st_size
+                f.unlink()
+                removed += 1
+                freed += sz
+            except OSError:                  # 正在被写入的日志删不掉，跳过即可
+                pass
+        cleared.append("logs")
+
+    if "backup" in targets:
+        from .config import DATA_DIR as _DD
+        baks = sorted(p for p in _DD.glob("*.db.bak*") if p.is_file())
+        for f in baks[1:]:                   # 保留最新一份，其余删掉
+            try:
+                sz = f.stat().st_size
+                f.unlink()
+                removed += 1
+                freed += sz
+            except OSError:
+                pass
+        cleared.append("backup")
 
     if "db_vacuum" in targets:
         try:
@@ -2756,31 +3043,82 @@ def _orphan_files(dir_path: Path, valid_stems: set, samples: int = 8) -> Dict[st
     return {"files": n, "bytes": total, "samples": found}
 
 
+def _orphan_dir_stat(conn: sqlite3.Connection, base: Path) -> Dict[str, Any]:
+    """base 下以影片 id 命名的孤儿项统计（目录或文件都算）。"""
+    names = _orphan_ids(conn, base)
+    n = b = 0
+    for name in names:
+        p = base / name
+        nn, bb = _dir_size(p) if p.is_dir() else (1, p.stat().st_size if p.exists() else 0)
+        n += nn
+        b += bb
+    return {"files": n, "bytes": b, "items": names[:8]}
+
+
 def orphan_media_stats(conn: sqlite3.Connection) -> Dict[str, Any]:
-    """磁盘上无主的封面 / 背景文件（预览目录的孤儿另由 software_storage_stats 统计）。"""
-    from .config import COVER_DIR, fanart_dir
+    """孤儿数据体检：磁盘上没有归属的软件数据 + 数据库里指向已删影片的悬空行。
+
+    正常删除路径（delete_movie / purge_movies / 扫描清理）现在会把媒体文件一起
+    带走，正常情况下这里应该接近 0；非 0 说明有历史遗留、手动改库、程序异常退出
+    或外部工具删了库文件 —— 这时才需要它兜底。
+    """
+    from .config import COVER_DIR, DATA_DIR, REMUX_DIR, fanart_dir
 
     cover_stems = {Path(str(r["cover"])).stem for r in query_all(
         conn, "SELECT DISTINCT cover FROM movies WHERE COALESCE(cover,'') <> ''")}
     fanart_stems = {Path(str(r["fanart"])).stem for r in query_all(
         conn, "SELECT DISTINCT fanart FROM movies WHERE COALESCE(fanart,'') <> ''")}
-    return {
+    out: Dict[str, Any] = {
         "covers": _orphan_files(COVER_DIR, cover_stems),
         "fanarts": _orphan_files(fanart_dir(), fanart_stems),
+        "previews": _orphan_dir_stat(conn, COVER_DIR / "preview"),
+        "subs": _orphan_dir_stat(conn, DATA_DIR / "subs"),
+        "adcheck": _orphan_dir_stat(conn, DATA_DIR / "adcheck"),
+        "remux": _orphan_dir_stat(conn, REMUX_DIR),
         "dangling": dangling_stats(conn),
     }
+    media = [v for k, v in out.items() if k != "dangling"]
+    out["total"] = {"files": sum(v.get("files", 0) for v in media),
+                    "bytes": sum(v.get("bytes", 0) for v in media)}
+    return out
 
 
 def clean_orphan_media(conn: sqlite3.Connection, targets: Sequence[str]) -> Dict[str, Any]:
-    """删除无主封面 / 背景文件。targets 取 'covers' / 'fanarts'。
+    """删除无归属的软件数据。targets 取：
+    'covers' / 'fanarts'（按文件名引用）或
+    'previews' / 'subs' / 'adcheck' / 'remux'（按影片 id 命名）。
 
     先按库内引用集合重新判定一遍（而不是用前端传来的清单），避免界面数据过期误删。
     """
-    from .config import COVER_DIR, fanart_dir
+    from .config import COVER_DIR, DATA_DIR, REMUX_DIR, fanart_dir
 
+    by_id = {
+        "previews": COVER_DIR / "preview",
+        "subs": DATA_DIR / "subs",
+        "adcheck": DATA_DIR / "adcheck",
+        "remux": REMUX_DIR,
+    }
     done: Dict[str, int] = {}
     freed = 0
     for target in targets or []:
+        if target in by_id:
+            base = by_id[target]
+            removed = 0
+            for name in _orphan_ids(conn, base):
+                p = base / name
+                try:
+                    if p.is_dir():
+                        n, b = _dir_size(p)
+                        shutil.rmtree(p, ignore_errors=True)
+                    else:
+                        b, n = p.stat().st_size, 1
+                        p.unlink()
+                    removed += n
+                    freed += b
+                except OSError:
+                    continue
+            done[target] = removed
+            continue
         if target == "covers":
             dir_path, sql = COVER_DIR, "SELECT DISTINCT cover FROM movies WHERE COALESCE(cover,'') <> ''"
         elif target == "fanarts":

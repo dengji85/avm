@@ -12,20 +12,23 @@ JavDB 同样受到 Cloudflare 保护，通常需要配置代理或 Cookie 才能
 from __future__ import annotations
 
 import re
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from .base import BaseProvider
 from bs4 import BeautifulSoup
 
 DEFAULT_BASE_URL = "https://javdb.com"
 
+# 详情页字段名 → 内部字段。JavDB 2025 改版后详情页改用「番號 / 時長 / 片商 / 類別 /
+# 演員」等繁体标签，旧版是「番号 / 片長 / 製作商」。两套写法都收，避免改版即失效
+# （此前只有旧写法，导致新页面拿不到片商与时长）。
 INFO_MAP = {
-    "番号": None,
-    "日期": "release_date",
-    "片長": "runtime",
-    "導演": "director",
-    "製作商": "studio",
-    "發行商": "publisher",
+    "番號": None, "番号": None,
+    "日期": "release_date", "發行日期": "release_date", "发行日期": "release_date",
+    "時長": "runtime", "时长": "runtime", "片長": "runtime", "片长": "runtime",
+    "導演": "director", "导演": "director",
+    "片商": "studio", "製作商": "studio", "制作商": "studio",
+    "發行商": "publisher", "发行商": "publisher",
     "系列": "series",
 }
 
@@ -81,6 +84,12 @@ class JavDBProvider(BaseProvider):
         if dhtml:
             meta = self._parse(dhtml)
             if meta:
+                # 详情页解析成功但缺封面 / 日期时，用搜索卡补齐（搜索卡结构简单，
+                # 一直带封面；详情页改版或缺图时靠这层兜底，不至于退回视频抽帧）
+                if not meta.get("cover") and card_meta.get("cover"):
+                    meta["cover"] = card_meta["cover"]
+                if not meta.get("release_date") and card_meta.get("release_date"):
+                    meta["release_date"] = card_meta["release_date"]
                 return meta
             self.last_error = "详情页需登录（JavDB 匿名只开放搜索卡），已用搜索卡补基础信息"
         if not (card_meta.get("title") or card_meta.get("cover")):
@@ -140,46 +149,81 @@ class JavDBProvider(BaseProvider):
         if h2:
             meta["title"] = h2.get_text(" ", strip=True)
 
-        img = soup.select_one(".movie-panel .image img, .video-cover img")
+        # 封面：旧版是 .movie-panel .image img；2025 改版后容器为 .column-video-cover，
+        # 或者 class 直接挂在 <img class="video-cover"> 上（两种都收，改版也不会再丢图）
+        img = (soup.select_one(".movie-panel .image img")
+               or soup.select_one(".column-video-cover img")
+               or soup.select_one("img.video-cover"))
         if img:
             src = img.get("src") or img.get("data-src") or ""
-            if src:
+            if src and not src.startswith("data:"):
                 meta["cover"] = src
 
-        # 字段（番号 / 日期 / 片長 / 導演 / 製作商 / 發行商 / 系列）
+        # 字段（番號 / 日期 / 時長 / 導演 / 片商 / 系列 …）
         for nav in soup.select(".movie-panel .columns .column nav, .panel-block"):
-            key = nav.get_text(" ", strip=True).split(":", 1)[0].strip()
+            full = nav.get_text(" ", strip=True)
+            # 页面用半角冒号；少数镜像用全角，一并切开
+            key = re.split(r"[:：]", full, 1)[0].strip()
             field = INFO_MAP.get(key)
-            if not field:
+            if field == "rating" or not field:
                 continue
-            val = nav.get_text(" ", strip=True)
-            if ":" in val:
-                val = val.split(":", 1)[1].strip()
+            val = re.split(r"[:：]", full, 1)[1].strip() if re.search(r"[:：]", full) else ""
             if field == "runtime":
                 meta[field] = _parse_runtime(val)
             elif val:
                 meta[field] = val
 
-        # 女优（含头像）
-        actor_els = soup.select(".movie-panel .actors a, .panel-block .actors a")
-        actors = [a.get_text(strip=True) for a in actor_els if a.get_text(strip=True)]
+        # 女优：旧版在 .actors a 里；2025 改版后是 <a class="actor-female"> 直接挂在
+        # 演员那一行（没有 .actors 容器），且同一人可能出现在多处，按名字去重。
+        actor_els = soup.select(".movie-panel .actors a, .panel-block .actors a, "
+                                "a.actor-female, a.actor-male")
+        actors: List[str] = []
+        avatars: Dict[str, str] = {}
+        for a in actor_els:
+            nm = a.get_text(strip=True)
+            if not nm or nm in actors:
+                continue
+            actors.append(nm)
+            img = a.select_one("img")
+            src = (img.get("src") if img else None) or a.get("data-original")
+            if src:
+                avatars[nm] = src
         if actors:
             meta["actresses"] = actors
-            avatars = {}
-            for a in actor_els:
-                nm = a.get_text(strip=True)
-                if not nm:
-                    continue
-                img = a.select_one("img")
-                src = (img.get("src") if img else None) or a.get("data-original")
-                if src:
-                    avatars[nm] = src
             if avatars:
                 meta["actress_avatars"] = avatars
-        # 类型
-        genres = [a.get_text(strip=True) for a in soup.select(".movie-panel .tags a, .panel-block .tags a")]
+
+        # 类型：改版后是「類別: A , B , C」那一行里的 /tags 链接（旧的 .tags a 是
+        # 磁力链接上的「高清 / 字幕」标记，不是题材，只在没有類別行时才退回用它）
+        genres: List[str] = []
+        for pb in soup.select(".panel-block"):
+            if not re.match(r"^類[別别]", pb.get_text(" ", strip=True)):
+                continue
+            for a in pb.select("a[href*='/tags']"):
+                g = a.get_text(strip=True)
+                if g and g not in genres:
+                    genres.append(g)
+            break
+        if not genres:
+            genres = [a.get_text(strip=True)
+                      for a in soup.select(".movie-panel .tags a, .panel-block .tags a")
+                      if a.get_text(strip=True)]
         if genres:
             meta["genres"] = genres
+
+        # 评分：改版后详情页有「評分: 4.56分, 由4543人評價」
+        if not meta.get("rating"):
+            for pb in soup.select(".panel-block"):
+                txt = pb.get_text(" ", strip=True)
+                if not re.match(r"^評[分价]", txt):
+                    continue
+                m = re.search(r"([\d.]+)\s*分", txt)
+                if m:
+                    try:
+                        meta["rating"] = float(m.group(1))
+                    except ValueError:
+                        pass
+                break
 
         if not (meta.get("title") or meta.get("cover")):
             return None

@@ -456,6 +456,16 @@ def _migrate(conn: sqlite3.Connection) -> None:
                      ("sub_duration_ms", "INTEGER DEFAULT 0")):
         if col not in sub_cols:
             conn.execute("ALTER TABLE movie_subtitles ADD COLUMN %s %s" % (col, ddl))
+    # 字幕校准：与字幕文件本身正交的元数据（可手动保存，也可来自自动建议）。
+    # 独立表而非往 movie_subtitles 塞列：便于按 part 复用、保留校准方法与置信度。
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS subtitle_sync ("
+        "sub_id INTEGER PRIMARY KEY REFERENCES movie_subtitles(id) ON DELETE CASCADE, "
+        "part INTEGER DEFAULT 0, "
+        "offset_ms INTEGER DEFAULT 0, scale REAL DEFAULT 1.0, "
+        "anchor_sec REAL DEFAULT 0, pos_y INTEGER DEFAULT 0, "
+        "method TEXT DEFAULT '', confidence REAL DEFAULT 0, "
+        "updated_at TEXT DEFAULT (datetime('now','localtime')))")
     # 刮削日志逐源明细：老库补 detail 列
     log_cols = {r[1] for r in conn.execute("PRAGMA table_info(scrape_logs)").fetchall()}
     if "detail" not in log_cols:
@@ -482,6 +492,19 @@ def _migrate(conn: sqlite3.Connection) -> None:
     gl_cols = {r[1] for r in conn.execute("PRAGMA table_info(ai_glossary)").fetchall()}
     if "lang" not in gl_cols:
         conn.execute("ALTER TABLE ai_glossary ADD COLUMN lang TEXT DEFAULT ''")
+    # 广告片内容检测结果（每片一行，重跑覆盖）：分数 / 等级 / 各段文字条比例 / 证据拼版
+    #   level: clean / suspect / likely；ignored=1 表示人工判定「不是广告，别再报」
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS ad_checks ("
+        "movie_id INTEGER PRIMARY KEY REFERENCES movies(id) ON DELETE CASCADE, "
+        "file_id INTEGER DEFAULT 0, path TEXT DEFAULT '', "
+        "score REAL DEFAULT 0, level TEXT DEFAULT '', "
+        "duration REAL DEFAULT 0, runtime_sec REAL DEFAULT 0, "
+        "head_hi REAL DEFAULT 0, body_hi REAL DEFAULT 0, tail_hi REAL DEFAULT 0, "
+        "signals TEXT DEFAULT '{}', sheet TEXT DEFAULT '', "
+        "ignored INTEGER DEFAULT 0, "
+        "checked_at TEXT DEFAULT (datetime('now','localtime')))")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_adcheck_level ON ad_checks(level, score)")
     conn.commit()
 
 
