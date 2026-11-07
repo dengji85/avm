@@ -62,6 +62,29 @@ jobs:
           path: |
             dist/AVM-*.exe
 
+      # 发布说明从 CHANGELOG.md 自动抽取对应版本段，避免手改 RELEASE_NOTES.md 导致发出旧版内容
+      - name: Generate release notes from CHANGELOG
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          python - <<'PY'
+          import re, sys
+          tag = "${{ github.ref_name }}"
+          ver = tag[1:] if tag.startswith("v") else tag
+          text = open("CHANGELOG.md", encoding="utf-8").read()
+          pat = re.compile(r'^##\s*\[v?' + re.escape(ver) + r'\b', re.M)
+          m = pat.search(text)
+          if not m:
+              sys.exit("version header not found for " + tag)
+          rest = text[m.end():]
+          nxt = re.search(r'\n##\s', rest)
+          end = m.end() + (nxt.start() if nxt else len(rest))
+          section = text[m.start():end].strip() + "\n"
+          section = re.sub(r'^##\s*\[[^\]]+\][^\n]*\n', '', section, count=1).strip() + "\n"
+          open("RELEASE_NOTES.md", "w", encoding="utf-8").write(section)
+          print("generated RELEASE_NOTES.md for", tag)
+          PY
+
       - name: Publish GitHub Release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
