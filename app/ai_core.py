@@ -181,6 +181,29 @@ def stats() -> Dict[str, Any]:
         return dict(_STATS)
 
 
+# ------------------------------------------------------------------ 拒答识别
+#: 模型有时不报错，而是把「抱歉，我无法协助…」这类拒答话术当**结果**返回；
+#: 不识别的话，这句话会被当成简介存进库、当成译文写进字幕。
+#: 措辞刻意精确（"无法翻译/协助"这类短语几乎不会出现在正常字幕对白里），
+#: 避免把「对不起，我不能爱你」之类的正常台词误判成拒答。
+_REFUSAL_MARKERS = (
+    "无法翻译", "无法协助", "不能协助", "无法完成这个", "无法继续这个对话",
+    "无法提供这方面的内容", "无法生成此类", "无法处理此类",
+    "违反了内容政策", "违反我的使用政策", "违反了我的使用政策",
+    "违反了使用政策", "违反了相关政策", "内容政策", "content policy",
+    "作为一个 ai", "as an ai", "i'm sorry, but i cannot", "i cannot assist",
+    "i can't assist", "i can't help with", "i cannot fulfill", "i won't assist",
+)
+
+
+def looks_like_refusal(text: str) -> bool:
+    """返回是否为「模型把拒答话术当结果返回」。空串不算（空串由调用方按原逻辑处理）。"""
+    t = str(text or "").strip().lower()
+    if not t:
+        return False
+    return any(m in t for m in _REFUSAL_MARKERS)
+
+
 # ------------------------------------------------------------------ 缓存
 _CACHE_LOCK = threading.Lock()
 _CACHE: "OrderedDict[str, tuple]" = OrderedDict()

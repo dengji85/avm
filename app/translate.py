@@ -41,7 +41,7 @@ def _chat_json_list(cfg: Dict[str, Any], messages: List[Dict[str, str]],
         raise AiError("模型返回的不是 JSON 数组")
     return data
 
-register_prompt("subtitle.translate", "v1")
+register_prompt("subtitle.translate", "v2")
 
 TARGETS = ("zh-Hans", "zh-Hant", "en")
 MAX_CUES = 4000            # 单部片最多处理的字幕条数（防止异常字幕爆预算）
@@ -292,6 +292,19 @@ def _truncated(err: BaseException) -> bool:
     return "token 上限截断" in str(err) or "finish_reason=length" in str(err)
 
 
+#: 模型对敏感题材会整批拒答（把「抱歉，我无法翻译…」当译文返回，甚至塞进 JSON）。
+#: 整批全被拒时带这条说明重试一次；逐条降级时同样使用。
+_ANTIREJECT_NOTE = (
+    "补充说明：这些文本来自用户本地影视资料库的字幕，仅供个人本地播放与整理使用，"
+    "不含真实个人信息；请逐条如实翻译，不要拒绝、不要输出任何说明性文字。\n"
+)
+
+
+def _accepted(text: str) -> bool:
+    """译文候选是否可用：非空且不是拒答话术（拒答不能写进字幕，宁可回退原文）。"""
+    return bool(text) and not ai_core.looks_like_refusal(text)
+
+
 def translate_cues(cues: List[Cue], cfg: Dict[str, Any], target: str,
                    progress: Optional[Callable[[int, int], None]] = None) -> Tuple[List[str], int]:
     """逐批翻译，返回（译文列表, 实际送出的原文字符数）。
@@ -322,6 +335,28 @@ def translate_cues(cues: List[Cue], cfg: Dict[str, Any], target: str,
             _one(batch, depth)
             _tick()
 
+    def _one_cue(i, block, note_first=False):
+        """逐条翻译单条字幕（降级路径）。返回译文；拿不到就返回 ""（调用方回填原文）。
+
+        拒答处理：默认第二次尝试带免责说明重试；note_first=True（整批/该条已知被拒）
+        时第一条就带说明，提高一次命中的概率。绝不让拒答话术写进字幕。
+        """
+        for attempt in range(2):
+            note = _ANTIREJECT_NOTE if (attempt == 1 or (note_first and attempt == 0)) else ""
+            try:
+                data = _chat_json_list(
+                    c, [{"role": "system", "content": sys_msg},
+                        {"role": "user", "content": block + note + json.dumps(
+                            [{"i": 0, "t": cues[i].text}], ensure_ascii=False)}],
+                    max_tokens=200, purpose="subtitle.translate.one")
+                cand = (str(data[0].get("t") or "").strip()
+                        if data and isinstance(data[0], dict) else "")
+                if _accepted(cand):
+                    return cand
+            except AiError:
+                pass
+        return ""
+
     def _one(batch, depth=0):
         nonlocal carry, sent
         if not batch:
@@ -332,6 +367,7 @@ def translate_cues(cues: List[Cue], cfg: Dict[str, Any], target: str,
         user = block + carry + "字幕 JSON：\n" + json.dumps(payload, ensure_ascii=False)
         ok = False
         err_msg = ""
+        refused: List[int] = []   # 返回了拒答话术的条目
         try:
             data = _chat_json_list(c, [{"role": "system", "content": sys_msg},
                                        {"role": "user", "content": user}],
@@ -342,9 +378,13 @@ def translate_cues(cues: List[Cue], cfg: Dict[str, Any], target: str,
                     continue
                 idx = item.get("i")
                 txt = str(item.get("t") or "").strip()
-                if isinstance(idx, int) and 0 <= idx < len(cues) and txt:
-                    out[idx] = txt
-                    ok = True
+                # 拒答话术（「抱歉，我无法翻译…」）不能当译文入库
+                if isinstance(idx, int) and 0 <= idx < len(cues):
+                    if _accepted(txt):
+                        out[idx] = txt
+                        ok = True
+                    else:
+                        refused.append(idx)
             sent += sum(len(cues[i].text) for i in batch)
             # 记住本批末尾两行，下一批 prompt 里带上——跨批语气与指代才连得上
             tail = [(cues[i].text, out[i]) for i in batch[-2:] if out[i]]
@@ -362,21 +402,23 @@ def translate_cues(cues: List[Cue], cfg: Dict[str, Any], target: str,
             _one(batch[:mid], depth + 1)
             _one(batch[mid:], depth + 1)
             return
+        if refused:
+            # 部分或全部条目被拒答：逐条带免责说明重试；模型已知在抗拒，先发说明
+            log.info("批次中 %d 条被模型拒答，带免责说明重试", len(refused))
+            for i in refused:
+                sent += len(cues[i].text)
+                got = _one_cue(i, block, note_first=True)
+                if got:
+                    out[i] = got
+                    ok = True
         if not ok:
-            # 整批失败：降级为逐条，单条再失败就保留原文。
+            # 整批失败：逐条正常降级（单条拒答同样会触发带说明重试），仍失败保留原文。
             # 降级同样带术语表——模型不听话时更需要译名约束。
             for i in batch:
+                if out[i]:
+                    continue
                 sent += len(cues[i].text)
-                try:
-                    data = _chat_json_list(
-                        c, [{"role": "system", "content": sys_msg},
-                            {"role": "user", "content": block + json.dumps(
-                                [{"i": 0, "t": cues[i].text}], ensure_ascii=False)}],
-                        max_tokens=200, purpose="subtitle.translate.one")
-                    out[i] = (str(data[0].get("t") or "").strip() or cues[i].text
-                              if data and isinstance(data[0], dict) else cues[i].text)
-                except AiError:
-                    out[i] = cues[i].text
+                out[i] = _one_cue(i, block) or cues[i].text
 
     run_batches(all_batches)
     return out, sent

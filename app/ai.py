@@ -68,9 +68,19 @@ def generate_synopsis(movie: Dict[str, Any], cfg: Optional[Dict[str, Any]] = Non
         user += "\n已有简介（请在其基础上润色补全，保持事实一致）：\n%s\n" % existing
     else:
         user += "\n请生成一段 2-4 句话的中文简介。"
-    return chat(c, [{"role": "system", "content": sys},
-                    {"role": "user", "content": user}],
-                max_tokens=500, purpose="synopsis").strip()
+    out = chat(c, [{"role": "system", "content": sys},
+                   {"role": "user", "content": user}],
+               max_tokens=500, purpose="synopsis").strip()
+    if ai_core.looks_like_refusal(out):
+        # 模型把拒答话术当简介返回：换中性措辞、降温重试一次，仍拒答就返回空串
+        # （空串由调用方降级处理，绝不把「抱歉，我无法…」写进库）
+        out = chat(c, [{"role": "system", "content": _FALLBACK_SYNOPSIS},
+                       {"role": "user", "content": user}],
+                   max_tokens=500, temperature=0.2,
+                   purpose="synopsis.fallback").strip()
+        if ai_core.looks_like_refusal(out):
+            out = ""
+    return out
 
 
 # 模型对成人向内容可能直接返回空串（不是报错）。此时换一条中性措辞重试，
@@ -80,17 +90,29 @@ _FALLBACK_SUMMARY = (
     "使用概括性语言，避免细节描写。只输出正文，不要标题。"
 )
 
+# 元数据简介的中性降级措辞（generate_synopsis 拒答重试用）
+_FALLBACK_SYNOPSIS = (
+    "你是影视资料库助手。根据给出的番号、标题、演职员等元数据，整理成简洁、客观、"
+    "不低俗的中文简介。只输出简介正文，不要解释、不要标题。"
+)
+
 
 def _summary_call(c, sys_text: str, user: str, tag: str,
                   temperature: Optional[float] = None, max_tokens: int = 700) -> str:
     try:
-        return chat(c, [{"role": "system", "content": sys_text},
-                        {"role": "user", "content": user}],
-                    max_tokens=max_tokens, temperature=temperature,
-                    purpose=tag).strip()
+        out = chat(c, [{"role": "system", "content": sys_text},
+                       {"role": "user", "content": user}],
+                   max_tokens=max_tokens, temperature=temperature,
+                   purpose=tag).strip()
     except AiError as e:
         ai_core.log.warning("摘要调用失败（%s）：%s", tag, e)
         return ""
+    if ai_core.looks_like_refusal(out):
+        # 拒答话术当摘要返回：按空串处理，让 _summary_with_fallback 的
+        # 中性措辞重试接手
+        ai_core.log.warning("摘要返回拒答话术（%s），转中性措辞重试", tag)
+        return ""
+    return out
 
 
 def _summary_with_fallback(c, sys_text: str, user: str, tag: str,
@@ -178,13 +200,14 @@ def suggest_tags(movie: Dict[str, Any], cfg: Optional[Dict[str, Any]] = None) ->
     out = chat(c, [{"role": "system", "content": sys},
                    {"role": "user", "content": user}],
                max_tokens=300, purpose="tags")
-    if not out.strip():
-        # 部分模型对题材敏感时会返回空串：降温后重试一次，仍为空才报错
+    empty = (lambda s: not s.strip() or ai_core.looks_like_refusal(s))
+    if empty(out):
+        # 空串或拒答话术：降温重试一次，仍不行才报错（绝不把拒答文本拆成标签）
         out = chat(c, [{"role": "system", "content": sys},
                        {"role": "user", "content": user}],
                    max_tokens=300, temperature=0.2, purpose="tags")
-    if not out.strip():
-        raise AiError("模型返回空内容（可能触发了内容过滤）。可到「提示词」里把措辞改中性一些，或换一个模型后重试")
+    if empty(out):
+        raise AiError("模型返回空内容或拒答（可能触发了内容过滤）。可到「提示词」里把措辞改中性一些，或换一个模型后重试")
     # 兼容顿号 / 换行 / 编号列表，避免只认逗号导致整段被当成一个标签
     cleaned = (out.replace("，", ",").replace("、", ",")
                   .replace("\n", ",").replace("；", ",").replace(";", ","))
