@@ -2,6 +2,7 @@ import { computed } from 'vue'
 import { state } from '../state.js'
 import { scanStatus, scrapeStatus, startScan, startScrape, cancelScan, cancelScrape, scrapeLogs, actressFetchStatus, actressFetchCancel } from '../api.js'
 import { toast } from '../utils.js'
+import { t } from '../i18n/index.js'
 
 let timer = null
 let wasScanning = false
@@ -27,6 +28,8 @@ function normalize(raw) {
     counters: (r.counters && typeof r.counters === 'object') ? r.counters : {},
     logs: Array.isArray(r.logs) ? r.logs : [],
     task_id: r.task_id || '',
+    // 0 结果时后端给的排查线索（/api/scan/status），供起步清单渲染具体下一步
+    hint: r.hint || null,
   }
 }
 
@@ -54,19 +57,19 @@ async function poll() {
   // 任务结束时：存档进历史（失败数据可回看）+ 提示 + 广播刷新
   if (wasScanning && !scanning) {
     archiveTask('scan', '扫描媒体库')
-    toast('扫描已完成', 'ok')
+    toast(t('guide.scanDone'), 'ok')
     window.dispatchEvent(new CustomEvent('avm-refresh'))
   }
   if (wasScraping && !scraping) {
     archiveTask('scrape', '刮削元数据')
     const { ok, fail } = state.task.scrape
-    toast(`刮削完成${ok || fail ? `：成功 ${ok} · 失败 ${fail}` : ''}`, 'ok')
+    toast(`${t('guide.scrapeDone')}${ok || fail ? ` (${ok}/${fail})` : ''}`, 'ok')
     window.dispatchEvent(new CustomEvent('avm-refresh'))
   }
   if (wasActressFetching && !actressFetching) {
     archiveTask('actress_fetch', '女优资料抓取')
     const { ok, fail } = state.task.actress_fetch
-    toast(`女优资料抓取完成${ok || fail ? `：成功 ${ok} · 失败 ${fail}` : ''}`, 'ok')
+    toast(`${t('guide.actressDone')}${ok || fail ? ` (${ok}/${fail})` : ''}`, 'ok')
     window.dispatchEvent(new CustomEvent('avm-refresh'))
   }
   wasScanning = scanning
@@ -140,9 +143,10 @@ export function useTasks() {
       await startScan(body)
       state.task.scan.running = true
       state.taskPanelOpen = true
-      toast('已开始扫描', 'ok')
+      toast(t('guide.scanStarted'), 'ok')
       schedule(400)
-    } catch (e) { toast(e.message, 'err') }
+      return true
+    } catch (e) { toast(e.message, 'err'); return false }
   }
 
   async function runScrape(body = {}) {

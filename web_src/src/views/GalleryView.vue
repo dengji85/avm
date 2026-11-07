@@ -16,6 +16,13 @@ import ContextMenu from '../components/ContextMenu.vue'
 const { items, total, loading, loadingMore, hasMore, load, loadMore, patchItem } = useLibrary()
 const { runScan } = useTasks()
 
+/* 空库时除了「再扫一次」，还要给一条能改目录 / 体积门槛的入口：
+   只重复扫描解决不了路径或过滤条件没配好的问题。 */
+function goLibrarySettings() {
+  state.settingsTab = 'library'
+  state.view = 'settings'
+}
+
 const cont = ref([])
 const contLoading = ref(false)
 
@@ -387,7 +394,10 @@ watch(
           >
             <template #empty-action>
               <button v-if="hasActiveFilter()" class="btn" @click="resetFilters">{{ $t('view.clearFilters') }}</button>
-              <button v-else class="btn primary" @click="runScan({})">扫描媒体库</button>
+              <template v-else>
+                <button class="btn primary" @click="runScan({})">{{ $t('guide.scanLibrary') }}</button>
+                <button class="btn" @click="goLibrarySettings">{{ $t('guide.troubleAction') }}</button>
+              </template>
             </template>
           </MovieGrid>
 

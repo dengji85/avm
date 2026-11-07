@@ -68,6 +68,7 @@ export const state = reactive({
 
   // ---- 首次启动引导 ----
   onboarded: false,   // true 表示引导已结束（遮罩关闭）
+  guideOpen: false,   // 「? 上手指南」侧边面板是否展开
 
   // ---- 界面偏好（持久化） ----
   // 默认深色：媒体库主视觉偏暗，且深色主题对浏览器原生控件（如 file picker）

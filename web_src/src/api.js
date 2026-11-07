@@ -1,5 +1,6 @@
 // 统一 API 请求封装。开发期由 vite proxy 转发 /api 到后端。
 import { ref } from 'vue'
+import { t } from './i18n/index.js'
 export const API = '/api'
 const TOKEN_KEY = 'avm_access_token'
 // 后端不可达（服务未启动 / 连接被拒）时的全局状态，供 UI 显示离线横幅
@@ -49,7 +50,7 @@ export async function api(path, options = {}) {
   } catch (e) {
     // 网络层失败：通常是后端服务未启动或连接被拒绝
     serverOffline.value = true
-    const err = new Error('无法连接服务器，请确认后端服务（avm）已启动')
+    const err = new Error(t('guide.networkError'))
     err.code = 'NETWORK'
     err.offline = true
     throw err
@@ -61,19 +62,19 @@ export async function api(path, options = {}) {
   if (!res.ok) {
     if (res.status === 401 && data && data.code === 'NO_TOKEN') {
       if (_onNoToken) _onNoToken()
-      const err = new Error('需要访问令牌')
+      const err = new Error(t('guide.noToken'))
       err.code = 'NO_TOKEN'
       throw err
     }
     if (res.status === 423) {
       // 服务端隐私锁定：内容被拒绝返回，前端切到遮挡层（刷新也无法绕过）
       if (_onLocked) _onLocked()
-      const err = new Error('内容已锁定')
+      const err = new Error(t('guide.locked'))
       err.code = 'LOCKED'
       throw err
     }
     const detail = data && (data.detail || (data.errors && data.errors[0] && data.errors[0].msg))
-    throw new Error(typeof detail === 'string' ? detail : `请求失败 (${res.status})`)
+    throw new Error(typeof detail === 'string' ? detail : t('guide.requestFailed', { code: res.status }))
   }
   return data
 }

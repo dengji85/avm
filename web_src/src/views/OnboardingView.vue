@@ -1,26 +1,30 @@
 <script setup>
 /**
- * 首次启动引导（4 步）：语言 → 媒体库目录 → 访问方式 → 完成。
+ * 首次启动引导（3 步 + 结果确认）：语言 → 媒体库目录 → 想先做成什么 → 结果。
  *
  * 设计要点：
  *  · **按环境换控件**：容器里看不到宿主机文件系统，目录浏览按钮直接隐藏，
  *    预填约定的挂载点 /media，并说明宿主机目录要在 compose 里挂载；
- *  · **第 3 步只问一个问题**（谁会用），用它决定完成页是否提示两步验证，
- *    不在向导里做认证设置 —— 用户此刻还没有"要保存凭据"的意识，
- *    在这里改认证最容易把人锁在门外；
- *  · 完成页给出访问地址、令牌位置与手机登录方式，用户照做即可。
+ *  · **第 3 步只问意图**，用它决定后续提示，不在向导里做认证设置 ——
+ *    用户此刻还没有"要保存凭据"的意识，在这里改认证最容易把人锁在门外；
+ *  · **不再「点完就撒手」**：结果页会等扫描跑完，明确告诉用户找到几部影片；
+ *    0 结果时留在向导里给出可点的排查项，而不是把人丢进空白首页；
+ *  · 「稍后设置」仍由首页起步清单接管，不会出现跳过后再也找不到入口。
  */
-import { ref, reactive, computed, onMounted } from 'vue'
+import { ref, reactive, computed, onMounted, watch } from 'vue'
 import { state } from '../state.js'
 import { t, setLang, LANGUAGES, i18nState } from '../i18n/index.js'
-import { fsList, fsMounts, getServerInfo, putConfig, setupDone, extStatus } from '../api.js'
+import { fsList, fsMounts, getServerInfo, putConfig, setupDone, extStatus, listMovies } from '../api.js'
 import { prettyHostPath, toast } from '../utils.js'
 import { useTasks } from '../composables/useTasks.js'
+import { setIntent } from '../composables/useGuide.js'
 import { openExtInstall } from '../state.js'
 
 const tasks = useTasks()
 
-const step = ref(1)                 // 1=语言 2=目录 3=访问方式 4=完成
+const step = ref(1)                 // 1=语言 2=目录 3=目标 4=结果确认
+const phase = ref('ready')          // ready | scanning | found | empty
+const foundCount = ref(0)
 const paths = reactive([])
 const newPath = ref('')
 const saving = ref(false)
@@ -73,7 +77,14 @@ onMounted(async () => {
 
 /* 宿主机路径美化用 utils 里的 prettyHostPath（设置页共用同一实现） */
 
-const exposure = ref('private')     // private | public
+/* 第 3 步问的是「想先做成什么」，用意图决定后续提示；认证策略不在这里改。 */
+const intent = ref('basic')          // basic | rich | remote
+const exposure = computed(() => intent.value === 'remote' ? 'public' : 'private')
+const intents = computed(() => [
+  { key: 'basic', icon: '▶', title: t('guide.intentBasic'), hint: t('guide.intentBasicHint') },
+  { key: 'rich', icon: '▦', title: t('guide.intentRich'), hint: t('guide.intentRichHint') },
+  { key: 'remote', icon: '⌁', title: t('guide.intentRemote'), hint: t('guide.intentRemoteHint') },
+])
 
 /* 语言：直接切换全局语言，无需等待保存 */
 function chooseLang(code) { setLang(code) }
@@ -123,42 +134,108 @@ const canNext = computed(() => {
   return true
 })
 
+const scanPct = computed(() => {
+  const s = state.task.scan
+  return s.total > 0 ? `${Math.min(100, Math.round(s.done / s.total * 100))}%` : '0%'
+})
+const scanHint = computed(() => state.task.scan.hint || null)
+const troubleItems = computed(() => [
+  { title: t('guide.troubleDir'), desc: t('guide.troubleDirDesc') },
+  { title: t('guide.troubleSize'), desc: t('guide.troubleSizeDesc') },
+  { title: t('guide.troubleExt'), desc: t('guide.troubleExtDesc') },
+  { title: t('guide.troubleKeyword'), desc: t('guide.troubleKeywordDesc') },
+])
+
+/** 保存基础配置。每次点「保存并开始扫描」都重存一次，
+ *  这样 0 结果后「返回修改目录」改过的路径不会被旧值覆盖。 */
+async function saveConfig() {
+  await putConfig({
+    library: { paths: paths.slice() },
+    // 只记录"这台服务会被谁访问"，用于后续提示（不直接改认证策略）
+    server: { exposure: exposure.value },
+  })
+  await setupDone()
+  state.config = state.config || {}
+  state.config.library = Object.assign({}, state.config.library, { paths: paths.slice() })
+  state.config.server = Object.assign({}, state.config.server, { setup_done: true, exposure: exposure.value })
+  setIntent(intent.value)
+}
+
+/** 等后台扫描跑完；进度状态由 App.vue 的 useTasks 统一轮询维护。 */
+function waitScanDone(timeoutMs = 10 * 60 * 1000) {
+  return new Promise((resolve) => {
+    const startedAt = Date.now()
+    let stopped = false
+    const stop = watch(() => state.task.scan.running, (running) => {
+      if (!running) cleanup()
+    })
+    const timer = setInterval(() => {
+      if (Date.now() - startedAt > timeoutMs) cleanup()
+    }, 1000)
+    function cleanup() {
+      if (stopped) return
+      stopped = true
+      stop()
+      clearInterval(timer)
+      resolve()
+    }
+  })
+}
+
+async function runAndCheck() {
+  phase.value = 'scanning'
+  starting.value = true
+  const ok = await tasks.runScan({})
+  if (!ok) { phase.value = 'ready'; starting.value = false; return }
+  await waitScanDone()
+  starting.value = false
+  try {
+    const r = await listMovies({ page: 1, page_size: 1 })
+    foundCount.value = Number(r.total) || 0
+  } catch (e) { foundCount.value = 0 }
+  phase.value = foundCount.value > 0 ? 'found' : 'empty'
+  window.dispatchEvent(new CustomEvent('avm-refresh'))
+}
+
 async function finish(scan = true) {
   if (!paths.length) { toast(t('onboarding.addDirHint'), 'warn'); return }
   saving.value = true
   try {
-    await putConfig({
-      library: { paths: paths.slice() },
-      // 只记录"这台服务会被谁访问"，用于后续提示（不直接改认证策略）
-      server: { exposure: exposure.value },
-    })
-    await setupDone()
-    state.config = state.config || {}
-    state.config.library = Object.assign({}, state.config.library, { paths: paths.slice() })
-    state.config.server = Object.assign({}, state.config.server, { setup_done: true, exposure: exposure.value })
-    state.onboarded = true            // 先关遮罩，避免扫描时看不到任务中心
+    await saveConfig()
+    step.value = 4
     if (ffMissing.value) {
       // 常驻 toast + 「去安装」：引导结束后一步跳到扩展组件页
       toast(t('onboarding.extMissing'), 'warn', 0,
         { label: t('detail.goInstall'), run: () => openExtInstall('ffmpeg') })
     }
-    if (scan) {
-      starting.value = true
-      await tasks.runScan({})
-    }
+    if (!scan) { enterApp(); return }
+    await runAndCheck()
   } catch (e) {
     toast(e.message, 'err')
+    phase.value = 'ready'
   } finally {
     saving.value = false
-    starting.value = false
   }
 }
 
-function skip() {
-  // 跳过引导：立即关闭遮罩（本地优先），再尝试把 setup_done 写回后端
+function enterGallery() { state.onboarded = true; state.view = 'gallery' }
+function enterApp() { state.onboarded = true; state.view = 'home' }
+function backToDir() { step.value = 2; phase.value = 'ready' }
+function retry() { runAndCheck() }
+
+async function skip() {
+  // 「稍后设置」：仍写 setup_done 避免每次刷新都弹向导；空库首页会自动
+  // 用起步清单接管，不会出现点了跳过就再也找不到入口。
   state.config = state.config || {}
   state.config.server = Object.assign({}, state.config.server, { setup_done: true })
   state.onboarded = true
+  // 已经选过目录就顺手保存，别让用户白选一遍
+  if (paths.length) {
+    try {
+      await putConfig({ library: { paths: paths.slice() }, server: { exposure: exposure.value } })
+      state.config.library = Object.assign({}, state.config.library, { paths: paths.slice() })
+    } catch (e) { toast(e.message, 'err') }
+  }
   setupDone().catch(() => { /* 后端不可达时忽略，下次启动会重新引导 */ })
 }
 
@@ -174,18 +251,20 @@ async function copyCmd() {
   <div class="ob-mask">
     <div class="ob-card">
       <!-- 进度指示 -->
-      <div class="ob-steps">
+      <div v-if="step < 4" class="ob-steps">
         <span :class="['ob-step', step >= 1 ? 'active' : '']">1 · {{ t('onboarding.lang') }}</span>
         <span class="ob-sep">›</span>
         <span :class="['ob-step', step >= 2 ? 'active' : '']">2 · {{ t('onboarding.dir') }}</span>
         <span class="ob-sep">›</span>
-        <span :class="['ob-step', step >= 3 ? 'active' : '']">3 · {{ t('onboarding.access') }}</span>
-        <span class="ob-sep">›</span>
-        <span :class="['ob-step', step >= 4 ? 'active' : '']">4 · {{ t('onboarding.done') }}</span>
+        <span :class="['ob-step', step >= 3 ? 'active' : '']">3 · {{ t('guide.intentTitle') }}</span>
+      </div>
+      <div v-else class="ob-steps">
+        <span class="ob-step active">✓ {{ t('onboarding.done') }}</span>
       </div>
 
-      <h2 class="ob-title">{{ t('onboarding.title') }}</h2>
-      <p class="ob-sub">{{ t('onboarding.subtitle') }}</p>
+      <h2 class="ob-title">{{ step === 4 ? t('guide.readyTitle') : t('onboarding.title') }}</h2>
+      <p v-if="step < 4" class="ob-sub">{{ t('onboarding.subtitle') }}</p>
+      <p v-else class="ob-sub">{{ t('guide.welcomeSub') }}</p>
 
       <!-- 步骤1：语言 -->
       <div v-if="step === 1" class="ob-body">
@@ -251,77 +330,117 @@ async function copyCmd() {
         <p v-if="env.inContainer" class="ob-tip ob-tip-muted">{{ t('onboarding.multiDirHint') }}</p>
       </div>
 
-      <!-- 步骤3：访问方式（只问一个问题） -->
+      <!-- 步骤3：只问「想先做成哪件事」，用它决定后续提示，不动认证设置 -->
       <div v-else-if="step === 3" class="ob-body">
-        <p class="ob-tip">{{ t('onboarding.accessTitle') }}</p>
+        <p class="ob-tip">{{ t('guide.intentTitle') }}</p>
         <div class="ob-opts">
-          <div :class="['ob-opt', exposure === 'private' ? 'sel' : '']" @click="exposure = 'private'">
-            <div class="ob-opt-title">🏠 {{ t('onboarding.accessPrivate') }}</div>
-            <div class="ob-opt-hint">{{ t('onboarding.accessPrivateHint') }}</div>
-          </div>
-          <div :class="['ob-opt', exposure === 'public' ? 'sel' : '']" @click="exposure = 'public'">
-            <div class="ob-opt-title">🌐 {{ t('onboarding.accessPublic') }}</div>
-            <div class="ob-opt-hint">{{ t('onboarding.accessPublicHint') }}</div>
+          <div
+            v-for="o in intents"
+            :key="o.key"
+            :class="['ob-opt', intent === o.key ? 'sel' : '']"
+            @click="intent = o.key"
+          >
+            <div class="ob-opt-title">{{ o.icon }} {{ o.title }}</div>
+            <div class="ob-opt-hint">{{ o.hint }}</div>
           </div>
         </div>
-        <p class="ob-tip ob-tip-muted">{{ t('onboarding.accessNote') }}</p>
+        <p class="ob-tip ob-tip-muted">{{ t('guide.intentNote') }}</p>
       </div>
 
-      <!-- 步骤4：完成 -->
+      <!-- 结果确认：不再只是信息清单，会等扫描真正出结果 -->
       <div v-else class="ob-body">
-        <p class="ob-tip">{{ t('onboarding.doneTitle') }}</p>
+        <template v-if="phase === 'ready'">
+          <p class="ob-tip">{{ t('onboarding.doneTitle') }}</p>
 
-        <div class="ob-kv">
-          <div class="ob-k">{{ t('onboarding.doneAddr') }}</div>
-          <div class="ob-v mono">
-            <div v-if="env.urls.length">
-              <div v-for="u in env.urls" :key="u">{{ u }}</div>
-            </div>
-            <div v-else class="muted">{{ t('onboarding.doneAddrLocal') }}</div>
-          </div>
-        </div>
-
-        <div class="ob-kv">
-          <div class="ob-k">{{ t('onboarding.doneToken') }}</div>
-          <div class="ob-v">
-            <template v-if="env.inContainer">
-              {{ t('onboarding.doneTokenDocker') }}
-              <div class="hstack" style="margin-top:6px">
-                <code class="mono ob-cmd">{{ tokenCmd }}</code>
-                <button class="btn tiny ghost" @click="copyCmd">{{ t('settings.copy') }}</button>
+          <div class="ob-kv">
+            <div class="ob-k">{{ t('onboarding.doneAddr') }}</div>
+            <div class="ob-v mono">
+              <div v-if="env.urls.length">
+                <div v-for="u in env.urls" :key="u">{{ u }}</div>
               </div>
-            </template>
-            <template v-else>{{ t('onboarding.doneTokenDesk') }}</template>
+              <div v-else class="muted">{{ t('onboarding.doneAddrLocal') }}</div>
+            </div>
           </div>
-        </div>
 
-        <div class="ob-kv">
-          <div class="ob-k">{{ t('onboarding.donePhone') }}</div>
-          <div class="ob-v">{{ t('onboarding.donePhoneHint') }}</div>
-        </div>
+          <div class="ob-kv">
+            <div class="ob-k">{{ t('onboarding.doneToken') }}</div>
+            <div class="ob-v">
+              <template v-if="env.inContainer">
+                {{ t('onboarding.doneTokenDocker') }}
+                <div class="hstack" style="margin-top:6px">
+                  <code class="mono ob-cmd">{{ tokenCmd }}</code>
+                  <button class="btn tiny ghost" @click="copyCmd">{{ t('settings.copy') }}</button>
+                </div>
+              </template>
+              <template v-else>{{ t('onboarding.doneTokenDesk') }}</template>
+            </div>
+          </div>
 
-        <p v-if="exposure === 'public'" class="ob-tip ob-tip-warn">{{ t('onboarding.twofaWarn') }}</p>
+          <div class="ob-kv">
+            <div class="ob-k">{{ t('onboarding.donePhone') }}</div>
+            <div class="ob-v">{{ t('onboarding.donePhoneHint') }}</div>
+          </div>
 
-        <!-- 基础组件提示：预览/补封面/转封装都靠 ffmpeg，打包版默认不带，先说清楚去哪装 -->
-        <p v-if="ffMissing && !extChecking" class="ob-tip ob-tip-warn">
-          {{ t('onboarding.extMissing') }}
-        </p>
-        <p v-else-if="extChecking" class="ob-tip muted">{{ t('onboarding.extChecking') }}</p>
+          <p v-if="exposure === 'public'" class="ob-tip ob-tip-warn">{{ t('onboarding.twofaWarn') }}</p>
+          <p v-if="ffMissing && !extChecking" class="ob-tip ob-tip-warn">{{ t('onboarding.extMissing') }}</p>
+          <p v-else-if="extChecking" class="ob-tip muted">{{ t('onboarding.extChecking') }}</p>
+        </template>
+
+        <template v-else-if="phase === 'scanning'">
+          <p class="ob-tip">{{ t('guide.scanning') }}</p>
+          <div class="ob-scan">
+            <div class="ob-scan-num">{{ state.task.scan.done }} / {{ state.task.scan.total }}</div>
+            <div class="ob-scan-bar"><i :style="{ width: scanPct }"></i></div>
+            <p class="muted ellipsis">{{ state.task.scan.message }}</p>
+          </div>
+        </template>
+
+        <template v-else-if="phase === 'found'">
+          <div class="ob-result">
+            <div class="ob-result-ic">✓</div>
+            <h3>{{ t('guide.foundTitle', { n: foundCount }) }}</h3>
+            <p>{{ t('guide.foundDesc') }}</p>
+          </div>
+        </template>
+
+        <template v-else>
+          <p class="ob-tip ob-tip-warn">{{ t('guide.noResultTitle') }}</p>
+          <p class="ob-tip">{{ t('guide.noResultDesc') }}</p>
+          <ul class="ob-trouble">
+            <li v-for="(x, i) in troubleItems" :key="i">
+              <b>{{ x.title }}</b><span>{{ x.desc }}</span>
+            </li>
+          </ul>
+          <p v-if="scanHint" class="ob-tip ob-tip-muted">
+            {{ t('guide.troubleDir') }}: {{ (scanHint.checked_paths || []).join(' / ') }} · {{ scanHint.min_size_mb }} MB
+          </p>
+        </template>
       </div>
 
       <!-- 底部操作 -->
       <div class="ob-foot">
-        <button v-if="step > 1" class="btn ghost" @click="step--">{{ t('common.back') }}</button>
+        <button v-if="step > 1 && step < 4" class="btn ghost" @click="step--">{{ t('common.back') }}</button>
         <span class="grow"></span>
-        <button class="btn ghost" @click="skip">{{ t('onboarding.skip') }}</button>
+        <button v-if="step < 4" class="btn ghost" @click="skip">{{ t('guide.laterBtn') }}</button>
+
         <button v-if="step < 3" class="btn primary" :disabled="!canNext" @click="step++">{{ t('common.next') }}</button>
         <button v-else-if="step === 3" class="btn primary" @click="step++">{{ t('common.next') }}</button>
-        <button v-else class="btn primary" :disabled="!canNext || saving || starting" @click="finish(true)">
-          {{ starting ? t('onboarding.scanning') : t('onboarding.startScan') }}
-        </button>
-        <button v-if="step === 4" class="btn ghost" :disabled="saving || starting" @click="finish(false)">
-          {{ t('onboarding.scanLater') }}
-        </button>
+
+        <template v-else-if="phase === 'ready'">
+          <button class="btn primary" :disabled="saving || starting" @click="finish(true)">{{ t('guide.saveAndScan') }}</button>
+          <button class="btn ghost" :disabled="saving" @click="finish(false)">{{ t('onboarding.scanLater') }}</button>
+        </template>
+        <template v-else-if="phase === 'scanning'">
+          <button class="btn ghost" @click="enterApp">{{ t('guide.enterApp') }}</button>
+        </template>
+        <template v-else-if="phase === 'found'">
+          <button class="btn primary" @click="enterGallery">{{ t('guide.enterGallery') }}</button>
+        </template>
+        <template v-else>
+          <button class="btn ghost" @click="backToDir">{{ t('guide.backToDir') }}</button>
+          <button class="btn" :disabled="starting" @click="retry">{{ t('guide.retryScan') }}</button>
+          <button class="btn primary" @click="enterApp">{{ t('guide.enterApp') }}</button>
+        </template>
       </div>
     </div>
 
@@ -480,4 +599,30 @@ async function copyCmd() {
   background: var(--c-primary-soft);
 }
 .ob-browse-foot { display: flex; justify-content: flex-end; gap: var(--sp-2); padding: 10px 12px; border-top: 1px solid var(--c-line); }
+
+/* 结果确认页：扫描进度 / 找到 N 部 / 0 结果排查 */
+.ob-scan { padding: 8px 0; }
+.ob-scan-num { font-size: var(--fs-lg); font-weight: 600; text-align: center; color: var(--c-text); margin-bottom: 8px; }
+.ob-scan-bar { height: 8px; border-radius: 999px; background: var(--c-surface-2); overflow: hidden; }
+.ob-scan-bar i { display: block; height: 100%; background: var(--c-primary); border-radius: 999px; transition: width .3s; }
+.ob-scan p { margin: 8px 0 0; font-size: var(--fs-sm); }
+.ob-result { text-align: center; padding: 10px 0 6px; }
+.ob-result-ic {
+  width: 48px; height: 48px; margin: 0 auto 10px; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--c-primary); color: #fff; font-size: 24px;
+}
+.ob-result h3 { margin: 0 0 6px; font-size: var(--fs-lg); color: var(--c-text); }
+.ob-result p { margin: 0; font-size: var(--fs-md); color: var(--c-text-2); }
+.ob-trouble {
+  list-style: none; margin: 0 0 10px; padding: 0;
+  max-height: 210px; overflow-y: auto; display: grid; gap: 8px;
+}
+.ob-trouble li {
+  display: flex; flex-direction: column; gap: 2px;
+  padding: 8px 10px; border: 1px solid var(--c-line); border-radius: var(--r-sm);
+  background: var(--c-surface-2); font-size: var(--fs-sm);
+}
+.ob-trouble li b { color: var(--c-text); }
+.ob-trouble li span { color: var(--c-text-2); line-height: 1.5; }
 </style>

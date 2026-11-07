@@ -18,6 +18,7 @@ import {
 } from '../api.js'
 import { toast, confirmDialog, fmtAgo, fmtDateTime, prettyHostPath, setSiteTitle } from '../utils.js'
 import { useTasks } from '../composables/useTasks.js'
+import { basicOnly, setBasicOnly, resetGuide } from '../composables/useGuide.js'
 import { LANGUAGES, i18nState, setLang } from '../i18n'
 import { t } from '../i18n/index.js'
 
@@ -35,10 +36,15 @@ const TABS = [
   ['privacy', 'settings.tab.privacy'],
   ['about', 'settings.tab.about'],
 ]
+/* 新手「基础模式」：设置页有 10 组上百项，先只给最需要动的三组。
+   从别的页面跳到被折叠的高级标签时自动退出基础模式，避免点了没反应。 */
+const BASIC_TABS = ['library', 'scraper', 'ext', 'about']
+const visibleTabs = computed(() => basicOnly.value ? TABS.filter((x) => BASIC_TABS.includes(x[0])) : TABS)
 const tab = ref('library')
 /* 其他页面（如解锁码提示条）可以请求直接打开某个标签 */
 watch(() => state.settingsTab, (v) => {
   if (!v) return
+  if (basicOnly.value && !BASIC_TABS.includes(v)) setBasicOnly(false)
   tab.value = v
   state.settingsTab = ''
 }, { immediate: true })
@@ -802,6 +808,7 @@ async function rerunOnboarding() {
     await putConfig({ server: { setup_done: false } })
     state.config = state.config || {}
     state.config.server = Object.assign({}, state.config.server, { setup_done: false })
+    resetGuide()              // 场景化首次提示也重新生效
     state.onboarded = false   // 触发 App.vue 遮罩重新出现
     toast(t('settings.rerunOnboardingDone'), 'ok')
   } catch (e) { toast(e.message, 'err') }
@@ -1366,9 +1373,14 @@ onMounted(async () => {
       <h1 class="tb-title">{{ $t('view.settings') }}</h1>
       <span v-if="loading || saving" class="spinner"></span>
       <div class="spacer"></div>
+      <button class="btn tiny ghost" @click="setBasicOnly(!basicOnly)" :data-tip="$t('guide.basicModeHint')">
+        {{ basicOnly ? $t('guide.tipAll') : $t('guide.tipBasicOnly') }}
+      </button>
+      <button class="btn tiny ghost" @click="rerunOnboarding">{{ $t('guide.rerun') }}</button>
+      <button class="btn tiny ghost" @click="state.guideOpen = true">{{ $t('guide.help') }}</button>
       <button class="btn tiny ghost" @click="openAiCenter">{{ $t('aiCenter.open') }}</button>
       <div class="tabs st-tabs">
-        <button v-for="t in TABS" :key="t[0]" class="tab" :class="{ on: tab === t[0] }" @click="tab = t[0]">{{ $t(t[1]) }}</button>
+        <button v-for="t in visibleTabs" :key="t[0]" class="tab" :class="{ on: tab === t[0] }" @click="tab = t[0]">{{ $t(t[1]) }}</button>
       </div>
     </div>
 

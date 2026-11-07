@@ -412,6 +412,7 @@ async function setScrapeFilter(taskId, f) {
         </div>
       </div>
 
+      <button class="btn ghost icon" @click="state.guideOpen = true" :data-tip="$t('guide.help')">?</button>
       <button v-if="canLogout" class="btn ghost icon" @click="doLogout" :data-tip="$t('nav.logout')">⎋</button>
       <button class="btn ghost icon" @click="toggleTheme" :data-tip="state.theme === 'dark' ? $t('nav.themeLight') : $t('nav.themeDark')">{{ themeIcon }}</button>
       <button class="btn ghost icon" :class="{ active: state.view === 'settings' }" @click="state.view = 'settings'" :data-tip="$t('nav.settings')">⚙</button>

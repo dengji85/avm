@@ -307,10 +307,21 @@ def run_scan(progress_cb=None, incremental=True, workers=None, hash_files=False,
         % (added, updated, skipped, local_nfo_hit, sidecar_subs, len(removed),
            cleaned["files"] + cleaned["movies"] + sum(cleaned["orphans"].values()), tail)
     )
-    return {"total": enumerated, "added": added, "updated": updated,
-            "unchanged": unchanged, "missing": len(removed), "errors": errors,
-            "local_nfo": local_nfo_hit, "sidecar_subs": sidecar_subs, "cleaned": cleaned,
-            "offline_roots": [s.to_dict() for s in root_states.values() if not s.usable]}
+    result = {"total": enumerated, "added": added, "updated": updated,
+              "unchanged": unchanged, "missing": len(removed), "errors": errors,
+              "local_nfo": local_nfo_hit, "sidecar_subs": sidecar_subs, "cleaned": cleaned,
+              "offline_roots": [s.to_dict() for s in root_states.values() if not s.usable]}
+    # 一个文件都没枚举到时，把「可能卡在哪」交给前端。只报「扫描完成：新增 0」
+    # 会让新用户以为软件坏了；有了这些线索，向导和起步清单才能给出具体的下一步。
+    if enumerated == 0:
+        result["hint"] = {
+            "code": "no_media",
+            "checked_paths": list(usable_roots),
+            "unusable_paths": sorted(down_roots),
+            "min_size_mb": min_size_mb,
+            "extensions": sorted(exts),
+        }
+    return result
 
 
 def auto_cleanup_after_scan(alive_paths: set, roots: list, progress_cb=None,

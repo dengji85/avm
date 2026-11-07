@@ -34,7 +34,8 @@ from . import (ai_core, ai_extra, ai_jobs, asr, dedupe, dlna, emby as emby_mod, 
                scanner, scraper, scrape_diag, store, subprobe, subqc, subtext,
                subtitles, translate, vtt)
 from .config import (COVER_DIR, DATA_DIR, IN_CONTAINER, avatar_dir, _deep_merge,
-                     current_access_token, emby_cfg, load_config, public_base_url, update_config)
+                     current_access_token, emby_cfg, load_config, public_base_url,
+                     roots_to_scan, update_config)
 from .db import connect, db, query_all, query_one
 from .jobs import SCAN, SCRAPE, ACTRESS_FETCH, NFO_EXPORT
 
@@ -45,12 +46,14 @@ router = APIRouter(prefix="/api")
 from .routers import adcheck as _adcheck_api        # noqa: E402
 from .routers import covers as _covers_api          # noqa: E402
 from .routers import ext as _ext_api                # noqa: E402
+from .routers import ingest as _ingest_api          # noqa: E402
 from .routers import metatube as _metatube_api      # noqa: E402
 from .routers import subtitles as _subtitles_api    # noqa: E402
 
 router.include_router(_adcheck_api.router)
 router.include_router(_covers_api.router)
 router.include_router(_ext_api.router)
+router.include_router(_ingest_api.router)
 router.include_router(_metatube_api.router)
 router.include_router(_subtitles_api.router)
 
@@ -225,7 +228,8 @@ def play_movie(movie_id: int, payload: Dict[str, Any] = Body(default={})) -> Dic
         target = usable[0]
         if file_id:
             target = next((f for f in usable if f["id"] == int(file_id)), target)
-        if not os.path.exists(target["path"]):
+        # 纯在线影片只有虚拟记录，没有磁盘文件；有播放地址就直接放行到下面的 strm 分支
+        if not (target.get("strm_url") or "").strip() and not os.path.exists(target["path"]):
             raise HTTPException(404, f"文件已不存在：{target['path']}")
 
         # .strm：本地只有一个文本文件，用系统播放器打开它没有意义，直接打开网络地址
@@ -837,6 +841,15 @@ def start_scan(payload: Dict[str, Any] = Body(default={})) -> Dict[str, Any]:
     workers = payload.get("workers") or None
     hash_files = bool(payload.get("hash_files", False))
     auto_cleanup = payload.get("auto_cleanup", None)
+    # 没配目录时不要让扫描「静默成功」：新人最常在这里以为软件坏了。
+    # 直接给出可照做的下一步（容器里填的是容器内路径）。
+    # 用 roots_to_scan 判断，兼容老配置的 library.roots 字段。
+    if not roots_to_scan(load_config()):
+        raise HTTPException(
+            400,
+            "还没有添加媒体库目录：请先在「设置 → 媒体库」添加影片所在文件夹"
+            "（Docker / NAS 里要填容器内路径，如 /media）。",
+        )
     if not SCAN.start():
         raise HTTPException(409, "已有扫描任务在执行中")
     def _run():
@@ -858,7 +871,17 @@ def start_scan(payload: Dict[str, Any] = Body(default={})) -> Dict[str, Any]:
 
 @router.get("/scan/status")
 def scan_status() -> Dict[str, Any]:
-    return SCAN.snapshot()
+    snap = SCAN.snapshot()
+    # 扫描结果以 JSON 字符串存在 message 里（见 start_scan）。0 结果时把排查线索
+    # 提到顶层，供首次向导 / 起步清单直接渲染「下一步」，不让新用户自己猜。
+    if snap.get("phase") == "done" and (snap.get("message") or "").startswith("{"):
+        try:
+            hint = json.loads(snap["message"]).get("hint")
+            if hint:
+                snap["hint"] = hint
+        except (ValueError, TypeError, AttributeError):
+            pass
+    return snap
 
 
 @router.post("/scan/cancel")
@@ -3247,7 +3270,22 @@ def _stream_cfg() -> Dict[str, Any]:
 
 
 def _is_hls(url: str) -> bool:
-    return urlsplit(url).path.lower().endswith(".m3u8")
+    """HLS 判定：后缀之外还看查询串与 path，避免带签名地址被误判成直链。"""
+    from . import movie_identity
+    return movie_identity.is_hls_url(url)
+
+
+def _source_exists(src: Dict[str, Any]) -> bool:
+    """网络串流没有本地文件；只有本地文件才检查磁盘路径是否存在。
+
+    纯在线影片在 movie_files 里是一条 kind='online' 的虚拟记录，
+    若沿用 os.path.exists(path) 会 404，表现为「列表看得到、点开播不了」。
+    """
+    if not src:
+        return False
+    if str(src.get("strm_url") or "").strip():
+        return True
+    return os.path.exists(str(src.get("path") or ""))
 
 
 def _strm_source(movie_id: int) -> str:
@@ -3366,13 +3404,23 @@ def _serve_playlist(target: str, movie_id: int) -> Response:
 
 @router.get("/movies/{movie_id}/stream-info")
 def stream_info(movie_id: int) -> Dict[str, Any]:
-    """轻量判断：这部片是不是网络串流、要不要按 HLS 处理（不做 ffprobe）。"""
+    """轻量判断：这部片是不是网络串流、要不要按 HLS 处理（不做 ffprobe）。
+
+    优先用入库时记录的来源 kind，避免带签名、无 ``.m3u8`` 后缀的地址被误判。
+    """
     with db() as conn:
         src = store.movie_play_source(conn, movie_id)
-    if not src:
+        primary = query_one(
+            conn,
+            "SELECT play_url, kind FROM movie_sources WHERE movie_id = ? "
+            "AND is_primary = 1 AND available = 1 AND play_url <> '' LIMIT 1",
+            (movie_id,))
+    target = str((primary or {}).get("play_url") or (src or {}).get("strm_url") or "")
+    if not src and not target:
         raise HTTPException(404, "影片不存在或未入库")
-    target = src["strm_url"]
-    return {"stream": bool(target), "hls": bool(target and _is_hls(target))}
+    is_hls = bool(target) and (str((primary or {}).get("kind") or "") == "hls"
+                               or _is_hls(target))
+    return {"stream": bool(target), "hls": is_hls}
 
 
 @router.get("/strm/hls/{movie_id}")
@@ -3407,7 +3455,7 @@ def stream_movie(movie_id: int, request: Request):
     """
     with db() as conn:
         src = store.movie_play_source(conn, movie_id)
-    if not src or not os.path.exists(src["path"]):
+    if not _source_exists(src):
         raise HTTPException(status_code=404, detail="视频文件不存在或未入库")
 
     target = src["strm_url"]
@@ -3439,7 +3487,7 @@ def playback_info(movie_id: int) -> Dict[str, Any]:
     cfg = load_config(refresh=True)
     with db() as conn:
         src = store.movie_play_source(conn, movie_id)
-    if not src or not os.path.exists(src["path"]):
+    if not _source_exists(src):
         raise HTTPException(404, "视频文件不存在或未入库")
     # 网络串流：没有本地文件可分析，也不能重封装，直接告诉前端走直连 / HLS
     if src["strm_url"]:
@@ -3478,7 +3526,7 @@ def prepare_stream(movie_id: int) -> Dict[str, Any]:
         raise HTTPException(400, "播放兼容层未启用")
     with db() as conn:
         src = store.movie_play_source(conn, movie_id)
-    if not src or not os.path.exists(src["path"]):
+    if not _source_exists(src):
         raise HTTPException(404, "视频文件不存在或未入库")
     if src["strm_url"]:
         raise HTTPException(400, "网络串流无需重封装")

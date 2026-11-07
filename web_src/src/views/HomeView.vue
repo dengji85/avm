@@ -1,5 +1,5 @@
 <script setup>
-import { ref } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount, watch } from 'vue'
 import { state, openPlayQueue, NAV_ICONS } from '../state.js'
 import {
   listMovies, playMovie, getContinueWatching, getRecommend,
@@ -9,6 +9,25 @@ import { t } from '../i18n/index.js'
 import MovieRail from '../components/MovieRail.vue'
 import PageHead from '../components/PageHead.vue'
 import EmptyState from '../components/EmptyState.vue'
+import GettingStarted from '../components/GettingStarted.vue'
+import { checklistHidden, setChecklistHidden } from '../composables/useGuide.js'
+
+/* 空库时用「起步清单」替代四条文字空态：进度由真实影片数推导，
+   库里一有影片就自动消失，不打扰老用户（也可手动隐藏，从「? 上手指南」恢复）。 */
+const libTotal = ref(0)
+async function refreshLibTotal() {
+  try {
+    const r = await listMovies({ page: 1, page_size: 1 })
+    libTotal.value = Number(r.total) || 0
+  } catch (e) { /* 离线时保留上一次结果 */ }
+}
+const showStart = computed(() => !!state.config && !checklistHidden.value && libTotal.value === 0)
+watch(() => state.task.scan.running, (running, was) => { if (was && !running) refreshLibTotal() })
+onMounted(() => {
+  refreshLibTotal()
+  window.addEventListener('avm-refresh', refreshLibTotal)
+})
+onBeforeUnmount(() => window.removeEventListener('avm-refresh', refreshLibTotal))
 
 /* ---------- 随机播放（一键开播一部随机影片） ---------- */
 const shuffling = ref(false)
@@ -18,11 +37,11 @@ async function shufflePlay() {
   try {
     const r = await listMovies({ sort: 'random', page: 1, page_size: 1 })
     const pick = (r.items || [])[0]
-    if (!pick) { toast('库里还没有影片', 'err'); return }
+    if (!pick) { toast(t('guide.scanEmpty'), 'err'); return }
     await playMovie(pick.id)
-    toast('已启动随机播放', 'ok')
+    toast(t('guide.randomOk'), 'ok')
   } catch (e) {
-    toast(e.message || '随机播放失败', 'err')
+    toast(e.message || t('guide.randomFail'), 'err')
   } finally {
     shuffling.value = false
   }
@@ -97,17 +116,24 @@ function playQueue(movies) {
     <div class="view-body home tight">
       <PageHead
         :title="$t('view.home')"
-        :subtitle="$t('home.subtitle')"
+        :subtitle="showStart ? $t('guide.welcomeSub') : $t('home.subtitle')"
       >
         <template #actions>
-          <button class="btn primary" :disabled="shuffling" @click="shufflePlay" :data-tip="$t('home.shuffleTip')">
-            <svg v-if="!shuffling" class="btn-ico" viewBox="0 0 24 24" fill="currentColor"><path :d="NAV_ICONS.shuffle" /></svg>
-            {{ shuffling ? '…' : $t('home.shufflePlay') }}
-          </button>
-          <button class="btn ghost" @click="goGallery">{{ $t('home.browseAll') }}</button>
+          <template v-if="!showStart">
+            <button class="btn primary" :disabled="shuffling" @click="shufflePlay" :data-tip="$t('home.shuffleTip')">
+              <svg v-if="!shuffling" class="btn-ico" viewBox="0 0 24 24" fill="currentColor"><path :d="NAV_ICONS.shuffle" /></svg>
+              {{ shuffling ? '…' : $t('home.shufflePlay') }}
+            </button>
+            <button class="btn ghost" @click="goGallery">{{ $t('home.browseAll') }}</button>
+          </template>
+          <button v-else class="btn ghost" @click="setChecklistHidden(true)">{{ $t('guide.hide') }}</button>
         </template>
       </PageHead>
 
+      <!-- 空库：起步清单（有结果后自动消失） -->
+      <GettingStarted v-if="showStart" />
+
+      <template v-else>
       <!-- 续看 -->
       <section class="block">
         <div class="block-head">
@@ -184,6 +210,7 @@ function playQueue(movies) {
           </template>
         </MovieRail>
       </section>
+      </template>
     </div>
   </section>
 </template>

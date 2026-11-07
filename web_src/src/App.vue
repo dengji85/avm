@@ -3,7 +3,11 @@ import { onMounted, onBeforeUnmount, watch, ref, computed } from 'vue'
 import { state, applyTheme } from './state.js'
 import { getFacets, getConfig, getServerInfo, getSession, onNoToken, serverOffline, privacyState, checkUpdate } from './api.js'
 import { toast, setSiteTitle } from './utils.js'
+import { t } from './i18n/index.js'
 import { useTasks } from './composables/useTasks.js'
+import {
+  activeTip, showTip, closeTip, basicOnly, setBasicOnly,
+} from './composables/useGuide.js'
 
 import TopNav from './components/TopNav.vue'
 import MobileNav from './components/MobileNav.vue'
@@ -64,6 +68,7 @@ import SettingsView from './views/SettingsView.vue'
 import AiCenterView from './views/AiCenterView.vue'
 import YearReviewView from './views/YearReviewView.vue'
 import OnboardingView from './views/OnboardingView.vue'
+import GuidePanel from './components/GuidePanel.vue'
 
 const VIEWS = {
   home: HomeView,
@@ -82,6 +87,21 @@ const VIEWS = {
 }
 
 const tasks = useTasks()
+
+/* 场景化首次提示：只在用户第一次进到某个页面时出现一条，可关掉且不再出现。
+ * 首启向导没做完、或「? 上手指南」正开着时不打扰。 */
+const TIP_KEYS = { gallery: 'gallery', detail: 'detail', settings: 'settings' }
+const TIP_I18N = {
+  gallery: ['guide.tipGalleryTitle', 'guide.tipGalleryDesc'],
+  detail: ['guide.tipDetailTitle', 'guide.tipDetailDesc'],
+  settings: ['guide.tipSettingsTitle', 'guide.tipSettingsDesc'],
+}
+const tipInfo = computed(() => {
+  const k = activeTip.value
+  if (!k || !TIP_I18N[k]) return null
+  return { key: k, title: t(TIP_I18N[k][0]), desc: t(TIP_I18N[k][1]) }
+})
+function toggleBasicOnly() { setBasicOnly(!basicOnly.value) }
 
 /* 全局队列当前播放项（供迷你播放条显示） */
 const currentQueueItem = computed(() => {
@@ -157,16 +177,19 @@ function onGlobalRefresh() {
   window.dispatchEvent(new CustomEvent('avm-reload-view'))
 }
 
-/* 切换视图时回到顶部 */
-watch(() => state.view, () => {
+/* 切换视图时回到顶部，并按需给一条场景化的首次提示 */
+watch(() => state.view, (v) => {
   const el = document.querySelector('.view-body')
   if (el) el.scrollTop = 0
+  activeTip.value = ''
+  const k = TIP_KEYS[v]
+  if (k && state.onboarded && !state.guideOpen) showTip(k)
 })
 
 /* 后端离线 / 恢复提示 */
 watch(serverOffline, (off, was) => {
-  if (off && !was) toast('无法连接服务器，请确认后端服务已启动', 'err', 4000)
-  else if (!off && was) toast('已重新连接服务器', 'ok', 2500)
+  if (off && !was) toast(t('guide.serverOfflineToast'), 'err', 4000)
+  else if (!off && was) toast(t('guide.serverReconnected'), 'ok', 2500)
 })
 
 /* 主动确认登录状态：未登录时直接弹登录框，避免首屏一堆 401 请求之后才提示 */
@@ -203,7 +226,7 @@ function onFilterChange() { /* 由各视图自行响应 state 变化 */ }
   <div class="app">
     <!-- 后端离线常驻横幅：服务未启动 / 连接被拒时显示，恢复后自动消失 -->
     <div v-if="serverOffline" class="offline-banner" role="alert">
-      ⚠ 无法连接服务器，请确认后端服务（avm）已启动，当前数据可能未刷新。
+      ⚠ {{ $t('guide.serverOffline') }}
     </div>
     <TopNav />
     <MobileNav />
@@ -230,6 +253,19 @@ function onFilterChange() { /* 由各视图自行响应 state 变化 */ }
       <button class="btn tiny ghost" @click="dismissUpdate">{{ $t('update.later') }}</button>
     </div>
 
+    <!-- 场景化首次提示：每页最多一条，关掉后不再出现；设置页还能一键切到基础模式 -->
+    <div v-if="tipInfo" class="pin-tip guide-tip" role="status">
+      <span class="pin-tip-ic">?</span>
+      <div class="pin-tip-body">
+        <b>{{ tipInfo.title }}</b>
+        <span>{{ tipInfo.desc }}</span>
+      </div>
+      <button v-if="tipInfo.key === 'settings'" class="btn tiny" @click="toggleBasicOnly">
+        {{ basicOnly ? $t('guide.tipAll') : $t('guide.tipBasicOnly') }}
+      </button>
+      <button class="btn tiny primary" @click="closeTip(tipInfo.key)">{{ $t('guide.tipClose') }}</button>
+    </div>
+
     <div class="app-main">
       <component :is="VIEWS[state.view] || VIEWS.home" />
     </div>
@@ -249,6 +285,7 @@ function onFilterChange() { /* 由各视图自行响应 state 变化 */ }
       :item="currentQueueItem"
     />
 
+    <GuidePanel v-if="state.guideOpen" />
     <OnboardingView v-if="state.config && !state.onboarded" />
   </div>
 </template>
