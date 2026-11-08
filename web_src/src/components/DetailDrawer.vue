@@ -1,5 +1,5 @@
 <script setup>
-import { ref, reactive, computed, watch, onMounted, onBeforeUnmount, defineAsyncComponent } from 'vue'
+import { ref, reactive, computed, watch, onMounted, onBeforeUnmount, nextTick, defineAsyncComponent } from 'vue'
 import { state, openExtInstall } from '../state.js'
 import {
   getMovie, updateMovie, deleteMovie, toggleFlag, playMovie,
@@ -9,6 +9,8 @@ import {
   dlnaDevices, dlnaAddDevice, dlnaCast, dlnaStop,
   getActress, avatarUrl, getConfig, scanMovieSubtitles, extStatus,
   adCheckResult, adCheckRunOne, adSheetUrl,
+  movieSources, setPrimarySource, deleteSource, addMovieSource,
+  toggleSource, checkSource, refreshSource,
 } from '../api.js'
 import SubtitleSummary from './SubtitleSummary.vue'
 import AddToCollectionBtn from './AddToCollectionBtn.vue'
@@ -37,7 +39,26 @@ const previews = ref([])
 const pvLoading = ref(false)
 const similar = ref([])
 const pendingAutoplay = ref(false)
-const hasPlayable = computed(() => !!(mv.value && mv.value.files && mv.value.files.some(f => !f.missing)))
+const localFiles = computed(() => (mv.value?.files || []).filter((f) => f.kind !== 'online'))
+const hasPlayable = computed(() => {
+  if (!mv.value) return false
+  const local = localFiles.value.some(f => !f.missing)
+  // 在线来源即使还没生成虚拟文件记录，只要有可用播放地址就允许播放
+  return local || !!mv.value.online_playable
+})
+// 主源被判定为「需要浏览器会话」时，默认入口切回源站，避免反复点注定失败的播放
+const primarySource = computed(() => (mv.value?.sources || []).find(s => s.is_primary) || null)
+// 主源不能直接播（会话限制 / 没有播放地址 / 已失效）但有页面地址时，主入口回源站
+const primaryNeedsSite = computed(() => {
+  const s = primarySource.value
+  if (!s) return false
+  return !!s.needs_site || (!s.playable && !!s.has_page)
+})
+const primaryOpenUrl = computed(() => primarySource.value?.open_url || '')
+// 源站入口：页面地址是稳定身份，置顶展示，拼接成「站点 + 路径」
+const pageEntries = computed(() => sources.value
+  .filter((s) => s.has_page && s.open_url)
+  .slice(0, 4))
 // 容器 / NAS 无桌面环境时，这两个入口无效，按运行能力隐藏
 const canExternal = computed(() => state.capabilities?.external_player !== false)
 const canReveal = computed(() => state.capabilities?.reveal_folder !== false)
@@ -356,14 +377,118 @@ const progressPct = computed(() => {
   return d > 0 ? Math.min(100, Math.round((progressPos.value / d) * 100)) : 0
 })
 
-const mainFile = computed(() => (mv.value?.files || [])[0] || null)
+const mainFile = computed(() => localFiles.value[0] || (mv.value?.files || [])[0] || null)
 
 /** 网络串流只展示域名，避免把带签名的完整地址摊在界面上 */
 function hostOf(url) {
   try { return new URL(url).host } catch (e) { return url }
 }
-const totalSize = computed(() => (mv.value?.files || []).reduce((s, f) => s + (Number(f.size) || 0), 0))
+const totalSize = computed(() => localFiles.value.reduce((s, f) => s + (Number(f.size) || 0), 0))
 const quality = computed(() => qualityTag(mv.value?.resolution))
+
+/* ---------- 在线来源（浏览器接入二期） ---------- */
+const sources = ref([])
+const srcLoading = ref(false)
+const srcBusy = ref(false)
+const srcAddOpen = ref(false)
+const srcAdd = reactive({ page_url: '', play_url: '', title: '', kind: 'hls' })
+const srcRefreshFor = reactive({ id: 0, play_url: '' })
+let srcTimer = null
+let srcPollStart = 0
+
+function stopSourcePoll() {
+  if (srcTimer) { clearTimeout(srcTimer); srcTimer = null }
+  srcPollStart = 0
+}
+
+async function loadSources() {
+  if (!id.value) return
+  try {
+    srcLoading.value = true
+    const r = await movieSources(id.value)
+    sources.value = r.items || []
+  } catch (e) { toast(e.message, 'err') }
+  finally {
+    srcLoading.value = false
+    if (srcTimer) { clearTimeout(srcTimer); srcTimer = null }
+    // 验证 / 续期是后台短任务：状态回到终态前每 1 秒刷新，整体最多 60 秒
+    const pending = sources.value.some(s => s.checking)
+    if (!pending || !open.value || tab.value !== 'sources') { srcPollStart = 0; return }
+    if (!srcPollStart) srcPollStart = Date.now()
+    if (Date.now() - srcPollStart > 60000) { srcPollStart = 0; return }
+    srcTimer = setTimeout(loadSources, 1000)
+  }
+}
+
+function srcStatus(s) {
+  if (s.checking) return t('detail.srcChecking')
+  if (s.status === 'disabled') return t('detail.srcDisabled')
+  if (s.status === 'unsupported') return t('detail.srcUnsupported')
+  if (s.status === 'invalid') return t('detail.srcInvalid')
+  if (s.expired || s.status === 'stale') return t('detail.srcStale')
+  return t('detail.srcValid')
+}
+function srcBadge(s) {
+  if (s.checking || s.status === 'disabled') return ''
+  if (s.status === 'unsupported' || s.status === 'invalid') return 'err'
+  if (s.expired || s.status === 'stale') return 'warn'
+  return 'ok'
+}
+
+async function srcRun(fn, okKey) {
+  if (srcBusy.value) return
+  srcBusy.value = true
+  try {
+    await fn()
+    if (okKey) toast(t(okKey), 'ok')
+    await loadSources()
+  } catch (e) { toast(e.message, 'err') }
+  finally { srcBusy.value = false }
+}
+function checkOne(s) { return srcRun(() => checkSource(s.id), 'detail.srcCheckStarted') }
+function primaryOne(s) { return srcRun(() => setPrimarySource(s.id), 'detail.srcPrimaryDone') }
+function toggleOne(s) { return srcRun(() => toggleSource(s.id, !s.available), 'detail.srcToggleDone') }
+async function playSource(s) {
+  if (srcBusy.value) return
+  srcBusy.value = true
+  try {
+    if (!s.is_primary) await setPrimarySource(s.id)
+    // 已挂载的播放器不会因主源变化自动重载，先卸载再挂一次
+    if (playing.value) { playing.value = false; await nextTick() }
+    playing.value = true
+  } catch (e) { toast(e.message, 'err') }
+  finally { srcBusy.value = false }
+}
+function openRefresh(s) { srcRefreshFor.id = s.id; srcRefreshFor.play_url = '' }
+function doRefresh() {
+  const sid = srcRefreshFor.id
+  if (!sid) return
+  return srcRun(async () => {
+    await refreshSource(sid, { play_url: (srcRefreshFor.play_url || '').trim() })
+    srcRefreshFor.id = 0
+    srcRefreshFor.play_url = ''
+  }, 'detail.srcRefreshStarted')
+}
+function doAddSource() {
+  const body = {
+    page_url: (srcAdd.page_url || '').trim(),
+    play_url: (srcAdd.play_url || '').trim(),
+    title: (srcAdd.title || '').trim(),
+    kind: srcAdd.kind,
+  }
+  if (!body.page_url && !body.play_url) { toast(t('detail.srcNeedUrl'), 'err'); return }
+  return srcRun(async () => {
+    await addMovieSource(id.value, body)
+    srcAddOpen.value = false
+    Object.assign(srcAdd, { page_url: '', play_url: '', title: '', kind: 'hls' })
+  }, 'detail.srcAddDone')
+}
+async function removeOne(s) {
+  const ok = await confirmDialog(t('detail.srcDeleteConfirm'), '',
+    { danger: true, okText: t('detail.srcDelete') })
+  if (!ok) return
+  return srcRun(() => deleteSource(s.id), 'detail.srcDeleted')
+}
 
 /* ---------- 广告检测（内容级；结果也可能来自 维护 → 广告筛查 的批量） ---------- */
 const adInfo = ref(null)
@@ -398,6 +523,10 @@ async function load() {
   if (!id.value) return
   loading.value = true
   sitesMoreOpen.value = false
+  stopSourcePoll()
+  sources.value = []
+  srcAddOpen.value = false
+  srcRefreshFor.id = 0
   tab.value = 'preview'
   playing.value = false
   previews.value = []
@@ -435,6 +564,7 @@ async function load() {
 function close() {
   state.currentId = null
   playing.value = false
+  stopSourcePoll()
   closeLightbox()
 }
 
@@ -929,6 +1059,7 @@ function filterByTag(tag) {
 }
 
 /* ---------- 生命周期 ---------- */
+// immediate：深链 #/movie/<id> 在组件挂载时 id 已有值，靠 watch 触发不到
 watch(id, async (v) => {
   if (v) {
     bust.value = Date.now()
@@ -938,9 +1069,11 @@ watch(id, async (v) => {
       playing.value = true
     }
   }
-})
+}, { immediate: true })
 watch(tab, (t) => {
   if (t === 'preview' && !previews.value.length) loadPreviews(false)
+  if (t === 'sources') { stopSourcePoll(); loadSources() }
+  else stopSourcePoll()
 })
 /* 首次打开详情页时 tab 本来就是 preview，watch 不会触发 → 这里显式补一次加载 */
 
@@ -960,7 +1093,7 @@ function onKey(e) {
   }
 }
 onMounted(() => { window.addEventListener('keydown', onKey) })
-onBeforeUnmount(() => { window.removeEventListener('keydown', onKey) })
+onBeforeUnmount(() => { window.removeEventListener('keydown', onKey); stopSourcePoll() })
 </script>
 
 <template>
@@ -984,7 +1117,7 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', onKey) })
           </div>
           <button class="btn ghost icon" :class="{ 'ai-entry-on': ai.ready }"
                   :data-tip="$t('ai.title')" @click="openAi">✨</button>
-          <button class="btn ghost icon" @click="copyText(mainFile?.path || '')" :data-tip="$t('detail.copyPath')">⧉</button>
+          <button v-if="localFiles.length" class="btn ghost icon" @click="copyText(mainFile?.path || '')" :data-tip="$t('detail.copyPath')">⧉</button>
           <button class="btn ghost icon" @click="close" :data-tip="$t('detail.closeEsc')">✕</button>
         </header>
 
@@ -1045,8 +1178,11 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', onKey) })
                   <div class="dd-g">
                     <span class="dd-g-lbl">{{ $t('detail.grpPlay') }}</span>
                     <div class="dd-btns flow">
+                    <a v-if="primaryNeedsSite && primaryOpenUrl" class="btn primary"
+                       :href="primaryOpenUrl" target="_blank" rel="noopener noreferrer">↗ {{ $t('detail.backToSource') }}</a>
                     <button
-                      class="btn primary"
+                      class="btn"
+                      :class="{ primary: !primaryNeedsSite }"
                       :disabled="!hasPlayable"
                       :title="hasPlayable ? '' : $t('detail.noSource')"
                       @click="playing = !playing"
@@ -1186,7 +1322,7 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', onKey) })
                 </div>
                 <div class="dd-fact">
                   <dt>{{ $t('detail.fSize') }}</dt>
-                  <dd>{{ fmtSize(totalSize) }}<span v-if="mv.files && mv.files.length > 1" class="dim"> · {{ $t('detail.filesCount', { n: mv.files.length }) }}</span></dd>
+                  <dd>{{ fmtSize(totalSize) }}<span v-if="localFiles.length > 1" class="dim"> · {{ $t('detail.filesCount', { n: localFiles.length }) }}</span></dd>
                 </div>
                 <div v-if="mainFile && mainFile.strm_url" class="dd-fact">
                   <dt>{{ $t('detail.fSource') }}</dt>
@@ -1377,6 +1513,9 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', onKey) })
               <button class="tab" :class="{ on: tab === 'preview' }" @click="tab = 'preview'">{{ $t('detail.tabPreview') }}</button>
               <button class="tab" :class="{ on: tab === 'info' }" @click="tab = 'info'">{{ $t('detail.tabInfo') }}</button>
               <button class="tab" :class="{ on: tab === 'files' }" @click="tab = 'files'">{{ $t('detail.tabFiles') }}</button>
+              <button class="tab" :class="{ on: tab === 'sources' }" @click="tab = 'sources'">
+                {{ $t('detail.tabSources') }}<span v-if="mv.sources && mv.sources.length" class="src-tab-count">{{ mv.sources.length }}</span>
+              </button>
               <!-- 重刮削 / 导出 NFO 收进主区「⋯更多」，这里只留标签页 -->
             </div>
 
@@ -1581,12 +1720,108 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', onKey) })
                 <div v-else-if="!pvLoading" class="empty"><div class="icon">▤</div><div class="desc">{{ $t('detail.noPreview') }}</div></div>
               </template>
 
+              <!-- 在线来源 -->
+              <template v-else-if="tab === 'sources'">
+                <div class="hstack wrap mb">
+                  <span class="muted sm">{{ $t('detail.srcSummary', { n: sources.length }) }}</span>
+                  <button class="btn tiny ghost" :disabled="srcLoading" @click="loadSources">{{ $t('detail.srcRefreshList') }}</button>
+                  <button class="btn tiny" @click="srcAddOpen = !srcAddOpen">{{ $t('detail.srcAdd') }}</button>
+                </div>
+
+                <!-- 源站入口置顶：自动播放受站点会话限制时，回源站是唯一稳定动作 -->
+                <div v-if="pageEntries.length" class="src-entries">
+                  <span class="src-tag">{{ $t('detail.srcPageEntry') }}</span>
+                  <a v-for="p in pageEntries" :key="p.id" class="src-entry" :href="p.open_url"
+                     target="_blank" rel="noopener noreferrer" :title="p.page_url">
+                    <span class="ellipsis">{{ p.page_label || (p.site + p.page_path) }}</span>
+                    <span class="src-open">↗</span>
+                  </a>
+                </div>
+
+                <div v-if="srcAddOpen" class="src-form">
+                  <b>{{ $t('detail.srcAddTitle') }}</b>
+                  <div class="field col">
+                    <label>{{ $t('detail.srcPageUrl') }}</label>
+                    <input class="inp" v-model="srcAdd.page_url" placeholder="https://…" />
+                  </div>
+                  <div class="field col">
+                    <label>{{ $t('detail.srcPlayUrl') }}</label>
+                    <input class="inp" v-model="srcAdd.play_url" placeholder="https://…/index.m3u8" />
+                  </div>
+                  <div class="field col">
+                    <label>{{ $t('detail.srcTitle') }}</label>
+                    <input class="inp" v-model="srcAdd.title" />
+                  </div>
+                  <div class="field col">
+                    <label>{{ $t('detail.srcKind') }}</label>
+                    <select class="inp" v-model="srcAdd.kind">
+                      <option value="hls">HLS</option>
+                      <option value="progressive">MP4</option>
+                      <option value="cloud">{{ $t('detail.srcKindCloud') }}</option>
+                      <option value="page">{{ $t('detail.srcKindPage') }}</option>
+                    </select>
+                  </div>
+                  <div class="hstack">
+                    <button class="btn tiny primary" :disabled="srcBusy" @click="doAddSource">{{ $t('detail.srcAddSubmit') }}</button>
+                    <button class="btn tiny ghost" @click="srcAddOpen = false">{{ $t('common.cancel') }}</button>
+                  </div>
+                </div>
+
+                <div v-if="srcLoading && !sources.length" class="empty"><span class="spinner"></span></div>
+                <div v-else-if="!sources.length" class="empty"><div class="desc">{{ $t('detail.srcEmpty') }}</div></div>
+                <div v-else class="src-list">
+                  <div v-for="s in sources" :key="s.id" class="src-row" :class="{ off: !s.available }">
+                    <div class="src-top">
+                      <b class="src-site ellipsis">{{ s.site || s.title || $t('detail.srcUnknown') }}</b>
+                      <span v-if="s.page_path" class="src-path ellipsis" :title="s.page_url">{{ s.page_path }}</span>
+                      <span class="badge" :class="srcBadge(s)">{{ srcStatus(s) }}</span>
+                      <span v-if="s.is_primary" class="badge primary">{{ $t('detail.srcPrimary') }}</span>
+                      <span v-if="s.pinned" class="badge">{{ $t('detail.srcPinned') }}</span>
+                      <span class="muted sm">{{ s.kind }}</span>
+                    </div>
+                    <div class="src-url ellipsis" :title="s.play_url || s.page_url">
+                      <span class="src-tag">{{ $t('detail.srcStream') }}</span>
+                      {{ s.play_url || s.page_url || '—' }}
+                    </div>
+                    <div class="src-meta">
+                      <span v-if="s.last_checked">{{ $t('detail.srcChecked') }} {{ s.last_checked }}</span>
+                      <span v-if="s.expires_at">{{ $t('detail.srcExpires') }} {{ s.expires_at }}</span>
+                      <span v-if="s.expired" class="src-warn">{{ $t('detail.srcExpired') }}</span>
+                    </div>
+                    <div v-if="s.check_note" class="src-note">{{ s.check_note }}</div>
+                    <div class="hstack wrap src-actions">
+                      <button v-if="s.available && s.play_url && s.status !== 'invalid' && s.status !== 'unsupported'"
+                              class="btn tiny primary" :disabled="srcBusy" @click="playSource(s)">{{ $t('detail.srcPlay') }}</button>
+                      <button class="btn tiny ghost" :disabled="srcBusy || s.checking" @click="checkOne(s)">{{ $t('detail.srcCheck') }}</button>
+                      <button class="btn tiny ghost" :disabled="srcBusy || s.checking" @click="openRefresh(s)">{{ $t('detail.srcRefresh') }}</button>
+                      <button class="btn tiny ghost" :disabled="srcBusy || !!s.is_primary" @click="primaryOne(s)">{{ $t('detail.srcSetPrimary') }}</button>
+                      <button class="btn tiny ghost" :disabled="srcBusy" @click="toggleOne(s)">{{ s.available ? $t('detail.srcDisable') : $t('detail.srcEnable') }}</button>
+                      <a v-if="s.open_url || s.page_url" class="btn tiny ghost" :href="s.open_url || s.page_url" target="_blank" rel="noopener noreferrer">{{ $t('detail.srcOpen') }}</a>
+                      <button class="btn tiny danger" :disabled="srcBusy" @click="removeOne(s)">{{ $t('detail.srcDelete') }}</button>
+                    </div>
+                  </div>
+                </div>
+
+                <div v-if="srcRefreshFor.id" class="src-form">
+                  <b>{{ $t('detail.srcRefresh') }}</b>
+                  <span class="hint">{{ $t('detail.srcRefreshHint') }}</span>
+                  <div class="field col">
+                    <label>{{ $t('detail.srcPlayUrl') }}</label>
+                    <input class="inp" v-model="srcRefreshFor.play_url" placeholder="https://…/index.m3u8" />
+                  </div>
+                  <div class="hstack">
+                    <button class="btn tiny primary" :disabled="srcBusy" @click="doRefresh">{{ $t('detail.srcRefreshSubmit') }}</button>
+                    <button class="btn tiny ghost" @click="srcRefreshFor.id = 0; srcRefreshFor.play_url = ''">{{ $t('common.cancel') }}</button>
+                  </div>
+                </div>
+              </template>
+
               <!-- 文件 -->
-              <template v-else>
+              <template v-else-if="tab === 'files'">
                 <table class="ftable">
                   <thead><tr><th>{{ $t('detail.fileName') }}</th><th>{{ $t('detail.fileSize') }}</th><th>{{ $t('detail.fileStatus') }}</th></tr></thead>
                   <tbody>
-                    <tr v-for="f in mv.files" :key="f.id">
+                    <tr v-for="f in localFiles" :key="f.id">
                       <td class="fname" :title="f.path">{{ f.filename }}</td>
                       <td class="tabular">{{ fmtSize(f.size) }}</td>
                       <td><span class="badge" :class="f.missing ? 'err' : 'ok'">{{ f.missing ? $t('detail.fileMissing') : $t('detail.fileOk') }}</span></td>
@@ -2112,6 +2347,45 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', onKey) })
 .ftable th, .ftable td { text-align: left; padding: var(--sp-2); border-bottom: 1px solid var(--c-line); }
 .ftable th { color: var(--c-text-3); font-size: var(--fs-sm); font-weight: 500; }
 .ftable .fname { max-width: 420px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* 在线来源：一张卡一个来源，状态与操作都收在卡内 */
+.src-tab-count { margin-left: var(--sp-1); font-size: var(--fs-xs); color: var(--c-text-3); }
+.src-entries {
+  display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-2);
+  border: 1px solid var(--c-line); border-radius: var(--r-md);
+  padding: var(--sp-2) var(--sp-3); margin-bottom: var(--sp-3);
+}
+.src-tag {
+  font-size: var(--fs-xs); color: var(--c-text-3); white-space: nowrap;
+  border: 1px solid var(--c-line); border-radius: var(--r-md); padding: 0 6px;
+}
+.src-entry {
+  display: inline-flex; align-items: center; gap: var(--sp-2); max-width: 100%;
+  text-decoration: none; color: inherit;
+  border: 1px solid var(--c-line); border-radius: var(--r-md); padding: 2px 8px;
+}
+.src-entry:hover { border-color: var(--c-text-3); }
+.src-path { font-size: var(--fs-xs); color: var(--c-text-3); max-width: 320px; }
+.src-open { color: var(--c-text-3); }
+.src-list { display: flex; flex-direction: column; gap: var(--sp-3); }
+.src-row {
+  display: flex; flex-direction: column; gap: var(--sp-2);
+  border: 1px solid var(--c-line); border-radius: var(--r-md); padding: var(--sp-3);
+}
+.src-row.off { opacity: .62; }
+.src-top { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; }
+.src-site { max-width: 260px; font-size: var(--fs-md); }
+.src-url { font-size: var(--fs-sm); color: var(--c-text-2); font-family: monospace; }
+.src-meta { display: flex; flex-wrap: wrap; gap: var(--sp-3); font-size: var(--fs-xs); color: var(--c-text-3); }
+.src-warn { color: var(--c-warn); }
+.src-note { font-size: var(--fs-sm); color: var(--c-warn); }
+.src-actions { gap: var(--sp-2); }
+.src-form {
+  display: flex; flex-direction: column; gap: var(--sp-2);
+  border: 1px solid var(--c-line); border-radius: var(--r-md);
+  padding: var(--sp-3); margin-bottom: var(--sp-4);
+}
+.src-form .inp { max-width: 100%; }
 
 .danger-zone {
   margin-top: var(--sp-6); padding: var(--sp-3);

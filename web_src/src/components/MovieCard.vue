@@ -18,10 +18,23 @@ const m = computed(() => props.movie)
 const loaded = ref(false)
 // 始终通过 id 向后端请求封面：后端无图时 404，由 @error 回退占位。
 // 不再依赖列表 item 的 cover 字段（详情页走单独接口，列表字段可能未携带，导致有封面却不显示）。
-const coverSrc = computed(() => coverThumbUrl(m.value.id))
+// 卡片列宽随网格变化，按 1x / 2x 两档取图：2x 屏用 720 宽，
+// 避免把 360 的图放大（之前后端忽略 w，实际一直在用全尺寸图）
+const coverSrc = computed(() => coverThumbUrl(m.value.id, 360))
+const coverSrcset = computed(() =>
+  `${coverThumbUrl(m.value.id, 360)} 1x, ${coverThumbUrl(m.value.id, 720)} 2x`)
 
 const selected = computed(() => state.selected.has(m.value.id))
 const quality = computed(() => qualityTag(m.value.resolution))
+
+/* 来源角标：本地 / 双源 / 在线 / 仅页面；小圆点表示可用性（绿=可播，黄=仅回源站） */
+const SRC_LABEL = {
+  local: 'card.srcLocal', hybrid: 'card.srcHybrid',
+  online: 'card.srcOnline', page: 'card.srcPage', empty: 'card.srcEmpty',
+}
+const srcLabel = computed(() => SRC_LABEL[m.value.source_state] || '')
+const srcTitle = computed(() => (m.value.source_sites || []).join(' / '))
+const availDot = computed(() => (m.value.online_playable ? 'ok' : 'page'))
 
 /** 观看进度百分比 */
 const watchPct = computed(() => {
@@ -102,6 +115,7 @@ async function play(e) {
     <div class="thumb">
       <img
         :src="coverSrc"
+        :srcset="coverSrcset"
         :class="{ loading: !loaded }"
         loading="lazy"
         decoding="async"
@@ -152,6 +166,9 @@ async function play(e) {
         <span v-if="m.uncensored" class="tag unc">无码</span>
         <span v-if="quality" class="tag hd">{{ quality }}</span>
         <span v-if="m.duration_minutes" class="tag">{{ fmtMin(m.duration_minutes) }}</span>
+        <span v-if="srcLabel" class="tag src" :class="m.source_state" :title="srcTitle">
+          {{ $t(srcLabel) }}<i v-if="m.site_count" class="src-dot" :class="availDot"></i>
+        </span>
       </div>
 
       <!-- 观看进度 -->
@@ -173,6 +190,7 @@ async function play(e) {
       <div class="sub">
         <span v-if="m.rating" class="rate">★ {{ m.rating }}</span>
         <span v-if="m.studio" class="ellipsis">{{ m.studio }}</span>
+        <span v-else-if="m.site_count" class="dim">{{ $t('card.siteCount', { n: m.site_count }) }}</span>
         <span v-else class="dim">{{ fmtSize(m.size_bytes) }}</span>
       </div>
       <div v-if="reason" class="card-reason" :title="reason"><span class="cr-ico">✦</span>{{ reason }}</div>
@@ -183,6 +201,16 @@ async function play(e) {
 <style scoped>
 .skeleton.abs { position: absolute; inset: 0; border-radius: 0; }
 .rate { color: var(--c-gold); flex: none; font-variant-numeric: tabular-nums; }
+/* 来源角标：文字 + 可用性小圆点；与本地/在线区分色系 */
+.bl-tags .tag.src { display: inline-flex; align-items: center; gap: 4px; }
+.bl-tags .tag.src.local { color: var(--c-text-2); }
+.bl-tags .tag.src.hybrid { color: var(--c-accent); border-color: var(--c-accent); }
+.bl-tags .tag.src.online { color: var(--c-primary); border-color: var(--c-primary); }
+.bl-tags .tag.src.page { color: var(--c-warn, #d29922); border-color: var(--c-warn, #d29922); }
+.bl-tags .tag.src.empty { color: var(--c-text-3); opacity: .75; }
+.src-dot { width: 6px; height: 6px; border-radius: 50%; display: inline-block; }
+.src-dot.ok { background: var(--c-success, #3fb950); }
+.src-dot.page { background: var(--c-warn, #d29922); }
 .pick { position: absolute; }
 .progress { position: absolute; left: 0; right: 0; bottom: 0; height: 4px; background: rgba(0,0,0,.35); z-index: 3; }
 .progress > i { display: block; height: 100%; background: linear-gradient(90deg, var(--c-accent), var(--c-accent-2)); }

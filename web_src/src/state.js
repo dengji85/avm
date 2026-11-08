@@ -1,4 +1,4 @@
-import { reactive, watch } from 'vue'
+﻿import { reactive, watch } from 'vue'
 import { t } from './i18n'
 
 const PREF_KEY = 'avm.prefs.v2'
@@ -31,6 +31,9 @@ export const state = reactive({
   year: null,
   minRating: 0,
   flags: [],
+  // 来源维度（派生状态，筛选条件名与后端参数一致）
+  sourceState: [],
+  site: [],
   sort: saved.sort || 'added_desc',
   page: 1,
   page_size: saved.page_size || 60,
@@ -283,6 +286,8 @@ export function resetFilters() {
   state.prefix = ''
   state.year = null
   state.flags = []
+  state.sourceState = []
+  state.site = []
   state.tag = []
   state.page = 1
   state.returnFromFilter = null
@@ -291,7 +296,8 @@ export function resetFilters() {
 /** 当前是否有任何激活筛选 */
 export function hasActiveFilter() {
   return !!(state.q || state.actress.length || state.genre.length || state.tag.length ||
-            state.studio || state.series || state.prefix || state.year || state.flags.length)
+            state.studio || state.series || state.prefix || state.year || state.flags.length ||
+            state.sourceState.length || state.site.length)
 }
 
 /**
@@ -337,6 +343,7 @@ export const FACET_KINDS = [
   ['studios', 'studio', false, 'facet.studios'],
   ['series', 'series', false, 'facet.series'],
   ['prefixes', 'prefix', false, 'facet.prefixes'],
+  ['sites', 'site', true, 'facet.sites'],
   ['years', 'year', false, 'facet.years'],
 ]
 
@@ -346,6 +353,8 @@ export const SORTS = [
   ['rating_desc', 'sort.rating_desc'], ['title_asc', 'sort.title_asc'],
   ['code_asc', 'sort.code_asc'], ['size_desc', 'sort.size_desc'],
   ['duration_desc', 'sort.duration_desc'], ['played_desc', 'sort.played_desc'],
+  ['available_first', 'sort.available_first'], ['checked_desc', 'sort.checked_desc'],
+  ['sites_desc', 'sort.sites_desc'],
   ['random', 'sort.random'],
 ]
 

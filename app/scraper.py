@@ -996,6 +996,34 @@ def run_scrape(ids: Optional[List[int]] = None, scope: str = "missing",
     return {"ok": True, **SCRAPE.counters, "cancelled": SCRAPE.cancelled}
 
 
+# 单部影片排队刮削：已有任务在跑时先挂起，当前任务结束后自动补跑。
+# 插件连续加入多部影片时，若不排队，第二部之后会被 SCRAPE 的单任务锁静默丢掉。
+_SCRAPE_PENDING: List[int] = []
+_SCRAPE_PENDING_LOCK = threading.Lock()
+
+
+def queue_movie_scrape(movie_id: int) -> str:
+    """入队单部影片刮削，返回 queued / busy（busy 表示已挂到待补队列）。"""
+    mid = int(movie_id or 0)
+    if mid <= 0:
+        return "skipped"
+    if start_scrape_async(ids=[mid], scope="ids"):
+        return "queued"
+    with _SCRAPE_PENDING_LOCK:
+        if mid not in _SCRAPE_PENDING:
+            _SCRAPE_PENDING.append(mid)
+    return "busy"
+
+
+def _drain_pending_scrapes() -> None:
+    """当前刮削任务结束后补跑排队中的影片（每部只跑一次）。"""
+    with _SCRAPE_PENDING_LOCK:
+        pending = _SCRAPE_PENDING[:]
+        _SCRAPE_PENDING.clear()
+    if pending:
+        start_scrape_async(ids=pending, scope="ids")
+
+
 def start_scrape_async(ids: Optional[List[int]] = None, scope: str = "missing",
                        overwrite: Optional[bool] = None, force: bool = False,
                        force_cover: bool = False) -> bool:
@@ -1020,6 +1048,8 @@ def start_scrape_async(ids: Optional[List[int]] = None, scope: str = "missing",
         except Exception as exc:
             SCRAPE.error(str(exc))
             SCRAPE.finish(f"抓取失败：{exc}")
+        finally:
+            _drain_pending_scrapes()
 
     threading.Thread(target=worker, name="scrape-worker", daemon=True).start()
     return True

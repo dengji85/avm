@@ -388,8 +388,10 @@ def chat(cfg: AIConfig, messages: List[Dict[str, str]], *,
     cap = int(getattr(cfg, "max_tokens", 0) or 0) or 16000
     for attempt in range(attempts + 3):
         try:
+            from .proxy import proxies_for
             resp = requests.post(url, headers=headers, json=payload,
-                                 timeout=(CONNECT_TIMEOUT, cfg.timeout))
+                                 timeout=(CONNECT_TIMEOUT, cfg.timeout),
+                                 proxies=proxies_for(url))
             if resp.status_code in (429, 500, 502, 503, 504) and attempt < cfg.max_retries:
                 raise AiError("HTTP %d" % resp.status_code)
             if resp.status_code >= 400:
@@ -497,8 +499,10 @@ def chat_tools(cfg: AIConfig, messages: List[Dict[str, Any]], *,
     attempts = 1 + max(0, cfg.max_retries)
     for attempt in range(attempts):
         try:
+            from .proxy import proxies_for
             resp = requests.post(url, headers=headers, json=payload,
-                                 timeout=(CONNECT_TIMEOUT, cfg.timeout))
+                                 timeout=(CONNECT_TIMEOUT, cfg.timeout),
+                                 proxies=proxies_for(url))
             if resp.status_code in (429, 500, 502, 503, 504) and attempt < cfg.max_retries:
                 raise AiError("HTTP %d" % resp.status_code)
             if resp.status_code >= 400:
@@ -584,8 +588,10 @@ def chat_stream(cfg: AIConfig, messages: List[Dict[str, Any]], *,
 
     t0 = time.time()
     try:
+        from .proxy import proxies_for
         resp = requests.post(url, headers=headers, json=payload,
-                             timeout=(CONNECT_TIMEOUT, cfg.timeout), stream=True)
+                             timeout=(CONNECT_TIMEOUT, cfg.timeout), stream=True,
+                             proxies=proxies_for(url))
     except requests.RequestException as e:
         raise AiError("AI 调用失败：%s" % e)
 

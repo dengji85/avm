@@ -505,6 +505,63 @@ def _migrate(conn: sqlite3.Connection) -> None:
         "ignored INTEGER DEFAULT 0, "
         "checked_at TEXT DEFAULT (datetime('now','localtime')))")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_adcheck_level ON ad_checks(level, score)")
+    # 浏览器接入 / 在线资源：作品 ← 多来源 + 外部 ID + 别名（全部幂等，可重复执行）
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS movie_sources ("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "movie_id INTEGER NOT NULL REFERENCES movies(id) ON DELETE CASCADE, "
+        "kind TEXT NOT NULL DEFAULT 'page', "
+        "site TEXT NOT NULL DEFAULT '', site_id TEXT NOT NULL DEFAULT '', "
+        "page_url TEXT NOT NULL DEFAULT '', url_canonical TEXT NOT NULL DEFAULT '', "
+        "play_url TEXT NOT NULL DEFAULT '', title TEXT NOT NULL DEFAULT '', "
+        "is_primary INTEGER DEFAULT 0, priority INTEGER DEFAULT 0, "
+        "available INTEGER DEFAULT 1, status TEXT NOT NULL DEFAULT 'valid', "
+        "confidence REAL DEFAULT 0, evidence TEXT NOT NULL DEFAULT '', "
+        "fetched_at TEXT NOT NULL DEFAULT '', expires_at TEXT NOT NULL DEFAULT '', "
+        "last_checked TEXT NOT NULL DEFAULT '', refresh_from TEXT NOT NULL DEFAULT '', "
+        "created_at TEXT DEFAULT (datetime('now','localtime')), "
+        "updated_at TEXT DEFAULT (datetime('now','localtime')))")
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_ms_url ON movie_sources(url_canonical) "
+                 "WHERE url_canonical <> ''")
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_ms_site ON movie_sources(site, site_id) "
+                 "WHERE site <> '' AND site_id <> ''")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_ms_movie ON movie_sources(movie_id)")
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS movie_external_ids ("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "movie_id INTEGER NOT NULL REFERENCES movies(id) ON DELETE CASCADE, "
+        "site TEXT NOT NULL DEFAULT '', site_id TEXT NOT NULL DEFAULT '', "
+        "endpoint TEXT NOT NULL DEFAULT '', "
+        "created_at TEXT DEFAULT (datetime('now','localtime')))")
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_mei_site ON movie_external_ids(site, site_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_mei_movie ON movie_external_ids(movie_id)")
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS movie_aliases ("
+        "alias TEXT PRIMARY KEY, alias_kind TEXT NOT NULL DEFAULT '', "
+        "movie_id INTEGER NOT NULL REFERENCES movies(id) ON DELETE CASCADE, "
+        "created_at TEXT DEFAULT (datetime('now','localtime')))")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_mal_movie ON movie_aliases(movie_id)")
+    # 二期来源治理：用户固定主源标记 + 验证结果说明（老库幂等补列）
+    ms_cols = {r[1] for r in conn.execute("PRAGMA table_info(movie_sources)").fetchall()}
+    for col, ddl in (("pinned", "INTEGER NOT NULL DEFAULT 0"),
+                     ("check_note", "TEXT NOT NULL DEFAULT ''")):
+        if col not in ms_cols:
+            conn.execute("ALTER TABLE movie_sources ADD COLUMN %s %s" % (col, ddl))
+    # 老库补列：虚拟在线文件标记、观看会话的来源 / 设备 / 去重键
+    mf_cols = {r[1] for r in conn.execute("PRAGMA table_info(movie_files)").fetchall()}
+    if "kind" not in mf_cols:
+        conn.execute("ALTER TABLE movie_files ADD COLUMN kind TEXT NOT NULL DEFAULT 'local'")
+    # 自愈：虚拟在线记录曾被「同片多版本」去重误标缺失，重启时恢复为可用
+    conn.execute("UPDATE movie_files SET missing = 0, missing_since = '' "
+                 "WHERE kind = 'online' AND COALESCE(missing,0) = 1")
+    ws_cols = {r[1] for r in conn.execute("PRAGMA table_info(watch_sessions)").fetchall()}
+    for col, ddl in (("source_ref", "TEXT NOT NULL DEFAULT ''"),
+                     ("device_id", "TEXT NOT NULL DEFAULT ''"),
+                     ("dedupe_key", "TEXT NOT NULL DEFAULT ''")):
+        if col not in ws_cols:
+            conn.execute("ALTER TABLE watch_sessions ADD COLUMN %s %s" % (col, ddl))
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_ws_dedupe ON watch_sessions(dedupe_key) "
+                 "WHERE dedupe_key <> ''")
     conn.commit()
 
 

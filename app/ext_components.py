@@ -617,7 +617,9 @@ def _download(url: str, dest: str) -> str:
         if done > 0:
             headers["Range"] = "bytes=%d-" % done
     t0 = time.time()
-    with requests.get(url, stream=True, timeout=60, headers=headers) as r:
+    from .proxy import proxies_for
+    with requests.get(url, stream=True, timeout=60, headers=headers,
+                      proxies=proxies_for(url)) as r:
         if r.status_code == 200 and done > 0:
             done = 0          # 服务器不支持 Range：从头下
         r.raise_for_status()

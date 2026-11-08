@@ -72,10 +72,11 @@ def request(url: str, scfg: Dict[str, Any], *, headers: Dict[str, str] | None = 
     if headers:
         h.update({str(k): str(v) for k, v in headers.items()})
     proxy = scfg.get("proxy") or ""
+    from ..proxy import proxies_for
     kwargs: Dict[str, Any] = {
         "timeout": int(timeout or scfg.get("timeout") or 15),
         "headers": h,
-        "proxies": {"http": proxy, "https": proxy} if proxy else None,
+        "proxies": proxies_for(url, override=proxy),
         "verify": outbound_verify_tls(),
     }
     if method.upper() == "POST":

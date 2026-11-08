@@ -2,7 +2,7 @@
 import { ref, reactive, computed, onMounted, onBeforeUnmount, watch, nextTick } from 'vue'
 import videojs from 'video.js'
 import 'video.js/dist/video-js.css'
-import { streamUrl, strmHlsUrl, streamInfo, setProgress, playMovie, markPlayed, startSession, updateSession, endSession, getPreviews, genPreviews, playbackInfo, prepareStream, prepareStreamStatus, subtitleTracks, setSkipPoints, saveSubtitleSync, anchorSubtitleSync } from '../api.js'
+import { streamUrl, strmHlsUrl, streamInfo, setProgress, playMovie, markPlayed, startSession, updateSession, endSession, getPreviews, genPreviews, playbackInfo, prepareStream, prepareStreamStatus, subtitleTracks, setSkipPoints, saveSubtitleSync, anchorSubtitleSync, reportSourceFailure } from '../api.js'
 import { toast, fmtClock } from '../utils.js'
 import { t } from '../i18n/index.js'
 import SubtitleConsole from './player/SubtitleConsole.vue'
@@ -612,23 +612,30 @@ let hoverBound = false    // 是否已绑定进度条 hover 事件
 
 // 网络串流（.strm）：'' = 普通文件；'strm' = 直连地址；'hls' = m3u8（走同源代理播放列表）
 const streamMode = ref('')
+const directSrc = ref('')   // HLS 浏览器直连地址（仅开关开启时后端下发）
 let proxyTried = false
+let hlsProxyTried = false
 let sourceReady = false
+let failoverTried = false
 
 /** 播放前问一次后端：这部片是不是网络串流、要不要按 HLS 处理（轻量接口，无 ffprobe） */
 async function resolveSource() {
   streamMode.value = ''
+  directSrc.value = ''
   proxyTried = false
+  hlsProxyTried = false
   try {
     const info = await streamInfo(props.movieId)
     if (info && info.stream) streamMode.value = info.hls ? 'hls' : 'strm'
+    // 开关开启时优先进浏览器直连（源站对人机校验敏感、服务端代理被拦的场景）
+    if (info && info.hls && info.hls_direct && info.direct_url) directSrc.value = info.direct_url
   } catch (e) { /* 忽略：按普通文件处理 */ }
   sourceReady = true
 }
 
 function currentSource() {
   if (streamMode.value === 'hls') {
-    return { src: strmHlsUrl(props.movieId), type: 'application/x-mpegURL' }
+    return { src: directSrc.value || strmHlsUrl(props.movieId), type: 'application/x-mpegURL' }
   }
   return { src: streamUrl(props.movieId), type: 'video/mp4' }
 }
@@ -733,6 +740,17 @@ async function onError() {
   // 解锁后会恢复播放（见 PrivacyLock 的 resumePlayback），避免误触发降级。
   if (window.__avmLocked) return
   failed.value = true
+  // HLS 浏览器直连被跨域 / 站点策略拦住：回退服务端代理再试一次
+  if (streamMode.value === 'hls' && directSrc.value && !hlsProxyTried) {
+    hlsProxyTried = true
+    directSrc.value = ''
+    failed.value = false
+    if (player) {
+      player.src(currentSource())
+      player.play().catch(() => {})
+    }
+    return
+  }
   // 网络串流：直连被防盗链 / CORS 拦时，自动改用服务端代理重试一次
   if (streamMode.value === 'strm' && !proxyTried) {
     proxyTried = true
@@ -742,6 +760,24 @@ async function onError() {
       player.play().catch(() => {})
     }
     return
+  }
+  // 在线来源失效：后端会标记失效并切到下一可用来源，这里重建播放地址再试一次
+  if (streamMode.value && !failoverTried) {
+    failoverTried = true
+    try {
+      const r = await reportSourceFailure(props.movieId, 'playback error')
+      if (r && r.switched) {
+        failed.value = false
+        await resolveSource()
+        if (player) {
+          const src = currentSource()
+          src.src += (src.src.includes('?') ? '&' : '?') + 'r=' + Date.now()
+          player.src(src)
+          player.play().catch(() => {})
+        }
+        return
+      }
+    } catch (e) { /* 后端不可用时继续原有降级链 */ }
   }
   if (remuxTried) { fallbackExternal(); return }
   try {
@@ -1207,6 +1243,13 @@ function initPlayer() {
       bigPlayButton: false,
       playbackRates: [0.5, 1, 1.25, 1.5, 2],
       sources: [currentSource()],
+      // 浏览器直连 HLS 时携带站点 Cookie：用户浏览器已通过 CF 校验的情况下
+      // 才有意义；源站不允许 credentials 时会自动回退服务端代理
+      html5: {
+        vhs: {
+          withCredentials: true,
+        },
+      },
       controlBar: {
         pictureInPictureToggle: true,
       },
@@ -1416,7 +1459,7 @@ onMounted(() => {
   document.addEventListener('fullscreenchange', onFullscreenChange)
   document.addEventListener('webkitfullscreenchange', onFullscreenChange)
   watchWrapSize()
-  nextTick(async () => { await resolveSource(); initPlayer() })
+  nextTick(async () => { failoverTried = false; await resolveSource(); initPlayer() })
 })
 
 onBeforeUnmount(() => {
@@ -1448,7 +1491,7 @@ watch(() => props.movieId, () => {
   sessionId = null
   watchedSec = 0
   sourceReady = false
-  nextTick(async () => { await resolveSource(); initPlayer() })
+  nextTick(async () => { failoverTried = false; await resolveSource(); initPlayer() })
 })
 </script>
 

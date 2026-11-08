@@ -183,6 +183,12 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         # 没有封面时用番号生成占位图
         "placeholder": True,
     },
+    # 网络代理（统一出口）：刮削、封面下载、字幕源、在线播放 / 来源验证、
+    # 更新检查等所有外部请求共用；留空 = 直连（仍跟随系统环境变量）。
+    # 本机 / 内网地址（Emby、DLNA、127.0.0.1 的 MetaTube）自动直连，不会被代理绕坏。
+    "network": {
+        "proxy": "",
+    },
     "stream": {
         # 浏览器播放失败时，自动用 ffmpeg 重封装为 MP4 再试：
         # 视频流直接复制（-c:v copy，零重编码、几乎不耗 CPU），仅音轨转 AAC。
@@ -193,9 +199,20 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         # 网络串流（.strm）：默认让浏览器直连目标地址（省服务器带宽）；
         # 源站有防盗链 / 不允许跨域时打开代理，视频字节全部经本服务中转。
         "strm_proxy": False,
-        # 代理 / 拉播放列表时附加的 Referer 与 UA；留空 = 目标站自身 origin + 浏览器 UA
+        # HLS 交给浏览器直连（hls.js 直接请求原始 m3u8，不经过服务端代理）。
+        # 适用场景：源站对服务端请求做 Cloudflare 人机校验，而浏览器指纹能过；
+        # 跨域被拒时播放器会自动回退到服务端代理，再失败则提示回源站。
+        "hls_direct": False,
+        # 服务端请求上游（播放列表 / 分片 / 来源验证）时的 HTTP 代理，
+        # 例如 http://127.0.0.1:7890；留空 = 直连（仍会跟随系统环境变量代理）
+        "upstream_proxy": "",
+        # 代理 / 拉播放列表时附加的 Referer 与 UA；留空 = 影片页面地址 + 浏览器 UA
         "strm_referer": "",
+        # full = 完整影片页面地址；origin = 只带站点根地址（部分 CDN 只认这个）
+        "strm_referer_mode": "full",
         "strm_user_agent": "",
+        # 额外请求头（键值对象）；Cookie / Authorization 等凭据类头会被过滤
+        "strm_extra_headers": {},
     },
     # MetaTube 刮削引擎（外部开源服务，Apache-2.0）：补齐自研刮削器没有的源，
     # 主要是 FC2、无码厂、素人站与官方源（fanza / mgstage / sod）。
@@ -361,6 +378,21 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         #   private = 只有自己 / 家庭内网    public = 会被公网访问（域名 / 反代 / 端口映射）
         # 只用于完成页与后续安全提示（是否建议开两步验证），**不直接改认证策略**。
         "exposure": "private",
+    },
+    # 浏览器接入（在线资源 / 观看上报）。鉴权仍由全局访问令牌 / 事务 API Key 负责，
+    # 这里只控制端点是否启用、是否允许自动建片、观看会话的 method 值。
+    "ingest": {
+        "enabled": True,
+        "allow_create": True,
+        "watch_method": "extension",
+        # 新来源入库后异步做一次轻验证，不阻塞插件上报
+        "verify_on_link": True,
+        # 插件新建影片后自动刮削一次元数据（已有刮削任务时排队补跑）
+        "auto_scrape": True,
+        # 播放地址没有签名有效期时，按这个保守时长判定过期（小时）
+        "stale_ttl_hours": 6,
+        # 主源失效时自动切到下一个可用来源
+        "auto_failover": True,
     },
     "ui": {
         "page_size": 60,

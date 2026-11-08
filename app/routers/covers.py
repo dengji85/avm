@@ -24,10 +24,9 @@ def _proxy_image(url: str) -> Response:
     """代理远程图片，规避前端跨域与防盗链；失败时返回占位 SVG。"""
     try:
         import requests
-        cfg = load_config()
-        proxy = (cfg.get("scraper", {}).get("proxy") or "") or None
-        proxies = {"http": proxy, "https": proxy} if proxy else None
-        resp = requests.get(url, timeout=20, headers={"User-Agent": "Mozilla/5.0"}, proxies=proxies)
+        from ..proxy import proxies_for
+        resp = requests.get(url, timeout=20, headers={"User-Agent": "Mozilla/5.0"},
+                            proxies=proxies_for(url))
         resp.raise_for_status()
         ctype = resp.headers.get("Content-Type", "image/jpeg")
         if not ctype.startswith("image/"):
@@ -53,8 +52,8 @@ def _proxy_image(url: str) -> Response:
 
 
 @router.get("/cover/{movie_id}")
-def get_cover(movie_id: int, request: Request, poster: int = 0) -> Response:
-    """封面图。poster=1 时优先返回 2:3 竖版海报（海报墙用），没有再回退原图。"""
+def get_cover(movie_id: int, request: Request, poster: int = 0, w: int = 0) -> Response:
+    """封面图。poster=1 优先返回 2:3 竖版海报；w 按宽度返回缩略图（只缩不放）。"""
     with db() as conn:
         row = query_one(conn, "SELECT code, title, cover FROM movies WHERE id = ?", (movie_id,))
     if row is None:
@@ -68,6 +67,9 @@ def get_cover(movie_id: int, request: Request, poster: int = 0) -> Response:
             path = images.poster_path(row["cover"])
     if path is None:
         path = images.cover_path(row["cover"] or "")
+    if path and w:
+        # 列表按卡片宽度取缩略图（只缩不放）；详情不带 w，仍用原图
+        path = images.thumb_path(row["cover"] or "", w, poster=bool(poster)) or path
     if path:
         st = path.stat()
         etag = f'"{int(st.st_mtime)}.{st.st_size}"'

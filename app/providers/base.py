@@ -6,6 +6,7 @@ import re
 from typing import Any, Dict, List, Optional
 
 from ..config import outbound_verify_tls
+from ..proxy import proxies_for
 
 MetaResult = Dict[str, Any]
 
@@ -167,7 +168,7 @@ def http_get(url: str, scfg: Dict[str, Any], options: Dict[str, Any],
                 timeout=timeout,
                 headers=merged,
                 cookies=cookie_dict,
-                proxies={"http": proxy, "https": proxy} if proxy else None,
+                proxies=proxies_for(url, override=proxy),
                 # 默认校验服务器证书；仅 server.insecure_skip_verify=true 时跳过
                 # （逃生口，代价是失去出站中间人防护）
                 verify=outbound_verify_tls(),

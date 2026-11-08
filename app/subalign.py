@@ -163,7 +163,8 @@ def _reference_spans(movie_id: int, cfg: Dict[str, Any]) -> Tuple[List[Tuple[flo
     try:
         with db() as conn:
             rows = conn.execute(
-                "SELECT path, sub_tracks FROM movie_files WHERE movie_id=? AND missing=0",
+                "SELECT path, sub_tracks FROM movie_files WHERE movie_id=? AND missing=0 "
+                "AND COALESCE(kind,'local') <> 'online'",
                 (movie_id,)).fetchall()
         for row in rows:
             try:

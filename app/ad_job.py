@@ -56,13 +56,15 @@ def _rows(movie_ids: Optional[List[int]] = None) -> List[Dict[str, Any]]:
             cur = conn.execute(
                 "SELECT m.id AS mid, m.code, m.runtime, f.id AS fid, f.path, f.size, "
                 "f.strm_url FROM movies m JOIN movie_files f ON f.movie_id = m.id "
-                "WHERE f.missing = 0 AND m.id IN (%s) ORDER BY m.id, f.size DESC" % marks,
+                "WHERE f.missing = 0 AND COALESCE(f.kind,'local') <> 'online' "
+                "AND m.id IN (%s) ORDER BY m.id, f.size DESC" % marks,
                 tuple(movie_ids))
         else:
             cur = conn.execute(
                 "SELECT m.id AS mid, m.code, m.runtime, f.id AS fid, f.path, f.size, "
                 "f.strm_url FROM movies m JOIN movie_files f ON f.movie_id = m.id "
-                "WHERE f.missing = 0 ORDER BY m.id, f.size DESC")
+                "WHERE f.missing = 0 AND COALESCE(f.kind,'local') <> 'online' "
+                "ORDER BY m.id, f.size DESC")
         seen = set()
         out = []
         for r in cur.fetchall():
@@ -152,7 +154,8 @@ def check_one(movie_id: int) -> Dict[str, Any]:
         row = conn.execute(
             "SELECT m.id AS mid, m.code, m.runtime, f.id AS fid, f.path, f.strm_url "
             "FROM movies m JOIN movie_files f ON f.movie_id = m.id "
-            "WHERE m.id = ? AND f.missing = 0 ORDER BY f.size DESC LIMIT 1",
+            "WHERE m.id = ? AND f.missing = 0 AND COALESCE(f.kind,'local') <> 'online' "
+            "ORDER BY f.size DESC LIMIT 1",
             (movie_id,)).fetchone()
     if not row:
         raise ValueError("影片不存在或没有可用文件")

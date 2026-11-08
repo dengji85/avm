@@ -5,7 +5,7 @@ import { state, FACET_KINDS, FLAGS } from '../state.js'
 /* 分面配置：FACET_KINDS = [key, field, multi, label] */
 
 // 需要折叠的维度：值可能较多，默认只显示前 INITIAL 个 + 「显示更多」，并支持组内搜索
-const COLLAPSIBLE = new Set(['genres', 'tags', 'actresses', 'studios', 'series'])
+const COLLAPSIBLE = new Set(['genres', 'tags', 'actresses', 'studios', 'series', 'sites'])
 const INITIAL = 12          // 折叠态下默认展示的热门数量
 const SEARCH_THRESHOLD = 20 // 值超过该数量才显示组内搜索框
 
@@ -14,9 +14,19 @@ const SEARCH_THRESHOLD = 20 // 值超过该数量才显示组内搜索框
 const byKey = Object.fromEntries(FACET_KINDS.map((g) => [g[0], g]))
 const RATING = ['ratings', 'rating', false, 'filter.ratingGE']
 const FLAGG = ['flags', 'flags', false, 'filter.flags']
-const order = ['genres', 'series', 'actresses', 'tags', 'studios', 'ratings', 'years', 'flags', 'prefixes']
-const groupMap = { ratings: RATING, flags: FLAGG, ...byKey }
+const SOURCESTATE = ['sourceState', 'sourceState', true, 'filter.sourceState']
+const order = ['genres', 'series', 'actresses', 'tags', 'studios', 'sourceState', 'ratings',
+               'years', 'sites', 'flags', 'prefixes']
+const groupMap = { ratings: RATING, flags: FLAGG, sourceState: SOURCESTATE, ...byKey }
 const groups = order.map((k) => groupMap[k]).filter(Boolean)
+
+// 来源状态与站点：数据来自 facets（派生口径），标签走 i18n
+const SOURCE_LABELS = {
+  local: 'filter.sourceLocal', hybrid: 'filter.sourceHybrid',
+  online: 'filter.sourceOnline', page: 'filter.sourcePage',
+  empty: 'filter.sourceEmpty',
+}
+const sourceStates = computed(() => state.facets?.source_states || [])
 
 // 每个可折叠分面的折叠态 / 搜索词
 const ui = reactive({})
@@ -110,6 +120,22 @@ defineExpose({ focus: () => {} })
         <div class="f-rating">
           <input type="range" min="0" max="5" step="1" v-model="minRating" />
           <span class="rv">{{ minRating || $t('filter.all') }}</span>
+        </div>
+      </div>
+
+      <!-- 来源状态：纯本地 / 双源 / 在线可播 / 仅页面可达 -->
+      <div v-else-if="key === 'sourceState'" class="f-group">
+        <div class="f-label">{{ $t(label) }}</div>
+        <div class="f-chips">
+          <button
+            v-for="f in sourceStates"
+            :key="f.name"
+            class="f-chip"
+            :class="{ on: state.sourceState.includes(f.name) }"
+            @click="toggle('sourceState', f.name, true)"
+          >
+            {{ $t(SOURCE_LABELS[f.name] || f.name) }} <span class="c">{{ f.count }}</span>
+          </button>
         </div>
       </div>
 

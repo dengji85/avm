@@ -5,11 +5,12 @@ from .db import connect, query_all, query_one
 
 
 def _file_rows(conn):
+    """本地实体文件行：纯在线虚拟记录（kind='online'）不参与重复/版本判定。"""
     sql = (
         "SELECT f.id, f.path, f.size, f.mtime, f.part, f.movie_id, f.quick_hash, "
         "m.code, m.title, m.resolution "
         "FROM movie_files f JOIN movies m ON m.id = f.movie_id "
-        "WHERE f.missing = 0"
+        "WHERE f.missing = 0 AND COALESCE(f.kind,'local') <> 'online'"
     )
     return query_all(conn, sql)
 
@@ -68,11 +69,13 @@ def resolve_group(conn, kind: str, keep_file_id: int, delete_files: bool = False
     if kind == "exact":
         others = query_all(conn,
                            "SELECT * FROM movie_files WHERE size = ? AND quick_hash = ? "
-                           "AND id <> ? AND missing = 0",
+                           "AND id <> ? AND missing = 0 "
+                           "AND COALESCE(kind,'local') <> 'online'",
                            (row["size"], row["quick_hash"], keep_file_id))
     else:  # version
         others = query_all(conn,
-                           "SELECT * FROM movie_files WHERE movie_id = ? AND id <> ? AND missing = 0",
+                           "SELECT * FROM movie_files WHERE movie_id = ? AND id <> ? AND missing = 0 "
+                           "AND COALESCE(kind,'local') <> 'online'",
                            (row["movie_id"], keep_file_id))
     removed = 0
     for o in others:
@@ -204,13 +207,17 @@ _LOW_BITRATE_RATIO = 0.55
 
 
 def _movie_rows(conn):
-    """取出用于质量评估的影片与文件信息。"""
+    """取出用于质量评估的影片与文件信息。
+
+    纯在线影片的虚拟记录（kind='online'）没有体积与真实路径，不参与版本冗余 /
+    低码率 / 广告片判定；否则「本地 + 在线」的双源影片会被误判成多版本。
+    """
     sql = (
         "SELECT m.id AS mid, m.code, m.title, m.resolution, m.size AS msize, "
         "m.subtitle, m.uncensored, m.file_count, "
         "f.id AS fid, f.path, f.filename, f.size AS fsize, f.missing, f.quick_hash "
         "FROM movies m JOIN movie_files f ON f.movie_id = m.id "
-        "WHERE f.missing = 0"
+        "WHERE f.missing = 0 AND COALESCE(f.kind,'local') <> 'online'"
     )
     return query_all(conn, sql)
 

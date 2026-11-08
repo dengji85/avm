@@ -211,9 +211,11 @@ def export_detail(movie: Dict[str, Any], cfg: Dict[str, Any] | None = None,
         res["skipped"] = "no_file"
         return res
 
-    # 只写「文件确实在磁盘上」的条目：缺失文件所在目录可能已不存在
+    # 只写「文件确实在磁盘上」的条目：缺失文件所在目录可能已不存在；
+    # 纯在线虚拟记录（kind='online'）没有磁盘目录，也必须排除。
     files = [f for f in (movie.get("files") or [])
-             if f.get("path") and not f.get("missing")]
+             if f.get("path") and not f.get("missing")
+             and str(f.get("kind") or "local") != "online"]
     if not files:
         res["skipped"] = "no_file"
         return res

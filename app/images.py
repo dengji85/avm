@@ -7,6 +7,7 @@ import html
 import json
 import re
 import shutil
+import threading
 import time
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
@@ -70,6 +71,58 @@ def poster_path(cover_file: str) -> Optional[Path]:
         return None
     p = COVER_DIR / poster_name(cover_file)
     return p if p.exists() else None
+
+
+# ---- 列表缩略图：按卡片实际宽度取图，只缩不放 ----
+THUMB_DIR = COVER_DIR / ".thumbs"
+THUMB_WIDTHS = (120, 160, 240, 360, 400, 480, 720, 960)
+_THUMB_LOCK = threading.Lock()
+
+
+def thumb_path(cover_file: str, width: int, poster: bool = False) -> Optional[Path]:
+    """返回指定宽度的封面缩略图（不存在则生成）；源图本身不宽就原样返回。
+
+    ``/api/cover?w=`` 用它把「按卡片宽度取图」做成真实行为：之前 w 只是
+    URL 里的装饰，列表拿到的始终是全尺寸图，既费带宽也没解决清晰度问题。
+    档位就近取整，避免任意宽度生成无穷多文件。
+    """
+    try:
+        want = int(width or 0)
+    except (TypeError, ValueError):
+        return None
+    if want <= 0:
+        return None
+    width = max((w for w in THUMB_WIDTHS if w <= want), default=THUMB_WIDTHS[0])
+    base = (poster_path(cover_file) if poster else None) or cover_path(cover_file)
+    if base is None:
+        return None
+    try:
+        from PIL import Image
+        with Image.open(base) as im:
+            if im.width <= width:
+                return base          # 不放大：放大只会更糊
+    except Exception:
+        return base
+    dst = THUMB_DIR / ("%s-w%d.jpg" % (base.stem, width))
+    try:
+        if dst.exists() and dst.stat().st_mtime >= base.stat().st_mtime:
+            return dst
+    except OSError:
+        pass
+    with _THUMB_LOCK:
+        try:
+            if dst.exists() and dst.stat().st_mtime >= base.stat().st_mtime:
+                return dst
+            im = _open_image(base)
+            if im is None:
+                return base
+            h = max(1, round(im.height * width / im.width))
+            out = im.resize((width, h), Image.LANCZOS)
+            THUMB_DIR.mkdir(parents=True, exist_ok=True)
+            out.save(dst, "JPEG", quality=84, optimize=True, progressive=True)
+            return dst
+        except Exception:
+            return base
 
 
 def _poster_meta_path(cover_file: str) -> Path:
@@ -139,7 +192,13 @@ def _fit_canvas(im: Any) -> Any:
 
 # 裁切后窄于这个宽度就认为「裁出来会糊」：800×540 的横版裁 2:3 只有 360 宽，
 # 放到卡片上等于把 360px 放大到 2x 屏 —— 不如保留 800 宽、两侧模糊补边
-POSTER_CROP_MIN_W = 520
+POSTER_CROP_MIN_W = 600
+# 温和放大上限：800×538 裁 2:3 得 358 宽，放大到 600 是 1.68 倍；
+# 再往上只是把低清信息摊大，不会变清晰
+POSTER_CROP_MAX_SCALE = 1.8
+# 官方竖版小于这个宽度就当作「小图」不采用（DMM 部分番号只给 147×200 的缩略图，
+# 拿它当海报等于把 2x 屏卡片放大 3 倍）。宁可回退到横版裁切。
+POSTER_MIN_SRC_W = 600
 
 
 def _render_poster(im: Any, strategy: str, focus_x: Optional[float] = None) -> Any:
@@ -179,8 +238,8 @@ def _save_poster(im: Any, dst: Path) -> bool:
             out = out.resize((target_w, _POSTER_MAX_H), Image.LANCZOS)
         elif out.width < POSTER_CROP_MIN_W:
             # 低清裁切偏窄（800×540 裁出 360 宽）：温和放大填满卡片，
-            # 上限 1.45 倍——再多只是把糊图摊大
-            scale = min(1.45, POSTER_CROP_MIN_W / max(1, out.width))
+            # 有上限——再多只是把糊图摊大
+            scale = min(POSTER_CROP_MAX_SCALE, POSTER_CROP_MIN_W / max(1, out.width))
             if scale > 1.05:
                 out = out.resize((round(out.width * scale), round(out.height * scale)), Image.LANCZOS)
         dst.parent.mkdir(parents=True, exist_ok=True)
@@ -242,6 +301,10 @@ def save_poster_from_bytes(data: bytes, cover_file: str,
         im = Image.open(BytesIO(data))
         im = ImageOps.exif_transpose(im).convert("RGB")
     except Exception:
+        return None
+    if im.width < POSTER_MIN_SRC_W:
+        # DMM 部分番号只给 147×200 的缩略版竖图：不采用（当海报会被卡片放大 3 倍），
+        # 交给调用方回退「横版裁切」，宁可稍软也别整张糊
         return None
     dst = COVER_DIR / poster_name(cover_file)
     out = _render_poster(im, "right")
@@ -423,6 +486,8 @@ def ensure_poster(cover_file: str, cfg: Optional[Dict[str, Any]] = None,
         not dst.exists()
         or float(meta.get("src_mtime") or 0) < src.stat().st_mtime
         or (not from_dmm and _strategy_changed(meta.get("strategy"), strategy))
+        # 历史遗留：早期把 DMM 147×200 的缩略竖图存成了海报，必须重建
+        or (from_dmm and int(meta.get("src_w") or 0) < POSTER_MIN_SRC_W)
         or (allow_network and bool(code) and not from_dmm)
     )
     if not stale:
@@ -602,7 +667,8 @@ def _download_requests(url: str, headers: Dict[str, str], proxy: str, timeout: i
         import requests
     except ImportError:
         return None
-    proxies = {"http": proxy, "https": proxy} if proxy else None
+    from .proxy import proxies_for
+    proxies = proxies_for(url, override=proxy)
     try:
         resp = requests.get(url, timeout=timeout, headers=headers, proxies=proxies)
         resp.raise_for_status()

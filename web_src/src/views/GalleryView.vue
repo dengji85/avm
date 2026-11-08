@@ -29,6 +29,29 @@ const contLoading = ref(false)
 /* 视图模式：grid | list | waterfall */
 const viewMode = ref('grid')
 
+/* 来源视图段：全部 / 我有的 / 在线收藏 / 双源 / 待补链 —— 本质是 sourceState 筛选预设 */
+const SRC_TABS = computed(() => {
+  const f = Object.fromEntries((state.facets?.source_states || []).map((x) => [x.name, x.count]))
+  return [
+    { id: 'all', label: 'gallery.tabAll', states: [], count: null },
+    { id: 'owned', label: 'gallery.tabOwned', states: ['local', 'hybrid'],
+      count: (f.local || 0) + (f.hybrid || 0) },
+    { id: 'online', label: 'gallery.tabOnline', states: ['online', 'page'],
+      count: (f.online || 0) + (f.page || 0) },
+    { id: 'hybrid', label: 'gallery.tabHybrid', states: ['hybrid'], count: f.hybrid || 0 },
+    { id: 'page', label: 'gallery.tabPage', states: ['page'], count: f.page || 0 },
+    { id: 'empty', label: 'gallery.tabEmpty', states: ['empty'], count: f.empty || 0 },
+  ]
+})
+const activeSrcTab = computed(() => {
+  const cur = state.sourceState.slice().sort().join(',')
+  return SRC_TABS.value.find((x) => x.states.slice().sort().join(',') === cur)?.id || 'all'
+})
+function setSrcTab(tab) {
+  state.sourceState = [...tab.states]
+  state.page = 1
+}
+
 /* 播放模式（迅雷式）：把当前筛选结果连播 */
 const playingAll = ref(false)
 
@@ -44,6 +67,8 @@ function filterParams(page, pageSize) {
     prefix: state.prefix || undefined,
     year: state.year || undefined,
     flags: state.flags.length ? state.flags.join(',') : undefined,
+    source_state: state.sourceState.length ? state.sourceState.join(',') : undefined,
+    site: state.site.length ? state.site.join(',') : undefined,
     sort: state.sort,
     page, page_size: pageSize,
     op: state.multiOp,
@@ -348,6 +373,19 @@ watch(
         <button class="btn tiny icon" @click="load()" data-tip="刷新">⟳</button>
       </div>
 
+      <!-- 来源视图段：收藏者的「我有的 / 我知道在哪」切换 -->
+      <div class="src-tabs">
+        <button
+          v-for="tab in SRC_TABS"
+          :key="tab.id"
+          class="src-tab"
+          :class="{ on: activeSrcTab === tab.id }"
+          @click="setSrcTab(tab)"
+        >
+          {{ $t(tab.label) }}<span v-if="tab.count != null" class="n tabular">{{ tab.count }}</span>
+        </button>
+      </div>
+
       <!-- 激活筛选条 -->
       <div v-if="activeChips.length" class="filter-bar">
         <span class="fb-label">{{ $t('view.filter') }}</span>
@@ -562,4 +600,13 @@ watch(
     cursor: pointer;
   }
 }
+.src-tabs { display: flex; gap: 4px; padding: 6px 2px 8px; overflow-x: auto; }
+.src-tab {
+  border: 1px solid transparent; background: none; color: var(--c-text-2);
+  border-radius: 8px; padding: 5px 10px; font: inherit; font-size: 12px;
+  cursor: pointer; white-space: nowrap;
+}
+.src-tab:hover { color: var(--c-text); background: var(--c-bg-hover, rgba(255,255,255,.05)); }
+.src-tab.on { color: var(--c-primary); border-color: var(--c-primary); background: rgba(66,133,244,.1); }
+.src-tab .n { margin-left: 5px; opacity: .6; font-size: 11px; }
 </style>

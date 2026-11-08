@@ -171,6 +171,15 @@ class AccessTokenMiddleware(BaseHTTPMiddleware):
         request.scope["avm_client_ip"] = ip
         ua = request.headers.get("user-agent", "")
 
+        # 0-) 跨源预检：CORSMiddleware 在最内层，若这里不放行，OPTIONS 会先被
+        #     AccessTokenMiddleware 判 401 NO_TOKEN，浏览器永远拿不到 CORS 响应头。
+        #     只在显式配置了白名单且 Origin 命中时放行；预检不带数据，
+        #     真正的 GET/POST 仍走完整鉴权，不放宽访问控制。
+        if request.method == "OPTIONS" and _cors_origins:
+            origin = request.headers.get("origin", "")
+            if origin and (origin in _cors_origins or "*" in _cors_origins):
+                return await call_next(request)
+
         # 0) 用带 ?token= 的链接打开首页（扫码 / 分享）：令牌有效时换一次会话，再 302 到干净地址。
         #    令牌留在 URL 里会被浏览器历史、反向代理 access log 与 Referer 记录；
         #    换成 HttpOnly 会话 Cookie 后，后续请求（含 <img>/<video>）自动通过，也不必每次带参数。
@@ -351,7 +360,10 @@ class AccessTokenMiddleware(BaseHTTPMiddleware):
 _CSP = (
     "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
     "font-src 'self' data:; "
-    "img-src 'self' data: blob: https:; media-src 'self' blob:; connect-src 'self'; "
+    "img-src 'self' data: blob: https:; media-src 'self' blob:; "
+    # hls.js 用 blob: 创建 Web Worker 做 TS 解复用；没有 worker-src 时浏览器
+    # 回落到 script-src 'self'，worker 被拦，表现是「时长能读出来但一直黑屏」
+    "worker-src 'self' blob:; connect-src 'self'; "
     "frame-ancestors 'self'; object-src 'none'; base-uri 'self'"
 )
 

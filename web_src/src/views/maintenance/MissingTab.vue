@@ -38,6 +38,8 @@ const graceDays = computed(() => (data.value && data.value.grace_days) || 0)
 const pickedIds = computed(() => list.value.filter((i) => picked[i.movie_id]).map((i) => i.movie_id))
 const pickedAll = computed(() => list.value.length > 0 && pickedIds.value.length === list.value.length)
 const pickedHist = computed(() => list.value.filter((i) => picked[i.movie_id] && i.has_history).length)
+// 选中项里有在线来源的，才显示「只移除本地记录」——否则删完就成空壳，归档更合适
+const pickedOnline = computed(() => list.value.filter((i) => picked[i.movie_id] && i.online_sources > 0).length)
 
 function toggleAll(v) { list.value.forEach((i) => { picked[i.movie_id] = v }) }
 function switchTab(id) {
@@ -57,6 +59,9 @@ async function act(action) {
   } else if (action === 'forget') {
     opt = { danger: true, okText: t('maint.missForget'),
             title: t('maint.missForgetTitle', { n }), desc: t('maint.missForgetDesc') }
+  } else if (action === 'drop_local') {
+    opt = { danger: false, okText: t('maint.missDropLocal'),
+            title: t('maint.missDropLocalTitle', { n }), desc: t('maint.missDropLocalDesc') }
   } else {
     opt = { danger: true, okText: t('maint.missPurge'),
             title: t('maint.missPurgeTitle', { n }), desc: t('maint.missPurgeDesc', { n, h }) }
@@ -68,6 +73,8 @@ async function act(action) {
     const r = await resolveMissing({ ids, action })
     const msg = action === 'purge'
       ? t('maint.missPurged', { n: r.deleted || 0, s: r.snapshots || 0 })
+      : action === 'drop_local'
+        ? t('maint.missDropped', { n: r.removed_files || 0, a: r.archived || 0 })
       : action === 'forget'
         ? t('maint.missForgot', { n: r.removed_files || 0, a: r.archived || 0 })
         : t('maint.missArchived', { n: r.archived || 0 })
@@ -142,6 +149,7 @@ onMounted(load)
               <span v-else-if="m.expired" class="tag exp">{{ $t('maint.missExpired') }}</span>
               <span v-else class="tag gr">{{ $t('maint.missGrace', { n: Math.max(0, graceDays - m.days) }) }}</span>
               <span v-if="m.has_history" class="tag hist">{{ $t('maint.missHistory', { n: m.play_count }) }}</span>
+              <span v-if="m.online_sources" class="tag on">{{ $t('maint.missOnlineOk') }}</span>
             </div>
           </div>
         </div>
@@ -180,6 +188,7 @@ onMounted(load)
       <span>{{ $t('maint.missPicked', { n: pickedIds.length, h: pickedHist }) }}</span>
       <div class="spacer"></div>
       <button class="btn tiny" :disabled="busy" @click="act('archive')">{{ $t('maint.missArchive') }}</button>
+      <button v-if="pickedOnline" class="btn tiny" :disabled="busy" @click="act('drop_local')">{{ $t('maint.missDropLocal') }}</button>
       <button class="btn tiny" :disabled="busy" @click="act('forget')">{{ $t('maint.missForget') }}</button>
       <button class="btn tiny danger" :disabled="busy" @click="act('purge')">{{ $t('maint.missPurge') }}</button>
     </div>
@@ -209,6 +218,7 @@ onMounted(load)
 .tag.exp { color: var(--c-err); border-color: var(--c-err); }
 .tag.gr { color: var(--c-warn); border-color: var(--c-warn); }
 .tag.hist { color: var(--c-primary); border-color: var(--c-primary); }
+.tag.on { color: var(--c-success, #3fb950); border-color: var(--c-success, #3fb950); }
 .mt-bulk { position: sticky; bottom: 0; display: flex; align-items: center; gap: var(--sp-2); padding: var(--sp-2) var(--sp-3); border-radius: var(--r-md); border: 1px solid var(--c-line-strong); background: var(--c-surface); box-shadow: var(--sh-2); font-size: var(--fs-sm); }
 @media (max-width: 720px) {
   .mt-row { flex-wrap: wrap; }

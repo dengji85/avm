@@ -160,11 +160,9 @@ def _request(cfg: Dict[str, Any], path: str, params: Optional[Dict[str, Any]] = 
     scfg = cfg.get("_scraper") or load_config().get("scraper") or {}
     proxy = str(scfg.get("proxy") or "").strip()
     url = _base_url(cfg) + path
-    # 本机地址绝不能走 scraper.proxy：用户常把代理设成 127.0.0.1:10808，
-    # 代理连不上本地端口就回 503，看起来像「MetaTube 挂了」，实际是绕了一圈。
-    host = (urlparse(url).hostname or "").lower()
-    local = host in ("127.0.0.1", "localhost", "::1", "0.0.0.0")
-    proxies = {"http": proxy, "https": proxy} if (proxy and not local) else None
+    from .proxy import proxies_for
+    # 本机 / 内网地址由统一解析强制直连：给本地 MetaTube 套代理只会绕坏
+    proxies = proxies_for(url, override=proxy)
     try:
         resp = requests.get(
             url, params=params, headers=_headers(str(cfg.get("token") or "")),

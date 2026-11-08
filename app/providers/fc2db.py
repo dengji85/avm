@@ -28,6 +28,7 @@ import time
 from typing import Any, Dict, List, Optional
 from urllib.parse import quote
 
+from ..proxy import proxies_for
 from .base import BaseProvider, MetaResult, NetError
 
 _DEFAULT_BASE = "https://fc2db.net"
@@ -91,11 +92,11 @@ class Fc2dbProvider(BaseProvider):
         from ..config import outbound_verify_tls
 
         proxy = str(self.scfg.get("proxy") or "").strip()
-        proxies = {"http": proxy, "https": proxy} if proxy else None
         _throttle()
         try:
             resp = requests.get(self.base + path, headers=_HEADERS,
-                                timeout=self.timeout, proxies=proxies,
+                                timeout=self.timeout,
+                                proxies=proxies_for(self.base + path, override=proxy),
                                 verify=outbound_verify_tls())
         except Exception as e:  # 连接拒绝 / DNS / 超时 / TLS
             raise NetError("FC2DB 连接失败：%s" % e)

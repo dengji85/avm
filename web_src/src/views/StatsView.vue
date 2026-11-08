@@ -8,11 +8,17 @@ import { toast } from '../utils.js'
 import PageHead from '../components/PageHead.vue'
 import StatGrid from '../components/StatGrid.vue'
 import EmptyState from '../components/EmptyState.vue'
-import YearReviewView from './YearReviewView.vue'
 
 const loading = ref(true)
 const error = ref('')
 const activeTab = ref('overview')
+/* 4 个切换项直接放进标题栏，做成胶囊分段控件：只占一行、不额外吃横向空间 */
+const STATS_TABS = [
+  ['overview', 'stats.tabOverview'],
+  ['library', 'stats.tabLibrary'],
+  ['taste', 'stats.tabTaste'],
+  ['activity', 'stats.tabActivity'],
+]
 /* 已离库：删除影片前写入的历史快照，统计用（影片不在库也仍然成立） */
 const archived = ref(null)
 
@@ -72,6 +78,11 @@ const overview = reactive({
   watchlist: 0,
   subtitle: 0,
   uncensored: 0,
+  /* 在线收藏口径（与本地资产分开，不计入容量/文件数） */
+  sources: {
+    online_movies: 0, hybrid: 0, online_only: 0, page_only: 0,
+    playable_online: 0, invalid_sources: 0, sites: 0, last_checked: '',
+  },
 })
 
 /* 趋势 / 标签云 */
@@ -278,6 +289,7 @@ async function loadAll() {
     overview.watchlist = s.watchlist || 0
     overview.subtitle = s.subtitle || 0
     overview.uncensored = s.uncensored || 0
+    Object.assign(overview.sources, s.sources || {})
 
     favData.actress = s.top_actresses || []
     favData.studio = s.top_studios || []
@@ -371,7 +383,11 @@ function wlFmtHours(sec) {
   return h >= 100 ? `${Math.round(h)} h` : h.toFixed(1) + ' h'
 }
 function methodLabel(method) {
-  return { builtin: t('rankings.methodBuiltin'), external: t('rankings.methodExternal'), system: t('rankings.methodSystem') }[method] || method || '—'
+  return {
+    builtin: t('rankings.methodBuiltin'), external: t('rankings.methodExternal'),
+    system: t('rankings.methodSystem'), extension: t('rankings.methodExtension'),
+    web: t('rankings.methodWeb'),
+  }[method] || method || '—'
 }
 // 浏览器错误页标题等异常文本不应当作片名展示
 const BAD_TITLES = ['无法访问此网站', '无法访问此网站。', 'ERR_CONNECTION_REFUSED', 'This site can’t be reached']
@@ -381,7 +397,10 @@ function displayTitle(h) {
   return t
 }
 function methodTone(method) {
-  return { builtin: 'ok', external: 'accent', system: 'muted' }[method] || 'muted'
+  return {
+    builtin: 'ok', external: 'accent', system: 'muted',
+    extension: 'accent', web: 'ok',
+  }[method] || 'muted'
 }
 
 /* 观看分析：多维度聚合 */
@@ -657,6 +676,15 @@ function insightText(it) {
     <div class="view-body stats block-scroll">
     <PageHead :title="$t('view.stats')" :sub="$t('stats.sub', { n: overview.totalMovies })">
       <template #actions>
+        <div class="seg" role="tablist">
+          <button
+            v-for="t in STATS_TABS"
+            :key="t[0]"
+            :class="{ on: activeTab === t[0] }"
+            role="tab"
+            @click="activeTab = t[0]"
+          >{{ $t(t[1]) }}</button>
+        </div>
         <button class="btn ghost" @click="loadAll">{{ $t('stats.refresh') }}</button>
       </template>
     </PageHead>
@@ -682,6 +710,9 @@ function insightText(it) {
         </button>
       </div>
 
+      <!-- 概览专属摘要：KPI 行 + 收藏速览 + 已离库。
+           切到 库 / 口味 / 观看 时整块收起，垂直空间全部让给当前分区 -->
+      <div v-show="activeTab === 'overview'">
       <!-- ===== 核心 KPI 行 ===== -->
       <div class="kpi-row">
         <div class="kpi storage" :class="{ empty: !diskTotal }">
@@ -759,17 +790,12 @@ function insightText(it) {
         </div>
       </div>
 
-      <!-- ===== Tab 分区：按"你想看什么"组织（总览 / 收藏 / 口味 / 观看 / 年度回顾） ===== -->
-      <div class="tabs">
-        <button :class="{on: activeTab==='overview'}" @click="activeTab='overview'">{{ $t('stats.tabOverview') }}</button>
-        <button :class="{on: activeTab==='library'}" @click="activeTab='library'">{{ $t('stats.tabLibrary') }}</button>
-        <button :class="{on: activeTab==='taste'}" @click="activeTab='taste'">{{ $t('stats.tabTaste') }}</button>
-        <button :class="{on: activeTab==='activity'}" @click="activeTab='activity'">{{ $t('stats.tabActivity') }}</button>
-        <button :class="{on: activeTab==='yearreview'}" @click="activeTab='yearreview'">{{ $t('yr.nav') }}</button>
       </div>
 
+      <!-- ===== 分区：总览 / 库 / 口味 / 观看（切换入口在标题栏） ===== -->
+
       <!-- ===== 总览：口味画像 + 观影日历 + 关键洞察（一眼看懂） ===== -->
-      <div v-show="activeTab==='overview'">
+      <div class="tab-pane" v-show="activeTab==='overview'">
         <!-- 口味画像雷达图 -->
         <section class="card panel">
           <div class="panel-head">
@@ -859,10 +885,49 @@ function insightText(it) {
             <div class="wa-kpi"><div class="wa-kpi-val tabular">{{ Math.round(rewatch.rewatch_rate*100) }}%</div><div class="wa-kpi-label">{{ $t('stats.waRewatchRate') }}</div></div>
           </div>
         </section>
+
+        <!-- 在线收藏概览：来源数量、可播率、站点覆盖（不计入本地容量统计） -->
+        <section v-if="overview.sources.online_movies" class="card panel">
+          <div class="panel-head">
+            <h2>{{ $t('stats.srcTitle') }}</h2>
+            <span class="muted small">{{ $t('stats.srcHint') }}</span>
+          </div>
+          <div class="wa-kpis">
+            <div class="wa-kpi">
+              <div class="wa-kpi-val tabular">{{ overview.sources.online_movies }}</div>
+              <div class="wa-kpi-label">{{ $t('stats.srcOnlineMovies') }}</div>
+            </div>
+            <div class="wa-kpi">
+              <div class="wa-kpi-val tabular">{{ overview.sources.playable_online }}</div>
+              <div class="wa-kpi-label">{{ $t('stats.srcPlayable') }}</div>
+            </div>
+            <div class="wa-kpi">
+              <div class="wa-kpi-val tabular">{{ overview.sources.page_only }}</div>
+              <div class="wa-kpi-label">{{ $t('stats.srcPageOnly') }}</div>
+            </div>
+            <div class="wa-kpi">
+              <div class="wa-kpi-val tabular">{{ overview.sources.hybrid }}</div>
+              <div class="wa-kpi-label">{{ $t('stats.srcHybrid') }}</div>
+            </div>
+            <div class="wa-kpi">
+              <div class="wa-kpi-val tabular">{{ overview.sources.sites }}</div>
+              <div class="wa-kpi-label">{{ $t('stats.srcSites') }}</div>
+            </div>
+            <div class="wa-kpi">
+              <div class="wa-kpi-val tabular">{{ overview.sources.invalid_sources }}</div>
+              <div class="wa-kpi-label">{{ $t('stats.srcInvalid') }}</div>
+            </div>
+          </div>
+          <div class="muted small pad">
+            {{ overview.sources.last_checked
+              ? $t('stats.srcLastChecked', { when: fmtDate(overview.sources.last_checked) })
+              : $t('stats.srcNeverChecked') }}
+          </div>
+        </section>
       </div>
 
       <!-- 存储分布（归属：我的收藏） -->
-      <div v-show="activeTab==='library'">
+      <div class="tab-pane" v-show="activeTab==='library'">
         <section class="card panel">
           <div class="panel-head">
             <h2>{{ $t('stats.storageDist') }}</h2>
@@ -934,7 +999,7 @@ function insightText(it) {
       </div>
 
       <!-- 收藏健康 -->
-      <div v-show="activeTab==='library'">
+      <div class="tab-pane" v-show="activeTab==='library'">
         <div class="row">
           <section class="card panel">
             <div class="panel-head"><h2>{{ $t('stats.collectQuality') }}</h2></div>
@@ -973,7 +1038,7 @@ function insightText(it) {
       </div>
 
       <!-- 最爱榜单 -->
-      <div v-show="activeTab==='taste'">
+      <div class="tab-pane" v-show="activeTab==='taste'">
         <section class="card panel">
           <div class="panel-head">
             <h2>{{ $t('stats.favTop') }}</h2>
@@ -1004,7 +1069,7 @@ function insightText(it) {
       </div>
 
       <!-- 年份双趋势 -->
-      <div v-show="activeTab==='library'">
+      <div class="tab-pane" v-show="activeTab==='library'">
         <section class="card panel">
           <div class="panel-head">
             <h2>{{ $t('stats.yearTrend') }}</h2>
@@ -1028,7 +1093,7 @@ function insightText(it) {
       </div>
 
       <!-- 趣味榜单 -->
-      <div v-show="activeTab==='taste'">
+      <div class="tab-pane" v-show="activeTab==='taste'">
         <section class="card panel">
           <div class="panel-head"><h2>{{ $t('stats.funTop') }}</h2></div>
           <div class="fun-grid">
@@ -1082,7 +1147,7 @@ function insightText(it) {
       </div>
 
       <!-- 所有影片一览 -->
-      <div v-show="activeTab==='library'">
+      <div class="tab-pane" v-show="activeTab==='library'">
         <section class="card panel">
           <div class="panel-head">
             <h2>{{ $t('stats.allMovies', { n: allMovies.length }) }}</h2>
@@ -1127,7 +1192,7 @@ function insightText(it) {
       </div>
 
       <!-- 观看分析（多维）（归属：我的观看） -->
-      <div v-show="activeTab==='activity'">
+      <div class="tab-pane" v-show="activeTab==='activity'">
         <div class="seg-tabs wa-seg">
           <button :class="{on: waSeg==='overview'}" @click="waSeg='overview'">{{ $t('stats.waSegMethod') }}</button>
           <button :class="{on: waSeg==='rhythm'}" @click="waSeg='rhythm'">{{ $t('stats.waSegRhythm') }}</button>
@@ -1260,7 +1325,7 @@ function insightText(it) {
       </div>
 
       <!-- 观看明细 -->
-      <div v-show="activeTab==='activity'">
+      <div class="tab-pane" v-show="activeTab==='activity'">
         <div class="wh-filter">
           <div class="wh-fields">
             <label class="wh-field">
@@ -1276,6 +1341,8 @@ function insightText(it) {
               <select v-model="wlQuery.method" @change="applyWlFilter">
                 <option value="">{{ $t('stats.all') }}</option>
                 <option value="builtin">{{ $t('rankings.methodBuiltin') }}</option>
+                <option value="web">{{ $t('rankings.methodWeb') }}</option>
+                <option value="extension">{{ $t('rankings.methodExtension') }}</option>
                 <option value="external">{{ $t('rankings.methodExternal') }}</option>
                 <option value="system">{{ $t('rankings.methodSystem') }}</option>
               </select>
@@ -1350,10 +1417,6 @@ function insightText(it) {
         </section>
       </div>
 
-      <!-- 年度回顾 -->
-      <div v-show="activeTab==='yearreview'">
-        <YearReviewView />
-      </div>
     </template>
     </div>
   </section>
@@ -1497,24 +1560,24 @@ function insightText(it) {
 .filter-cards { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin-top: 16px; }
 @media (max-width: 720px) { .filter-cards { grid-template-columns: repeat(2, 1fr); } }
 
-/* 分类切换标签（胶囊分段） */
-.tabs {
-  display: flex; gap: 6px; margin-top: 22px; flex-wrap: wrap;
+/* 分区切换：标题栏内的紧凑胶囊分段控件（4 项，对应总览/库/口味/观看） */
+.seg {
+  display: inline-flex; gap: 2px; padding: 3px;
   background: var(--c-surface-2);
   border: 1px solid var(--c-line);
   border-radius: 999px;
-  padding: 4px;
 }
-.tabs button {
-  appearance: none; border: 0; background: none; font: inherit; font-size: 13px; font-weight: 600;
-  color: var(--c-text-3); padding: 8px 16px; cursor: pointer; border-radius: 999px;
+.seg button {
+  appearance: none; border: 0; background: none; font: inherit; font-size: 12px; font-weight: 600;
+  color: var(--c-text-3); padding: 4px 11px; cursor: pointer; border-radius: 999px;
   transition: color var(--t-fast), background var(--t-fast); white-space: nowrap;
 }
-.tabs button:hover { color: var(--c-text-1); }
-.tabs button.on { color: #fff; background: var(--c-primary); box-shadow: 0 4px 12px color-mix(in srgb, var(--c-primary) 40%, transparent); }
-/* 重组后一个 tab 内聚合多个板块：给 tab 容器的顶层面板统一垂直间距
+.seg button:hover { color: var(--c-text); }
+.seg button.on { color: #fff; background: var(--c-primary); }
+/* 同一个分区内聚合多个板块：给顶层面板统一垂直间距
    （只作用于直接子面板，不影响 .wa-grid 等内部网格自身布局） */
-.tabs ~ div > .panel { margin-bottom: var(--sp-4); }
+.tab-pane { margin-top: 18px; }
+.tab-pane > .panel { margin-bottom: var(--sp-4); }
 .fcard {
   display: flex; flex-direction: row; align-items: center; gap: 14px;
   height: 84px;

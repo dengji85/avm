@@ -18,7 +18,6 @@ import sys
 import hashlib
 import tempfile
 import uuid
-import secrets
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from datetime import datetime
@@ -78,11 +77,18 @@ BUILD_DATE = "2026-08-16"
 def list_movies(
     q: str = "", actress: str = "", genre: str = "", tag: str = "", studio: str = "",
     series: str = "", prefix: str = "", year: Optional[int] = None, flags: str = "",
+    source_state: str = "", site: str = "", has_strm: Optional[int] = None,
+    no_strm: Optional[int] = None, min_rating: Optional[float] = None,
+    max_rating: Optional[float] = None,
     sort: str = "added_desc", op: str = "AND", page: int = 1, page_size: int = 60,
 ) -> Dict[str, Any]:
     params = {
         "q": q, "actress": actress, "genre": genre, "tag": tag, "studio": studio,
         "series": series, "prefix": prefix, "year": year, "flags": flags,
+        # 来源维度（派生状态 / 站点 / 是否持有 .strm 指针）
+        "source_state": source_state, "site": site,
+        "has_strm": has_strm, "no_strm": no_strm,
+        "min_rating": min_rating, "max_rating": max_rating,
         "sort": sort, "op": op, "page": page, "page_size": page_size,
     }
     with db() as conn:
@@ -148,6 +154,8 @@ def remove_movie(movie_id: int, delete_file: bool = False, trash_file: bool = Fa
         failed: List[str] = []
         if delete_file:
             for f in movie["files"]:
+                if str(f.get("kind") or "local") == "online":
+                    continue      # 虚拟在线记录没有磁盘文件，不能删
                 try:
                     os.remove(f["path"])
                     deleted.append(f["path"])
@@ -155,6 +163,8 @@ def remove_movie(movie_id: int, delete_file: bool = False, trash_file: bool = Fa
                     failed.append(f["path"])
         elif trash_file:
             for f in movie["files"]:
+                if str(f.get("kind") or "local") == "online":
+                    continue
                 if _send_to_trash(f["path"]):
                     trashed.append(f["path"])
                 else:
@@ -225,6 +235,9 @@ def play_movie(movie_id: int, payload: Dict[str, Any] = Body(default={})) -> Dic
         # 优先选仍然存在的文件：移动/改名后旧记录会被标记 missing，
         # 直接取第一条可能拿到已失效的旧路径，表现为「文件已不存在」而无法播放。
         usable = [f for f in movie["files"] if not f.get("missing")] or movie["files"]
+        # 有本地实体文件时优先播本地；虚拟在线记录只在没有本地文件时兜底
+        local_usable = [f for f in usable if str(f.get("kind") or "local") != "online"]
+        usable = local_usable or usable
         target = usable[0]
         if file_id:
             target = next((f for f in usable if f["id"] == int(file_id)), target)
@@ -906,7 +919,8 @@ def rescan_local_covers() -> Dict[str, Any]:
             conn,
             "SELECT DISTINCT m.id FROM movies m "
             "WHERE (m.cover IS NULL OR m.cover = '') "
-            "AND EXISTS (SELECT 1 FROM movie_files f WHERE f.movie_id = m.id AND f.missing = 0)",
+            "AND EXISTS (SELECT 1 FROM movie_files f WHERE f.movie_id = m.id AND f.missing = 0 "
+            "AND COALESCE(f.kind,'local') <> 'online')",
         )
         found = 0
         for r in rows:
@@ -1156,18 +1170,20 @@ def missing_overview() -> Dict[str, Any]:
 
 @router.post("/maintenance/missing/resolve")
 def missing_resolve(payload: Dict[str, Any] = Body(default={})) -> Dict[str, Any]:
-    """处置缺失影片。三种方式，语义不同，界面要说清：
+    """处置缺失影片。四种方式，语义不同，界面要说清：
 
     * ``archive`` —— 归档：文件记录保持原样，影片从列表/待办隐藏，历史保留，可恢复
     * ``forget``  —— 移除文件记录：确认文件确实不会回来了，删掉缺失记录；影片一并
       转入归档（否则会变成没有文件的空壳，下次扫描还会被清掉），历史同样保留
+    * ``drop_local`` —— 只移除本地缺失记录；条目若还有在线来源就保持在线收藏状态，
+      不再归档；只有既无本地文件又无在线来源时才归档
     * ``purge``   —— 彻底删除：**先写历史快照**，再删影片与级联数据，不可恢复
     """
     ids = [int(x) for x in (payload.get("ids") or []) if str(x).strip().isdigit()]
     action = str(payload.get("action") or "").strip().lower()
     if not ids:
         raise HTTPException(400, "请先选择要处理的影片")
-    if action not in ("archive", "forget", "purge"):
+    if action not in ("archive", "forget", "purge", "drop_local"):
         raise HTTPException(400, "未知的处理方式")
 
     with db() as conn:
@@ -1175,12 +1191,27 @@ def missing_resolve(payload: Dict[str, Any] = Body(default={})) -> Dict[str, Any
             result = {"archived": store.archive_movies(conn, ids, reason="missing")}
         elif action == "forget":
             ph = ",".join("?" * len(ids))
-            # 只删「缺失」的记录，同片还存活的分卷不动
+            # 只删「缺失」的本地记录，同片还存活的分卷与在线虚拟记录不动
             cur = conn.execute(
                 "DELETE FROM movie_files WHERE movie_id IN (" + ph + ") "
-                "AND COALESCE(missing,0) = 1", ids)
+                "AND COALESCE(missing,0) = 1 AND COALESCE(kind,'local') <> 'online'", ids)
             result = {"removed_files": int(cur.rowcount or 0),
                       "archived": store.archive_movies(conn, ids, reason="file_removed")}
+        elif action == "drop_local":
+            ph = ",".join("?" * len(ids))
+            cur = conn.execute(
+                "DELETE FROM movie_files WHERE movie_id IN (" + ph + ") "
+                "AND COALESCE(missing,0) = 1 AND COALESCE(kind,'local') <> 'online'", ids)
+            # 只剩在线来源的条目保留；本地和在线都没有的才归档，避免空壳
+            empties = [int(r["id"]) for r in query_all(
+                conn,
+                "SELECT m.id FROM movies m WHERE m.id IN (" + ph + ") "
+                "AND NOT EXISTS(SELECT 1 FROM movie_files f WHERE f.movie_id = m.id "
+                "               AND COALESCE(f.kind,'local') <> 'online') "
+                "AND NOT EXISTS(SELECT 1 FROM movie_sources ms WHERE ms.movie_id = m.id)",
+                ids)]
+            result = {"removed_files": int(cur.rowcount or 0),
+                      "archived": store.archive_movies(conn, empties, reason="file_removed")}
         else:
             result = store.purge_movies(conn, ids, reason="file_deleted")
         conn.commit()
@@ -1264,7 +1295,9 @@ def maintenance_summary() -> Dict[str, Any]:
         noscrape = query_one(conn,
             "SELECT COUNT(*) AS c FROM movies m "
             "WHERE (m.scraped_at IS NULL OR m.scraped_at='') "
-            "AND EXISTS(SELECT 1 FROM movie_files f WHERE f.movie_id=m.id AND f.missing=0)")["c"]
+            "AND (EXISTS(SELECT 1 FROM movie_files f WHERE f.movie_id=m.id AND f.missing=0 "
+            "     AND COALESCE(f.kind,'local') <> 'online') "
+            "     OR EXISTS(SELECT 1 FROM movie_sources ms WHERE ms.movie_id=m.id))")["c"]
         watchlist = query_one(conn, "SELECT COUNT(*) AS c FROM movies WHERE watchlist=1")["c"]
         total = query_one(conn, "SELECT COUNT(*) AS c FROM movies")["c"]
         last_scan = query_one(conn,
@@ -2387,7 +2420,7 @@ def cast_media(token: str, request: Request):
         raise HTTPException(status_code=404, detail="影片不存在或未入库")
 
     if src["strm_url"]:
-        return _proxy_upstream(src["strm_url"], request)
+        return _proxy_upstream(src["strm_url"], request, movie_id)
 
     path = src["path"]
     if not os.path.isfile(path):
@@ -3089,6 +3122,18 @@ def emby_refresh() -> Dict[str, Any]:
     return res
 
 
+def _first_local_video(movie: Dict[str, Any]) -> Optional[str]:
+    """预览抽帧只支持本地实体文件：跳过虚拟在线记录与 .strm 串流。"""
+    for f in movie.get("files") or []:
+        if (f.get("missing") or str(f.get("kind") or "local") == "online"
+                or (f.get("strm_url") or "")):
+            continue
+        path = str(f.get("path") or "")
+        if path:
+            return path
+    return None
+
+
 def _gen_previews_sync(movie_id: int, target: str, quality: str = None):
     """同步生成并落库预览图（可在共享线程池内异步运行），返回 (paths, error)。"""
     cfg = load_config()
@@ -3116,10 +3161,11 @@ def movie_previews(movie_id: int, generate: bool = False) -> Dict[str, Any]:
         paths, stored_q = store.get_previews_meta(conn, movie_id)
     current_q = (load_config().get("previews_quality") or "smart").strip() or "smart"
     regenerating = False
-    target = mv["files"][0]["path"] if mv.get("files") else None
-    # 网络串流没有本地文件，抽帧只会得到 ffmpeg 报错
-    if mv.get("files") and (mv["files"][0].get("strm_url") or ""):
-        return {"available": False, "error": "网络串流不支持预览图", "paths": [], "urls": []}
+    target = _first_local_video(mv)
+    # 网络串流 / 纯在线影片没有本地文件，抽帧只会得到 ffmpeg 报错
+    if not target:
+        return {"available": False, "error": "网络串流或纯在线影片不支持预览图",
+                "paths": [], "urls": []}
     if generate:
         # 手动生成（详情页按钮）：强制按当前档位抽
         if not target or not os.path.exists(target):
@@ -3156,9 +3202,9 @@ def generate_previews_bg(movie_id: int, body: dict = Body(default={})) -> Dict[s
         if not mv:
             raise HTTPException(404, "影片不存在")
         paths = store.get_previews(conn, movie_id)
-        target = mv["files"][0]["path"] if mv.get("files") else None
-        if mv.get("files") and (mv["files"][0].get("strm_url") or ""):
-            return {"started": False, "message": "网络串流不支持预览图"}
+        target = _first_local_video(mv)
+        if not target:
+            return {"started": False, "message": "网络串流或纯在线影片不支持预览图"}
         if not target or not os.path.exists(target):
             raise HTTPException(400, "找不到可播放的文件")
     if paths and not force:
@@ -3185,13 +3231,14 @@ def regenerate_all_previews() -> Dict[str, Any]:
     def _run() -> None:
         with db() as conn:
             rows = conn.execute(
-                "SELECT DISTINCT movie_id FROM movie_files WHERE COALESCE(missing,0)=0"
+                "SELECT DISTINCT movie_id FROM movie_files "
+                "WHERE COALESCE(missing,0)=0 AND COALESCE(kind,'local') <> 'online'"
             ).fetchall()
         for r in rows:
             mid = int(r["movie_id"])
             with db() as conn:
                 mv = store.movie_detail(conn, mid)
-                target = mv["files"][0]["path"] if mv.get("files") else None
+                target = _first_local_video(mv)
             if not target or not os.path.exists(target):
                 continue
             import shutil
@@ -3260,7 +3307,7 @@ def watch_analytics():
 _STRM_SEG: Dict[str, tuple] = {}
 _STRM_LOCK = threading.Lock()
 _STRM_TTL = 600          # 分片 token 有效期（秒）
-_STRM_MAX = 5000         # token 上限，防止长片把内存撑大
+_STRM_MAX = 20000        # token 上限，防止长片把内存撑大
 _STRM_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
             "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
 
@@ -3273,6 +3320,21 @@ def _is_hls(url: str) -> bool:
     """HLS 判定：后缀之外还看查询串与 path，避免带签名地址被误判成直链。"""
     from . import movie_identity
     return movie_identity.is_hls_url(url)
+
+
+def _is_playlist_url(url: str) -> bool:
+    """严格判定「播放列表」，用于分片 / 密钥转发分支。
+
+    不能复用 ``is_hls_url``：它对「路径含 /hls/」的站点会把 ``.ts`` 分片和
+    AES 密钥也判成 HLS，导致 ``strm_seg`` 把二进制当 playlist 改写，
+    播放器拿到被破坏的内容（黑屏 / 反复重试）。
+    """
+    try:
+        p = urlsplit(str(url or "").lower())
+    except ValueError:
+        return False
+    return (p.path.endswith(".m3u8") or ".m3u8" in p.query
+            or p.path.endswith("/playlist"))
 
 
 def _source_exists(src: Dict[str, Any]) -> bool:
@@ -3294,32 +3356,51 @@ def _strm_source(movie_id: int) -> str:
     return (src or {}).get("strm_url") or ""
 
 
-def _strm_headers(target: str) -> Dict[str, str]:
-    """串流请求头：默认用浏览器 UA + 同源 Referer，绕开常见的防盗链。"""
-    cfg = _stream_cfg()
-    parts = urlsplit(target)
-    return {
-        "User-Agent": str(cfg.get("strm_user_agent") or _STRM_UA),
-        "Accept": "*/*",
-        "Referer": str(cfg.get("strm_referer") or ("%s://%s/" % (parts.scheme, parts.netloc))),
-    }
+def _strm_headers(target: str, movie_id: int = 0) -> Dict[str, str]:
+    """串流请求头：与来源验证共用一套 UA / Referer。
+
+    Referer 优先用「影片页面」所在站点，而不是 CDN 自身 origin —— 后者是
+    防盗链 403 最常见的原因。用户可在 stream.strm_referer 里显式覆盖。
+    """
+    from . import stream_verify
+    return stream_verify.upstream_headers(target, movie_id=movie_id)
 
 
-def _proxy_upstream(target: str, request: Request) -> Response:
+def _strm_proxies(target: str = ""):
+    """上游请求代理：播放列表 / 分片与来源验证共用（全局代理 + stream 覆盖）。"""
+    from . import stream_verify
+    return stream_verify.upstream_proxies(target)
+
+
+def _proxy_upstream(target: str, request: Request, movie_id: int = 0) -> Response:
     """代理上游字节流：透传 Range，原样返回 200 / 206。"""
     import requests
-    headers = _strm_headers(target)
+    if not movie_id:
+        digits = [p for p in request.url.path.split("/") if p.isdigit()]
+        movie_id = int(digits[0]) if digits else 0
+    headers = _strm_headers(target, movie_id)
     rng = request.headers.get("range")
     if rng:
         headers["Range"] = rng
     try:
         up = requests.get(target, headers=headers, stream=True,
-                          timeout=(8, 30), allow_redirects=True)
+                          timeout=(8, 30), allow_redirects=True,
+                          proxies=_strm_proxies(target))
     except Exception as exc:
         raise HTTPException(502, "串流源不可达：%s" % exc)
     if up.status_code >= 400:
+        code = up.status_code
         up.close()
-        raise HTTPException(502, "串流源返回 HTTP %d" % up.status_code)
+        # 分片 403/410 多为签名中途过期：只标 stale 并排队续期，不把整条来源换掉
+        if code in (403, 410):
+            from . import stream_verify
+            tok = str(request.query_params.get("t") or "")
+            with _STRM_LOCK:
+                seg = _STRM_SEG.get(tok)
+            mid = int(seg[0]) if seg else 0
+            if mid:
+                stream_verify.report_failure(mid, "分片返回 HTTP %d" % code, switch=False)
+        raise HTTPException(502, "串流源返回 HTTP %d" % code)
     resp_headers = {}
     for key in ("Content-Length", "Content-Range", "Accept-Ranges", "ETag", "Last-Modified"):
         val = up.headers.get(key)
@@ -3349,12 +3430,24 @@ def _proxy_upstream(target: str, request: Request) -> Response:
 
 
 def _seg_token(movie_id: int, url: str) -> str:
-    token = secrets.token_urlsafe(12)
+    """分片 → 稳定的本地 token（同一分片永远同一 token）。
+
+    随机 token 会让每次 playlist 改写都新增上千条映射（长片一次 1700+），
+    几轮之后就超过上限，而清理是「每次插入都全表扫描」，playlist 请求会从
+    2 秒退化到几十秒——表现为「刚开始能播，越播越卡，最后干脆播不了」。
+    用分片 URL 的哈希做键，字典规模只与唯一边片数有关，插入也变成覆盖。
+    """
+    token = hashlib.sha1(("%d|%s" % (int(movie_id), url)).encode("utf-8")).hexdigest()[:24]
     now = time.time()
     with _STRM_LOCK:
         if len(_STRM_SEG) >= _STRM_MAX:
-            for k in [k for k, v in _STRM_SEG.items() if v[2] < now][: _STRM_MAX // 4]:
+            # 批量清理一次：先清过期项，仍超上限再按到期时间淘汰最旧的一半，
+            # 避免每次插入都遍历全表（那是 O(n²) 的根源）
+            for k in [k for k, v in _STRM_SEG.items() if v[2] < now]:
                 _STRM_SEG.pop(k, None)
+            if len(_STRM_SEG) >= _STRM_MAX:
+                for k in sorted(_STRM_SEG, key=lambda x: _STRM_SEG[x][2])[:_STRM_MAX // 2]:
+                    _STRM_SEG.pop(k, None)
         _STRM_SEG[token] = (movie_id, url, now + _STRM_TTL)
     return token
 
@@ -3389,45 +3482,90 @@ def _rewrite_playlist(text: str, base: str, movie_id: int) -> str:
     return "\n".join(out)
 
 
-def _serve_playlist(target: str, movie_id: int) -> Response:
+def _serve_playlist(target: str, movie_id: int, _retried: bool = False,
+                    allow_failover: bool = True) -> Response:
+    """主播放列表：失败时标记来源并自动降级一次，再用新地址重试。
+
+    子 playlist（分片层）传 ``allow_failover=False``：那类 403 多是签名过期，
+    只需要续期重建 playlist，不该把整条来源换掉。
+    """
     import requests
+    err = ""
     try:
-        r = requests.get(target, headers=_strm_headers(target), timeout=(8, 20))
+        r = requests.get(target, headers=_strm_headers(target, movie_id), timeout=(8, 20),
+                         proxies=_strm_proxies(target))
+        if r.status_code < 400:
+            text = r.text or ""
+            if not text.lstrip().startswith("#EXTM3U"):
+                # 防御：不是播放列表就原样透传，绝不把二进制（分片 / 密钥）当文本改写
+                return Response(r.content, status_code=r.status_code,
+                                media_type=(r.headers.get("Content-Type")
+                                            or "application/octet-stream"),
+                                headers={"Cache-Control": "no-store"})
+            body = _rewrite_playlist(text, r.url or target, movie_id)
+            return Response(body, media_type="application/vnd.apple.mpegurl",
+                            headers={"Cache-Control": "no-store"})
+        err = "HTTP %d" % r.status_code
+        # 403/登录墙通常返回 HTML 而不是媒体内容：把「回源站观看」写进原因，
+        # 让来源的 check_note 与播放失败提示都指向现实的出路。
+        ctype = str(r.headers.get("Content-Type") or "").lower()
+        head = (r.text or "")[:200].lstrip().lower()
+        if bool(r.headers.get("cf-ray")):
+            # Cloudflare 硬阻断对浏览器同样拒绝：换出口 IP 或回源站
+            err += "（Cloudflare 阻断该出口 IP，请换代理节点或回源站观看）"
+        elif "html" in ctype or head.startswith(("<!doctype", "<html")):
+            err += "（上游要求浏览器会话 / 登录，请回源站观看）"
     except Exception as exc:
-        raise HTTPException(502, "播放列表获取失败：%s" % exc)
-    if r.status_code >= 400:
-        raise HTTPException(502, "播放列表返回 HTTP %d" % r.status_code)
-    body = _rewrite_playlist(r.text, r.url or target, movie_id)
-    return Response(body, media_type="application/vnd.apple.mpegurl",
-                    headers={"Cache-Control": "no-store"})
+        err = type(exc).__name__          # 不回显完整地址 / 异常里的查询串
+    if not _retried:
+        from . import stream_verify
+        if allow_failover:
+            alt = stream_verify.playback_failover(movie_id, target, err)
+            if alt and alt != target and _is_hls(alt):
+                return _serve_playlist(alt, movie_id, True, False)
+        else:
+            stream_verify.report_failure(movie_id, "播放列表获取失败：%s" % err, switch=False)
+    raise HTTPException(502, "播放列表获取失败：%s" % err)
 
 
 @router.get("/movies/{movie_id}/stream-info")
 def stream_info(movie_id: int) -> Dict[str, Any]:
-    """轻量判断：这部片是不是网络串流、要不要按 HLS 处理（不做 ffprobe）。
+    """播放前判断串流类型，并顺带做一次来源保鲜（过期续期 / 失效自动降级）。
 
     优先用入库时记录的来源 kind，避免带签名、无 ``.m3u8`` 后缀的地址被误判。
+    本地影片没有 movie_sources 记录，行为与改动前完全一致。
     """
+    from . import stream_verify
     with db() as conn:
         src = store.movie_play_source(conn, movie_id)
-        primary = query_one(
-            conn,
-            "SELECT play_url, kind FROM movie_sources WHERE movie_id = ? "
-            "AND is_primary = 1 AND available = 1 AND play_url <> '' LIMIT 1",
-            (movie_id,))
-    target = str((primary or {}).get("play_url") or (src or {}).get("strm_url") or "")
+        fresh = stream_verify.ensure_fresh(conn, movie_id)
+        primary = None
+        if fresh["source_id"]:
+            primary = query_one(conn, "SELECT kind FROM movie_sources WHERE id = ?",
+                                (fresh["source_id"],))
+    if fresh.get("need_refresh"):
+        stream_verify.schedule_refresh(fresh["source_id"])
+    target = fresh["url"] or str((src or {}).get("strm_url") or "")
     if not src and not target:
         raise HTTPException(404, "影片不存在或未入库")
     is_hls = bool(target) and (str((primary or {}).get("kind") or "") == "hls"
                                or _is_hls(target))
-    return {"stream": bool(target), "hls": is_hls}
+    # HLS 可选「浏览器直连」：源站对服务端请求做人机校验、但浏览器能过时用。
+    # direct_url 是带签名的原始地址，只在开关开启时返回，不写日志、不在 UI 展示。
+    from .config import load_config
+    hls_direct = bool(is_hls and target
+                      and (load_config().get("stream") or {}).get("hls_direct"))
+    return {"stream": bool(target), "hls": is_hls,
+            "hls_direct": hls_direct,
+            "direct_url": target if hls_direct else "",
+            "source_id": fresh["source_id"], "stale": fresh["stale"]}
 
 
 @router.get("/strm/hls/{movie_id}")
 def strm_hls(movie_id: int):
     """HLS 播放列表（已改写成同源分片地址，供 hls.js 使用）。"""
     target = _strm_source(movie_id)
-    if not target or not _is_hls(target):
+    if not target or not _is_playlist_url(target):
         raise HTTPException(404, "该影片不是 HLS 串流")
     return _serve_playlist(target, movie_id)
 
@@ -3440,9 +3578,12 @@ def strm_seg(movie_id: int, name: str, t: str, request: Request):
     if not item or item[0] != movie_id or item[2] < time.time():
         raise HTTPException(404, "分片地址已失效，请重新播放")
     url = item[1]
-    if _is_hls(url):
-        return _serve_playlist(url, movie_id)
-    return _proxy_upstream(url, request)
+    # 只有真正的子播放列表才需要再改写；分片 / AES 密钥必须原样转发。
+    # 这里曾用 is_hls_url（路径含 /hls/ 即判 HLS），把 /hls/ 目录下的
+    # .ts 分片与密钥也当 playlist 改写，播放器拿到坏数据 → 黑屏。
+    if _is_playlist_url(url):
+        return _serve_playlist(url, movie_id, allow_failover=False)
+    return _proxy_upstream(url, request, movie_id)
 
 
 @router.get("/stream/{movie_id}")
@@ -3463,7 +3604,7 @@ def stream_movie(movie_id: int, request: Request):
         if _is_hls(target):
             raise HTTPException(status_code=409, detail="HLS 串流请改用 /api/strm/hls/%d" % movie_id)
         if bool(_stream_cfg().get("strm_proxy")) or str(request.query_params.get("proxy") or "") in ("1", "true"):
-            return _proxy_upstream(target, request)
+            return _proxy_upstream(target, request, movie_id)
         return RedirectResponse(target, status_code=302)
 
     path = src["path"]
@@ -3734,7 +3875,19 @@ def put_config(payload: Dict[str, Any] = Body(default={})) -> Dict[str, Any]:
                     s["headers"] = keep
                 elif not s.get("headers"):
                     s.pop("headers", None)
-    return update_config(payload)
+    result = update_config(payload)
+    # 额外请求头是「整体替换」的字典：deep merge 会把 {} 当成没改动，
+    # 导致删掉的请求头依然生效（例如旧的自定义 Referer 覆盖系统 Referer）。
+    stream_patch = payload.get("stream")
+    if isinstance(stream_patch, dict) and "strm_extra_headers" in stream_patch:
+        from .config import save_config
+        extra = stream_patch.get("strm_extra_headers")
+        merged = dict(result)
+        merged_stream = dict(merged.get("stream") or {})
+        merged_stream["strm_extra_headers"] = extra if isinstance(extra, dict) else {}
+        merged["stream"] = merged_stream
+        result = save_config(merged)
+    return result
 
 
 def _lan_addresses() -> List[str]:
@@ -3995,9 +4148,7 @@ def check_update(channel: str = Query("stable")) -> Dict[str, Any]:
         return result
     try:
         import requests
-        # 复用刮削代理（墙内访问 GitHub API 常需代理）
-        proxy = (cfg.get("scraper", {}).get("proxy") or "") or None
-        proxies = {"http": proxy, "https": proxy} if proxy else None
+        from .proxy import proxies_for
         headers = {"User-Agent": "AVM-update-check"}
         # 候选源：GitHub 公共加速镜像优先（墙内更稳），原始 API 兜底
         candidates = []
@@ -4014,7 +4165,8 @@ def check_update(channel: str = Query("stable")) -> Dict[str, Any]:
         feed = None
         for url in candidates:
             try:
-                resp = requests.get(url, timeout=12, headers=headers, proxies=proxies)
+                resp = requests.get(url, timeout=12, headers=headers,
+                                    proxies=proxies_for(url))
                 resp.raise_for_status()
                 data = resp.json()
                 if _valid(data):

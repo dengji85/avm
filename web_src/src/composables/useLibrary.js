@@ -26,6 +26,8 @@ export function useLibrary() {
     prefix: state.prefix || undefined,
     year: state.year || undefined,
     flags: state.flags.length ? state.flags.join(',') : undefined,
+    source_state: state.sourceState.length ? state.sourceState.join(',') : undefined,
+    site: state.site.length ? state.site.join(',') : undefined,
     sort: state.sort,
     page: state.page,
     page_size: state.page_size,
@@ -94,7 +96,8 @@ export function useLibrary() {
   /* 条件变化自动重载；改筛选条件时重置页码 */
   watch(
     () => [state.q, state.actress.slice(), state.genre.slice(), state.tag.slice(), state.studio,
-           state.series, state.prefix, state.year, state.flags.slice(), state.multiOp, state.minRating],
+           state.series, state.prefix, state.year, state.flags.slice(), state.multiOp,
+           state.minRating, state.sourceState.slice(), state.site.slice()],
     () => { state.page = 1; reload() },
     { deep: true },
   )

@@ -5,9 +5,8 @@ import { getStorage, getIntegrity, getHealthCheck, getDedup, resolveDedup, getQu
 import { toast, confirmDialog, fmtSize } from '../../utils.js'
 import { t } from '../../i18n/index.js'
 import PageHead from '../../components/PageHead.vue'
-import SectionTitle from '../../components/SectionTitle.vue'
 
-const st = reactive({ total: {}, by_disk: [], by_studio: [], by_year: [] })
+const st = reactive({ total: {} })
 const iss = reactive({ missing_files: 0, missing_cover: 0, unrecognized: 0 })
 const health = ref(null)
 const dedup = ref(null)
@@ -32,7 +31,6 @@ async function load() {
   try {
     const [s, i] = await Promise.all([getStorage(), getIntegrity()])
     st.total = s.total || {}
-    st.by_disk = s.by_disk || []; st.by_studio = s.by_studio || []; st.by_year = s.by_year || []
     iss.missing_files = i.missing_files || 0; iss.missing_cover = i.missing_cover || 0; iss.unrecognized = i.unrecognized || 0
   } catch (e) { toast(e.message, 'err') } finally { loading.value = false }
 }
@@ -268,14 +266,6 @@ const cards = computed(() => [
   { v: iss.missing_cover, l: 'maint.hMissingCover', tone: iss.missing_cover ? 'warn' : 'ok' },
   { v: iss.unrecognized, l: 'maint.hUnrecognized', tone: iss.unrecognized ? 'warn' : 'ok' },
 ])
-function bars(list, key, labelKey) {
-  if (!list || !list.length) return []
-  const max = Math.max(...list.map((x) => Number(x[key]) || 0), 1)
-  return list.slice(0, 12).map((x) => ({ label: x[labelKey] || '未知', pct: Math.max(2, ((Number(x[key]) || 0) / max) * 100), text: key === 'bytes' ? fmtSize(x[key]) : `${x[key]} 部`, raw: x }))
-}
-const diskBars = computed(() => bars(st.by_disk, 'bytes', 'drive'))
-const studioBars = computed(() => bars(st.by_studio, 'bytes', 'studio'))
-const yearBars = computed(() => bars(st.by_year, 'bytes', 'year'))
 const healthCount = (k) => (health.value && health.value.counts && health.value.counts[k]) || 0
 const healthList = (k) => (health.value && health.value[k]) || []
 
@@ -338,31 +328,6 @@ onMounted(() => { load(); loadSoftware(); loadRoots(); loadOrphans() })
             </div>
           </div>
         </template>
-      </div>
-    </div>
-
-    <SectionTitle :title="$t('maint.distTitle')" />
-    <div class="dist-grid">
-      <div class="panel">
-        <div class="panel-head">{{ $t('maint.distDisk') }} <span class="sub">{{ $t('maint.byCapacity') }}</span></div>
-        <div class="panel-body">
-          <div v-for="b in diskBars" :key="b.label" class="bar-row"><div class="bl">{{ b.label }}</div><div class="bar-track"><div class="bar-fill" :style="{ width: b.pct + '%' }"></div></div><div class="bv">{{ b.text }}</div></div>
-          <p v-if="!diskBars.length" class="muted">{{ $t('maint.noData') }}</p>
-        </div>
-      </div>
-      <div class="panel">
-        <div class="panel-head">{{ $t('maint.distStudio') }} <span class="sub">{{ $t('maint.top12') }}</span></div>
-        <div class="panel-body">
-          <div v-for="b in studioBars" :key="b.label" class="bar-row"><div class="bl" :title="b.label">{{ b.label }}</div><div class="bar-track"><div class="bar-fill" :style="{ width: b.pct + '%' }"></div></div><div class="bv">{{ b.text }}</div></div>
-          <p v-if="!studioBars.length" class="muted">{{ $t('maint.noData') }}</p>
-        </div>
-      </div>
-      <div class="panel">
-        <div class="panel-head">{{ $t('maint.distYear') }}</div>
-        <div class="panel-body">
-          <div v-for="b in yearBars" :key="b.label" class="bar-row"><div class="bl">{{ b.label }}</div><div class="bar-track"><div class="bar-fill" :style="{ width: b.pct + '%' }"></div></div><div class="bv">{{ b.text }}</div></div>
-          <p v-if="!yearBars.length" class="muted">{{ $t('maint.noData') }}</p>
-        </div>
       </div>
     </div>
 
@@ -550,7 +515,7 @@ onMounted(() => { load(); loadSoftware(); loadRoots(); loadOrphans() })
 
 <style scoped>
 .sh { display: flex; flex-direction: column; gap: var(--sp-4); }
-.dist-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: var(--sp-4); }
+
 .sw-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: var(--sp-2); margin-bottom: var(--sp-3); }
 /* 数据 / 缓存 / 组件三组：每组一行标题 + 合计，避免十几张卡片平铺分不清性质 */
 .sw-group { margin-bottom: var(--sp-2); }

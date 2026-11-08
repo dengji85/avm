@@ -71,7 +71,9 @@ def enabled(cfg: Optional[Dict[str, Any]] = None) -> bool:
 
 def _search_searxng(base: str, query: str, limit: int) -> List[Dict[str, str]]:
     url = "%s/search?q=%s&format=json" % (base, quote_plus(query))
-    resp = requests.get(url, headers=_HEADERS, timeout=_TIMEOUT)
+    from .proxy import proxies_for
+    resp = requests.get(url, headers=_HEADERS, timeout=_TIMEOUT,
+                        proxies=proxies_for(url))
     if resp.status_code == 403:
         raise RuntimeError("该 SearXNG 实例未开启 JSON 输出（返回 403）："
                            "在 settings.yml 的 search.formats 里加上 json，或换一个实例")
@@ -91,11 +93,14 @@ def _search_searxng(base: str, query: str, limit: int) -> List[Dict[str, str]]:
 
 
 def _search_tavily(key: str, query: str, limit: int) -> List[Dict[str, str]]:
+    from .proxy import proxies_for
+    url = "https://api.tavily.com/search"
     resp = requests.post(
-        "https://api.tavily.com/search",
+        url,
         json={"api_key": key, "query": query, "max_results": limit,
               "search_depth": "basic"},
         timeout=_TIMEOUT,
+        proxies=proxies_for(url),
     )
     if resp.status_code in (401, 403):
         raise RuntimeError("Tavily Key 无效或已过期（HTTP %d）" % resp.status_code)
@@ -171,7 +176,9 @@ def fetch_text(url: str) -> Dict[str, str]:
     try:
         if not re.match(r"^https?://", str(url or "")):
             raise ValueError("不是 http(s) 链接")
-        resp = requests.get(str(url), headers=_HEADERS, timeout=_TIMEOUT)
+        from .proxy import proxies_for
+        resp = requests.get(str(url), headers=_HEADERS, timeout=_TIMEOUT,
+                            proxies=proxies_for(str(url)))
         resp.raise_for_status()
         ctype = str(resp.headers.get("content-type") or "")
         if "html" not in ctype and "xml" not in ctype:

@@ -191,6 +191,39 @@ def extract_code(text: str) -> tuple[Optional[str], str, str]:
     return None, "", ""
 
 
+def extract_codes(text: str, limit: int = 500) -> list[str]:
+    """从一段文本提取**全部**番号（按文本出现顺序、跨规则去重）。
+
+    面向「论坛帖子 / Excel 粘贴区域」的批量导入场景：一段讨论帖里往往
+    提到多部影片，extract_code 只要第一个，这里一次拿全。
+    与更高优先级规则命中区间重叠的匹配会被跳过——例如 "FC2-PPV-3216549"
+    里的 "FC2" 会被 STANDARD 再提一次 "FC-002"。
+    """
+    cleaned = _strip_noise(text or "")
+    hits: list[tuple[int, int, str]] = []   # (start, end, 番号)
+    for name, pat, fmt in _CODE_RULES:
+        for m in pat.finditer(cleaned):
+            if name == "STANDARD" and m.group(1).lower() in _FAKE_PREFIX:
+                continue
+            if name == "MARKET" and len(m.group(1)) < 4:
+                continue
+            if any(m.start() < e and m.end() > s for s, e, _ in hits):
+                continue
+            hits.append((m.start(), m.end(), fmt(m)))
+    hits.sort(key=lambda h: h[0])
+    out: list[str] = []
+    seen: set[str] = set()
+    for _, _, code in hits:
+        norm = code.lower()
+        if norm in seen:
+            continue
+        seen.add(norm)
+        out.append(code)
+        if len(out) >= limit:
+            break
+    return out
+
+
 def _clean_title(stem: str, code_raw: str) -> str:
     title = _strip_noise(stem)
     if code_raw:

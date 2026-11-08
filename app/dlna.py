@@ -77,7 +77,9 @@ def _ssdp_once(addr, timeout: float) -> List[Dict[str, str]]:
 
 def describe(location: str, timeout: float = 4.0) -> Dict[str, Any]:
     """拉取设备描述 XML，提取名称与 AVTransport 控制地址。"""
-    r = requests.get(location, timeout=(3, timeout))
+    from .proxy import proxies_for
+    r = requests.get(location, timeout=(3, timeout),
+                     proxies=proxies_for(location))
     r.raise_for_status()
     # UPnP 描述是 UTF-8，但很多设备不写 charset —— 不指定会被 requests 按
     # text/* 默认成 latin-1，中文设备名直接变乱码
@@ -149,13 +151,14 @@ def _soap(control: str, action: str, body_xml: str, timeout: float = 8.0) -> str
         's:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">'
         "<s:Body>%s</s:Body></s:Envelope>" % body_xml
     )
+    from .proxy import proxies_for
     r = requests.post(
         control, data=envelope.encode("utf-8"),
         headers={
             "Content-Type": "text/xml; charset=\"utf-8\"",
             "SOAPACTION": '"urn:schemas-upnp-org:service:AVTransport:1#%s"' % action,
         },
-        timeout=(4, timeout))
+        timeout=(4, timeout), proxies=proxies_for(control))
     if r.status_code >= 400:
         raise ValueError("设备返回 HTTP %d：%s" % (r.status_code, r.text[:160]))
     fault = re.search(r"<faultstring>(.*?)</faultstring>", r.text, re.S | re.I)

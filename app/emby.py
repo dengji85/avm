@@ -53,9 +53,11 @@ def test_connection(cfg: Dict[str, Any] | None = None) -> Dict[str, Any]:
         return {"ok": False, "error": "未填写 API Key"}
     if requests is None:
         return {"ok": False, "error": "requests 不可用"}
+    from .proxy import proxies_for
     try:
         r = requests.get(base + "/System/Info", headers=_headers(c),
-                         timeout=8, verify=outbound_verify_tls())
+                         timeout=8, verify=outbound_verify_tls(),
+                         proxies=proxies_for(base + "/System/Info"))
     except Exception as exc:
         return {"ok": False, "error": "连接失败：%s" % str(exc)[:200]}
     if r.status_code in (401, 403):
@@ -81,9 +83,11 @@ def refresh_library(cfg: Dict[str, Any] | None = None) -> Dict[str, Any]:
         return {"ok": False, "error": "Emby 未配置"}
     if requests is None:
         return {"ok": False, "error": "requests 不可用"}
+    from .proxy import proxies_for
     try:
         r = requests.post(base + "/Library/Refresh", headers=_headers(c),
-                          timeout=10, verify=outbound_verify_tls())
+                          timeout=10, verify=outbound_verify_tls(),
+                          proxies=proxies_for(base + "/Library/Refresh"))
     except Exception as exc:
         return {"ok": False, "error": "连接失败：%s" % str(exc)[:200]}
     if r.status_code in (401, 403):

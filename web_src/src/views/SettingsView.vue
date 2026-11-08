@@ -24,22 +24,28 @@ import { t } from '../i18n/index.js'
 
 const { runScan, runScrape } = useTasks()
 
+// 设置分组：常用 → 高级。代理是通用网络配置，不挂在「网页播放」里；
+// 文件名解析属于工具，常用在线站点并入「刮削」。
 const TABS = [
+  ['general', 'settings.tab.general'],
   ['library', 'settings.tab.library'],
   ['scraper', 'settings.tab.scraper'],
   ['subtitles', 'settings.tab.subtitles'],
-  ['parser', 'settings.tab.parser'],
-  ['appearance', 'settings.tab.appearance'],
-  ['sites', 'settings.tab.sites'],
+  ['ingest', 'settings.tab.ingest'],
   ['remote', 'settings.tab.remote'],
-  ['ext', 'settings.tab.ext'],
   ['privacy', 'settings.tab.privacy'],
+  ['ext', 'settings.tab.ext'],
   ['about', 'settings.tab.about'],
 ]
 /* 新手「基础模式」：设置页有 10 组上百项，先只给最需要动的三组。
    从别的页面跳到被折叠的高级标签时自动退出基础模式，避免点了没反应。 */
 const BASIC_TABS = ['library', 'scraper', 'ext', 'about']
 const visibleTabs = computed(() => basicOnly.value ? TABS.filter((x) => BASIC_TABS.includes(x[0])) : TABS)
+/* 左栏图标：让 9 组设置有稳定的视觉锚点，扫读比逐行读字快 */
+const TAB_ICONS = {
+  general: '⚙️', library: '📚', scraper: '🔎', subtitles: '💬', ingest: '🧩',
+  remote: '🌐', privacy: '🔒', ext: '🧰', about: 'ℹ️',
+}
 const tab = ref('library')
 /* 其他页面（如解锁码提示条）可以请求直接打开某个标签 */
 watch(() => state.settingsTab, (v) => {
@@ -74,7 +80,13 @@ const cfg = reactive({
   adcheck: { enabled: true, threshold_likely: 65, threshold_suspect: 35 },
   ai: { enabled: false, base_url: 'https://api.openai.com/v1', api_key: '', model: 'gpt-4o-mini', temperature: 0.4 },
   asr: { libs_dir: '', model_dir: '', tmp_dir: '', model: 'small', language: 'ja' },
-  stream: { auto_remux: true, remux_cache_mb: 4096 },
+  // 全局网络代理：刮削、封面、字幕、播放与验证共用一个出口
+  network: { proxy: '' },
+  stream: {
+    auto_remux: true, remux_cache_mb: 4096, strm_proxy: false, hls_direct: false,
+    upstream_proxy: '',
+    strm_referer: '', strm_referer_mode: 'full', strm_user_agent: '', strm_extra_headers: {},
+  },
   wiki: { languages: ['ja', 'zh'] },
   online_sites: [],
   // GET /config 不下发任何字幕源密钥；Key 输入只放在 subKeys 里，留空 = 不修改
@@ -84,7 +96,12 @@ const cfg = reactive({
   },
   server: {
     session_idle_days: 7, session_abs_days: 30, session_persist: false,
-    expose_docs: false, trusted_proxies: [],
+    expose_docs: false, trusted_proxies: [], cors_origins: [],
+  },
+  // 浏览器接入：端点开关、来源验证与失效降级
+  ingest: {
+    enabled: true, allow_create: true, auto_scrape: true, verify_on_link: true,
+    auto_failover: true, stale_ttl_hours: 6,
   },
   privacy: {
     idle_lock_minutes: 10, lock_unlock: 'token', panic_key: 'Ctrl+Shift+H',
@@ -185,6 +202,11 @@ const ignoreText = ref('')
 const extText = ref('')
 const jsonText = ref('{}')
 const htmlText = ref('{}')
+const corsText = ref('')
+const extraHeadersText = ref('{}')
+/* 浏览器接入：专用令牌只显示一次，不写进 cfg / 不持久化到前端状态 */
+const ingestKey = ref('')
+const ingestKeyBusy = ref(false)
 
 async function load() {
   loading.value = true
@@ -195,7 +217,14 @@ async function load() {
     autoScan.value = Number(cfg.library.auto_scan_interval) > 0
     autoScanInterval.value = Number(cfg.library.auto_scan_interval) > 0 ? Number(cfg.library.auto_scan_interval) : 10
     cfg.cover = Object.assign({ auto_local: false, download: false }, c.cover)
-    cfg.stream = Object.assign({ auto_remux: true, remux_cache_mb: 4096 }, c.stream)
+    cfg.network = Object.assign({ proxy: '' }, c.network)
+    cfg.stream = Object.assign(
+      { auto_remux: true, remux_cache_mb: 4096, strm_proxy: false, hls_direct: false,
+        upstream_proxy: '', strm_referer: '', strm_referer_mode: 'full',
+        strm_user_agent: '', strm_extra_headers: {} },
+      c.stream,
+    )
+    extraHeadersText.value = JSON.stringify(cfg.stream.strm_extra_headers || {}, null, 2)
     cfg.media = Object.assign(
       { avatar_dir: 'avatars', fanart_dir: 'fanarts', avatar_download: false, fanart_download: true },
       c.media,
@@ -249,11 +278,17 @@ async function load() {
     cfg.server = Object.assign(
       {
         session_idle_days: 7, session_abs_days: 30, session_persist: false,
-        expose_docs: false, trusted_proxies: [],
+        expose_docs: false, trusted_proxies: [], cors_origins: [],
         insecure_skip_verify: false,
       },
       c.server,
     )
+    cfg.ingest = Object.assign(
+      { enabled: true, allow_create: true, auto_scrape: true, verify_on_link: true,
+        auto_failover: true, stale_ttl_hours: 6 },
+      c.ingest,
+    )
+    corsText.value = (cfg.server.cors_origins || []).join(', ')
     trustedProxiesText.value = (cfg.server.trusted_proxies || []).join(', ')
     // 隐私保护（桌面防窥）
     cfg.privacy = Object.assign(
@@ -299,9 +334,12 @@ async function saveLibrary() {
         missing_grace_days: Math.max(0, Number(cfg.library.missing_grace_days) || 0),
         delete_to_recycle_bin: !!cfg.library.delete_to_recycle_bin,
       },
+      network: { proxy: (cfg.network.proxy || '').trim() },
       stream: {
         auto_remux: !!cfg.stream.auto_remux,
         remux_cache_mb: Math.max(0, Number(cfg.stream.remux_cache_mb) || 0),
+        strm_proxy: !!cfg.stream.strm_proxy,
+        hls_direct: !!cfg.stream.hls_direct,
       },
       cover: { auto_local: !!cfg.cover.auto_local, download: !!cfg.cover.download },
       media: {
@@ -541,6 +579,51 @@ async function doRevokeKey(id) {
   if (!ok) return
   try { await revokeApiKey(id); await loadKeys(); toast(t('settings.keyRevoked'), 'ok') }
   catch (e) { toast(e.message, 'err') }
+}
+
+/* ---------------- 浏览器接入 ---------------- */
+async function saveIngest() {
+  saving.value = true
+  try {
+    const origins = corsText.value.split(/[,，\n]/).map((s) => s.trim()).filter(Boolean)
+    let extra = {}
+    try {
+      extra = JSON.parse(extraHeadersText.value || '{}')
+      if (!extra || typeof extra !== 'object' || Array.isArray(extra)) throw new Error('bad')
+    } catch (e) { toast(t('settings.ingestHeadersBad'), 'err'); return }
+    await putConfig({
+      ingest: {
+        enabled: !!cfg.ingest.enabled,
+        allow_create: !!cfg.ingest.allow_create,
+        auto_scrape: !!cfg.ingest.auto_scrape,
+        verify_on_link: !!cfg.ingest.verify_on_link,
+        auto_failover: !!cfg.ingest.auto_failover,
+        stale_ttl_hours: Math.max(1, Math.min(168, Number(cfg.ingest.stale_ttl_hours) || 6)),
+      },
+      // CORS 由启动时注册的中间件读取，改动需重启服务；用户脚本无需配置
+      server: { cors_origins: origins },
+      // 留空 = 自动用影片页面站点作为 Referer、浏览器 UA
+      stream: {
+        strm_referer: (cfg.stream.strm_referer || '').trim(),
+        strm_referer_mode: cfg.stream.strm_referer_mode === 'origin' ? 'origin' : 'full',
+        strm_user_agent: (cfg.stream.strm_user_agent || '').trim(),
+        strm_extra_headers: extra,
+      },
+    })
+    toast(t('settings.ingestSaved'), 'ok')
+    await load()
+  } catch (e) { toast(e.message, 'err') } finally { saving.value = false }
+}
+
+async function createIngestKey() {
+  ingestKeyBusy.value = true
+  try {
+    const r = await createApiKey(t('settings.ingestKeyName'), 'full')
+    ingestKey.value = r.key || ''
+    await loadKeys()
+    toast(t('settings.keyCreated'), 'ok')
+  } catch (e) { toast(e.message, 'err') }
+  finally { ingestKeyBusy.value = false }
 }
 
 /* 关闭出站证书校验 = 失去中间人防护，属「降低安全性」的开关：
@@ -1117,6 +1200,22 @@ const parseStats = computed(() => {
 
 /* ---------------- 访问与远程 ---------------- */
 const serverInfo = reactive({ host: '127.0.0.1', port: 8770, access_token: '', token_masked: true, token_env_locked: false })
+/* 插件配对用的服务地址：当前页面地址最准确；后端探测到的局域网地址要换成
+   实际监听端口（server.info 里的端口来自配置默认值，自定义端口启动时会不一致）。 */
+const ingestUrls = computed(() => {
+  const current = location.origin
+  let curPort = ''
+  try { curPort = new URL(current).port || '' } catch (e) { /* 忽略非法 origin */ }
+  const list = Array.isArray(serverInfo.access_urls) ? serverInfo.access_urls.filter(Boolean) : []
+  const others = list.map((u) => {
+    try {
+      const url = new URL(u)
+      url.port = curPort
+      return url.toString().replace(/\/$/, '')
+    } catch (e) { return '' }
+  }).filter(Boolean)
+  return [current, ...others.filter((u) => u !== current)].filter((u, i, a) => a.indexOf(u) === i)
+})
 const showTok = ref(false)
 const tokInput = ref('')            // 只用于「设置新令牌」，留空表示不修改
 const savingTok = ref(false)
@@ -1379,12 +1478,24 @@ onMounted(async () => {
       <button class="btn tiny ghost" @click="rerunOnboarding">{{ $t('guide.rerun') }}</button>
       <button class="btn tiny ghost" @click="state.guideOpen = true">{{ $t('guide.help') }}</button>
       <button class="btn tiny ghost" @click="openAiCenter">{{ $t('aiCenter.open') }}</button>
-      <div class="tabs st-tabs">
-        <button v-for="t in visibleTabs" :key="t[0]" class="tab" :class="{ on: tab === t[0] }" @click="tab = t[0]">{{ $t(t[1]) }}</button>
-      </div>
     </div>
 
-    <div class="view-body block-scroll">
+    <!-- 左栏竖排全部设置分组：九组同时可见，不用在两行页签里找 -->
+    <div class="set-shell">
+      <aside class="set-rail" role="tablist">
+        <button
+          v-for="t in visibleTabs"
+          :key="t[0]"
+          class="rail-item"
+          :class="{ on: tab === t[0] }"
+          role="tab"
+          @click="tab = t[0]"
+        >
+          <span class="t-ico">{{ TAB_ICONS[t[0]] }}</span><span class="rail-label">{{ $t(t[1]) }}</span>
+        </button>
+      </aside>
+
+      <div class="view-body block-scroll">
       <!-- ============ 媒体库 ============ -->
       <template v-if="tab === 'library'">
         <div class="panel">
@@ -1519,6 +1630,20 @@ onMounted(async () => {
               </label>
               <span>{{ $t('settings.playAutoRemux') }}</span>
               <span class="hint">{{ $t('settings.playAutoRemuxHint') }}</span>
+            </div>
+            <div class="field">
+              <label class="toggle">
+                <input type="checkbox" v-model="cfg.stream.strm_proxy" @change="saveLibrary" /><span class="track"></span>
+              </label>
+              <span>{{ $t('settings.playStrmProxy') }}</span>
+              <span class="hint">{{ $t('settings.playStrmProxyHint') }}</span>
+            </div>
+            <div class="field">
+              <label class="toggle">
+                <input type="checkbox" v-model="cfg.stream.hls_direct" @change="saveLibrary" /><span class="track"></span>
+              </label>
+              <span>{{ $t('settings.playHlsDirect') }}</span>
+              <span class="hint">{{ $t('settings.playHlsDirectHint') }}</span>
             </div>
             <div class="field-row">
               <label>{{ $t('settings.playCache') }}</label>
@@ -1755,7 +1880,7 @@ onMounted(async () => {
             </div>
             <div class="field-row">
               <label>{{ $t('settings.proxy') }}</label>
-              <input v-model="cfg.scraper.proxy" placeholder="http://127.0.0.1:7890" />
+              <span class="hint">{{ $t('settings.proxyGlobalHint') }}</span>
             </div>
             <div class="field-row checkbox">
               <label>{{ $t('settings.overwrite') }}</label>
@@ -1841,6 +1966,79 @@ onMounted(async () => {
           </div>
           <div class="panel-foot">
             <button class="btn primary" :disabled="savingWiki" @click="saveWiki">{{ $t('settings.wikiSave') }}</button>
+          </div>
+        </div>
+        <div class="panel">
+          <div class="panel-head">{{ $t('settings.sites') }}</div>
+          <div class="panel-sub">{{ $t('settings.sitesSub') }}</div>
+          <div class="panel-body">
+            <div class="sites-toolbar">
+              <button class="btn btn-primary" @click="openAddSite">
+                <span class="i">＋</span> {{ $t('settings.sitesAdd') }}
+              </button>
+              <button class="btn" @click="addCommonSites">
+                <span class="i">⚡</span> {{ $t('settings.sitesAddCommon') }}
+              </button>
+            </div>
+            <div v-if="!cfg.online_sites.length" class="empty-hint">{{ $t('settings.sitesEmpty') }}</div>
+            <ul v-else class="sites-list">
+              <li v-for="(s, i) in cfg.online_sites" :key="s.id" class="sites-item">
+                <label class="switch sm">
+                  <input type="checkbox" v-model="s.enabled" />
+                  <span class="track"></span>
+                </label>
+                <div class="sites-info">
+                  <div class="sites-name">{{ s.name }}</div>
+                  <div class="sites-url">{{ s.url }}</div>
+                </div>
+                <div class="sites-actions">
+                  <button class="btn btn-ghost sm" :title="$t('settings.sitesUp')" @click="moveSite(i, -1)">↑</button>
+                  <button class="btn btn-ghost sm" :title="$t('settings.sitesDown')" @click="moveSite(i, 1)">↓</button>
+                  <button class="btn btn-ghost sm" @click="openEditSite(s)">{{ $t('settings.sitesEdit') }}</button>
+                  <button class="btn btn-ghost sm danger" @click="deleteSite(s)">{{ $t('settings.sitesDelete') }}</button>
+                </div>
+              </li>
+            </ul>
+            <div class="form-actions">
+              <button class="btn btn-primary" :disabled="savingSites" @click="saveSites">
+                {{ savingSites ? '…' : $t('settings.sitesSave') }}
+              </button>
+            </div>
+          </div>
+        </div>
+        <!-- 新增/编辑弹窗 -->
+        <div v-if="editingSite" class="modal-mask" @click.self="closeSiteEditor">
+          <div class="modal">
+            <div class="modal-head">{{ editingSite === 'new' ? $t('settings.sitesAddTitle') : $t('settings.sitesEditTitle') }}</div>
+            <div class="modal-body">
+              <div class="form-row">
+                <label>{{ $t('settings.sitesName') }}</label>
+                <input v-model="draftSite.name" :placeholder="$t('settings.sitesUrlPh')" />
+              </div>
+              <div class="form-row">
+                <label>{{ $t('settings.sitesUrl') }}</label>
+                <input v-model="draftSite.url" :placeholder="$t('settings.sitesUrlPh')" />
+              </div>
+              <div class="form-hint">{{ $t('settings.sitesUrlHint') }}</div>
+              <div class="form-row inline">
+                <label class="switch sm">
+                  <input type="checkbox" v-model="draftSite.enabled" />
+                  <span class="track"></span>
+                </label>
+                <span>{{ $t('settings.sitesEnabled') }}</span>
+              </div>
+              <div class="preview-box" v-if="draftSite.url.includes('{code}')">
+                <div class="preview-title">{{ $t('settings.sitesPreview') }}</div>
+                <div class="form-row inline">
+                  <label>{{ $t('settings.sitesPreviewDesc', { code: sitesPreviewCode }) }}</label>
+                </div>
+                <a class="preview-link" :href="renderUrl(draftSite, sitesPreviewCode)" target="_blank" rel="noopener">{{ renderUrl(draftSite, sitesPreviewCode) }}</a>
+              </div>
+            </div>
+            <div class="modal-foot">
+              <button class="btn btn-ghost" @click="closeSiteEditor">{{ $t('common.cancel') }}</button>
+              <button class="btn btn-primary" @click="saveSiteEditor">{{ $t('common.save') }}</button>
+            </div>
           </div>
         </div>
       </template>
@@ -1941,122 +2139,6 @@ onMounted(async () => {
         </div>
       </template>
 
-      <!-- ============ 解析预览 ============ -->
-      <template v-else-if="tab === 'parser'">
-        <div class="panel">
-          <div class="panel-head">
-            {{ $t('settings.parseTitle') }}
-            <span class="sub">{{ $t('settings.parseSub') }}</span>
-          </div>
-          <div class="panel-body">
-            <textarea v-model="parseInput" rows="7" :placeholder="$t('settings.parsePh') + '\nABP-123 中文字幕.mp4\n[JAVBUS]SSIS-456-CD1.mkv'" spellcheck="false"></textarea>
-            <div class="hstack">
-              <button class="btn primary" @click="runParse">{{ $t('settings.parseBtn') }}</button>
-              <span v-if="parseRows.length" class="muted">
-                {{ $t('settings.parseStat', { ok: parseStats.ok, n: parseStats.n, rate: parseStats.rate }) }}
-              </span>
-            </div>
-
-            <table v-if="parseRows.length" class="ptable">
-              <thead><tr><th>{{ $t('settings.code') }}</th><th>{{ $t('settings.rule') }}</th><th>{{ $t('settings.origName') }}</th></tr></thead>
-              <tbody>
-                <tr v-for="(r, i) in parseRows" :key="i">
-                  <td><span class="badge" :class="r.matched ? 'ok' : 'err'">{{ r.matched ? r.code : $t('settings.unmatched') }}</span></td>
-                  <td class="muted">
-                    {{ r.rule || '—' }}
-                    <span v-if="r.part > 1"> · CD{{ r.part }}</span>
-                    <span v-if="r.subtitle"> · {{ $t('detail.subtitle') }}</span>
-                    <span v-if="r.uncensored"> · {{ $t('detail.uncensored') }}</span>
-                  </td>
-                  <td class="pin ellipsis" :title="r.input">{{ r.input }}</td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-        </div>
-      </template>
-
-      <!-- ============ 常用在线站点 ============ -->
-      <template v-else-if="tab === 'sites'">
-        <div class="panel">
-          <div class="panel-head">{{ $t('settings.sites') }}</div>
-          <div class="panel-sub">{{ $t('settings.sitesSub') }}</div>
-          <div class="panel-body">
-            <div class="sites-toolbar">
-              <button class="btn btn-primary" @click="openAddSite">
-                <span class="i">＋</span> {{ $t('settings.sitesAdd') }}
-              </button>
-              <button class="btn" @click="addCommonSites">
-                <span class="i">⚡</span> {{ $t('settings.sitesAddCommon') }}
-              </button>
-            </div>
-
-            <div v-if="!cfg.online_sites.length" class="empty-hint">{{ $t('settings.sitesEmpty') }}</div>
-
-            <ul v-else class="sites-list">
-              <li v-for="(s, i) in cfg.online_sites" :key="s.id" class="sites-item">
-                <label class="switch sm">
-                  <input type="checkbox" v-model="s.enabled" />
-                  <span class="track"></span>
-                </label>
-                <div class="sites-info">
-                  <div class="sites-name">{{ s.name }}</div>
-                  <div class="sites-url">{{ s.url }}</div>
-                </div>
-                <div class="sites-actions">
-                  <button class="btn btn-ghost sm" :title="$t('settings.sitesUp')" @click="moveSite(i, -1)">↑</button>
-                  <button class="btn btn-ghost sm" :title="$t('settings.sitesDown')" @click="moveSite(i, 1)">↓</button>
-                  <button class="btn btn-ghost sm" @click="openEditSite(s)">{{ $t('settings.sitesEdit') }}</button>
-                  <button class="btn btn-ghost sm danger" @click="deleteSite(s)">{{ $t('settings.sitesDelete') }}</button>
-                </div>
-              </li>
-            </ul>
-
-            <div class="form-actions">
-              <button class="btn btn-primary" :disabled="savingSites" @click="saveSites">
-                {{ savingSites ? '…' : $t('settings.sitesSave') }}
-              </button>
-            </div>
-          </div>
-        </div>
-
-        <!-- 新增/编辑弹窗 -->
-        <div v-if="editingSite" class="modal-mask" @click.self="closeSiteEditor">
-          <div class="modal">
-            <div class="modal-head">{{ editingSite === 'new' ? $t('settings.sitesAddTitle') : $t('settings.sitesEditTitle') }}</div>
-            <div class="modal-body">
-              <div class="form-row">
-                <label>{{ $t('settings.sitesName') }}</label>
-                <input v-model="draftSite.name" :placeholder="$t('settings.sitesUrlPh')" />
-              </div>
-              <div class="form-row">
-                <label>{{ $t('settings.sitesUrl') }}</label>
-                <input v-model="draftSite.url" :placeholder="$t('settings.sitesUrlPh')" />
-              </div>
-              <div class="form-hint">{{ $t('settings.sitesUrlHint') }}</div>
-              <div class="form-row inline">
-                <label class="switch sm">
-                  <input type="checkbox" v-model="draftSite.enabled" />
-                  <span class="track"></span>
-                </label>
-                <span>{{ $t('settings.sitesEnabled') }}</span>
-              </div>
-              <div class="preview-box" v-if="draftSite.url.includes('{code}')">
-                <div class="preview-title">{{ $t('settings.sitesPreview') }}</div>
-                <div class="form-row inline">
-                  <label>{{ $t('settings.sitesPreviewDesc', { code: sitesPreviewCode }) }}</label>
-                </div>
-                <a class="preview-link" :href="renderUrl(draftSite, sitesPreviewCode)" target="_blank" rel="noopener">{{ renderUrl(draftSite, sitesPreviewCode) }}</a>
-              </div>
-            </div>
-            <div class="modal-foot">
-              <button class="btn btn-ghost" @click="closeSiteEditor">{{ $t('common.cancel') }}</button>
-              <button class="btn btn-primary" @click="saveSiteEditor">{{ $t('common.save') }}</button>
-            </div>
-          </div>
-        </div>
-      </template>
-
       <!-- ============ 扩展组件（FFmpeg / 语音识别依赖 / 模型） ============ -->
       <ExtPanel v-else-if="tab === 'ext'" />
 
@@ -2148,8 +2230,20 @@ onMounted(async () => {
         </div>
       </template>
 
-      <!-- ============ 外观 ============ -->
-      <template v-else-if="tab === 'appearance'">
+      <!-- ============ 通用（语言 / 外观 / 网络） ============ -->
+      <template v-else-if="tab === 'general'">
+
+        <!-- 网络：所有出站请求共用这一个出口 -->
+        <div class="panel">
+          <div class="panel-head">{{ $t('settings.netTitle') }}</div>
+          <div class="panel-body">
+            <div class="field-row">
+              <label>{{ $t('settings.netProxy') }}</label>
+              <input class="inp" v-model="cfg.network.proxy" placeholder="http://127.0.0.1:7890" @change="saveLibrary" style="max-width:320px" />
+              <span class="hint">{{ $t('settings.netProxyHint') }}</span>
+            </div>
+          </div>
+        </div>
 
         <div class="panel">
           <div class="panel-head">{{ $t('settings.themeDisplay') }}</div>
@@ -2514,6 +2608,99 @@ onMounted(async () => {
         </details>
       </template>
 
+      <!-- ============ 浏览器接入 ============ -->
+      <template v-else-if="tab === 'ingest'">
+        <div class="panel">
+          <div class="panel-head">{{ $t('settings.ingestTitle') }} <span class="sub">{{ $t('settings.ingestDesc') }}</span></div>
+          <div class="panel-body">
+            <div class="field">
+              <label class="toggle">
+                <input type="checkbox" v-model="cfg.ingest.enabled" /><span class="track"></span>
+              </label>
+              <span>{{ $t('settings.ingestEnable') }}</span>
+              <span class="hint">{{ $t('settings.ingestEnableHint') }}</span>
+            </div>
+            <div class="field">
+              <label class="toggle"><input type="checkbox" v-model="cfg.ingest.allow_create" /><span class="track"></span></label>
+              <span>{{ $t('settings.ingestAllowCreate') }}</span>
+            </div>
+            <div class="field">
+              <label class="toggle"><input type="checkbox" v-model="cfg.ingest.auto_scrape" /><span class="track"></span></label>
+              <span>{{ $t('settings.ingestAutoScrape') }}</span>
+              <span class="hint">{{ $t('settings.ingestAutoScrapeHint') }}</span>
+            </div>
+            <div class="field">
+              <label class="toggle"><input type="checkbox" v-model="cfg.ingest.verify_on_link" /><span class="track"></span></label>
+              <span>{{ $t('settings.ingestVerify') }}</span>
+            </div>
+            <div class="field">
+              <label class="toggle"><input type="checkbox" v-model="cfg.ingest.auto_failover" /><span class="track"></span></label>
+              <span>{{ $t('settings.ingestFailover') }}</span>
+            </div>
+            <div class="field">
+              <label>{{ $t('settings.ingestTtl') }}</label>
+              <input class="inp" type="number" min="1" max="168" v-model.number="cfg.ingest.stale_ttl_hours" style="max-width:120px" />
+            </div>
+            <div class="field col">
+              <label>{{ $t('settings.ingestCors') }}</label>
+              <input class="inp" v-model="corsText" placeholder="https://example.com, http://127.0.0.1:5173" />
+              <span class="hint">{{ $t('settings.ingestCorsHint') }}</span>
+            </div>
+            <div class="field col">
+              <label>{{ $t('settings.ingestReferer') }}</label>
+              <input class="inp" v-model="cfg.stream.strm_referer" placeholder="https://example.com/en/v/..." />
+              <span class="hint">{{ $t('settings.ingestRefererHint') }}</span>
+            </div>
+            <div class="field">
+              <label>{{ $t('settings.ingestRefererMode') }}</label>
+              <select class="inp" v-model="cfg.stream.strm_referer_mode" style="max-width:240px">
+                <option value="full">{{ $t('settings.ingestRefererModeFull') }}</option>
+                <option value="origin">{{ $t('settings.ingestRefererModeOrigin') }}</option>
+              </select>
+            </div>
+            <div class="field col">
+              <label>{{ $t('settings.ingestUA') }}</label>
+              <input class="inp" v-model="cfg.stream.strm_user_agent" />
+              <span class="hint">{{ $t('settings.ingestUAHint') }}</span>
+            </div>
+            <div class="field col">
+              <label>{{ $t('settings.ingestExtraHeaders') }}</label>
+              <textarea class="inp mono" rows="3" v-model="extraHeadersText" spellcheck="false"></textarea>
+              <span class="hint">{{ $t('settings.ingestExtraHeadersHint') }}</span>
+            </div>
+            <div class="hstack">
+              <button class="btn tiny primary" :disabled="saving" @click="saveIngest">{{ $t('common.save') }}</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-head">{{ $t('settings.ingestPair') }}</div>
+          <div class="panel-body">
+            <span class="hint">{{ $t('settings.ingestPairHint') }}</span>
+            <div class="field col">
+              <label>{{ $t('settings.ingestServer') }}</label>
+              <div v-for="u in ingestUrls" :key="u" class="url-row">
+                <code class="mono url">{{ u }}</code>
+                <button class="btn tiny ghost" @click="copyText(u)">{{ $t('settings.copy') }}</button>
+              </div>
+            </div>
+            <div class="hstack">
+              <button class="btn tiny primary" :disabled="ingestKeyBusy" @click="createIngestKey">{{ $t('settings.ingestCreateKey') }}</button>
+            </div>
+            <div v-if="ingestKey" class="fw-tip">
+              <div class="fw-tip-title">🔑 {{ $t('settings.keyCreatedTitle') }}</div>
+              <code class="fw-cmd mono">{{ ingestKey }}</code>
+              <div class="hstack">
+                <button class="btn tiny ghost" @click="copyText(ingestKey)">{{ $t('settings.copy') }}</button>
+                <button class="btn tiny ghost" @click="ingestKey = ''">{{ $t('settings.ingestKeyHide') }}</button>
+              </div>
+              <div class="fw-tip-body">{{ $t('settings.ingestKeyHint') }}</div>
+            </div>
+          </div>
+        </div>
+      </template>
+
       <!-- ============ 关于 ============ -->
       <template v-else>
         <!-- 主视觉：品牌 + 版本 + 操作 -->
@@ -2584,6 +2771,7 @@ onMounted(async () => {
           </div>
         </div>
       </template>
+      </div>
     </div>
 
     <!-- 目录浏览器 -->
@@ -2614,6 +2802,39 @@ onMounted(async () => {
 </template>
 
 <style scoped>
+/* 设置页：左栏竖排导航 + 右侧内容 */
+.set-shell { flex: 1; min-height: 0; display: flex; }
+.set-rail {
+  flex: none; width: 152px; display: flex; flex-direction: column; gap: 2px;
+  padding: 10px 8px;
+  border-right: 1px solid var(--c-line);
+  overflow-y: auto; scrollbar-gutter: stable;
+}
+.rail-item {
+  display: flex; align-items: center; gap: 8px; width: 100%;
+  padding: 7px 9px; border: 0; border-radius: var(--r-sm);
+  background: none; color: var(--c-text-2); font: inherit; font-size: var(--fs-sm);
+  text-align: left; cursor: pointer;
+  transition: background .12s, color .12s;
+}
+.rail-item:hover { background: var(--c-surface-2); color: var(--c-text); }
+.rail-item.on {
+  background: var(--c-primary-soft); color: var(--c-primary-h);
+  font-weight: 600; box-shadow: inset 2px 0 0 var(--c-primary);
+}
+.rail-item .t-ico { width: 18px; text-align: center; flex: none; }
+.rail-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.set-shell .view-body { min-width: 0; }
+/* 窄屏：左栏转成横向滚动条 */
+@media (max-width: 560px) {
+  .set-shell { flex-direction: column; }
+  .set-rail {
+    width: 100%; flex-direction: row;
+    padding: 6px; overflow-x: auto; overflow-y: hidden;
+    border-right: 0; border-bottom: 1px solid var(--c-line);
+  }
+  .rail-item { width: auto; flex: none; }
+}
 /* 安全面板：活跃会话 / 登录记录行 */
 .sec-row { display: flex; align-items: center; gap: 10px; padding: 5px 0; border-bottom: 1px solid var(--c-line, rgba(128,128,128,.18)); }
 .sec-row:last-child { border-bottom: none; }
@@ -2622,7 +2843,6 @@ onMounted(async () => {
 .totp-bind { display: flex; gap: var(--sp-4, 16px); align-items: flex-start; flex-wrap: wrap; }
 .totp-bind-side { flex: 1; min-width: 220px; display: flex; flex-direction: column; gap: var(--sp-2, 8px); }
 .rec-codes { display: block; padding: var(--sp-2, 8px); border-radius: var(--r-sm, 6px); background: var(--c-surface-2, rgba(128,128,128,.12)); word-spacing: 10px; user-select: all; }
-.st-tabs { border-bottom: none; }
 /* 竖版海报批量进度条 */
 .poster-progress { padding: 0 var(--sp-4) var(--sp-3); display: flex; flex-direction: column; gap: 4px; }
 .poster-bar { height: 6px; border-radius: 3px; background: var(--c-surface-2); overflow: hidden; }

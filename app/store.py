@@ -12,6 +12,7 @@ import subprocess
 import unicodedata
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from urllib.parse import urlsplit
 
 from . import subprobe, subtitles
 from .concepts import canonical_term, expand_term
@@ -39,6 +40,14 @@ SORTS = {
     "play_desc": "m.play_count DESC, m.id DESC",
     "random": "RANDOM()",
     "actress_count_desc": "(SELECT COUNT(*) FROM movie_actress mc WHERE mc.movie_id = m.id) DESC, m.id DESC",
+    # 来源维度排序：可播优先 / 最近校验 / 来源最多
+    "available_first": ("((EXISTS(SELECT 1 FROM movie_files f WHERE f.movie_id = m.id "
+                        "AND f.missing = 0 AND COALESCE(f.kind,'local') <> 'online')) "
+                        "OR (EXISTS(SELECT 1 FROM movie_sources ms WHERE ms.movie_id = m.id "
+                        "AND ms.available = 1 AND ms.play_url <> '' "
+                        "AND ms.status NOT IN ('invalid','unsupported')))) DESC, m.id DESC"),
+    "checked_desc": "(SELECT MAX(ms.last_checked) FROM movie_sources ms WHERE ms.movie_id = m.id) DESC, m.id DESC",
+    "sites_desc": "(SELECT COUNT(*) FROM movie_sources ms WHERE ms.movie_id = m.id) DESC, m.id DESC",
 }
 
 FLAG_CLAUSES = {
@@ -59,9 +68,23 @@ FLAG_CLAUSES = {
     "noscrape": "m.scraped_at = ''",
     "nocode": "m.has_code = 0",
     "multi": "m.id IN (SELECT movie_id FROM movie_actress GROUP BY movie_id HAVING COUNT(*) >= 2)",
+    # 在线来源（浏览器接入）：登记过在线来源（页面/播放地址）的影片；
+    # 「纯本地」即不含在线来源。两者是从文件/来源派生的事实，用派生查询
+    # 而非冗余字段，避免双写不一致。基于 movie_sources 而非虚拟 movie_files：
+    # 只登记了页面地址、还没拿到播放地址的收藏也应能被筛到。
+    "online": ("EXISTS (SELECT 1 FROM movie_sources ms WHERE ms.movie_id = m.id)"),
+    "local": ("NOT EXISTS (SELECT 1 FROM movie_sources ms WHERE ms.movie_id = m.id)"),
     # 归档影片默认被排除在所有列表外，只有显式带上这个标记才反过来「只看归档」
     "archived": "COALESCE(m.archived_at,'') <> ''",
 }
+
+# 派生来源口径（不落库，随 movie_sources / movie_files 实时变化）
+_LOCAL_ALIVE = ("EXISTS(SELECT 1 FROM movie_files f WHERE f.movie_id = m.id "
+                "AND f.missing = 0 AND COALESCE(f.kind,'local') <> 'online')")
+_SRC_ANY = "EXISTS(SELECT 1 FROM movie_sources ms WHERE ms.movie_id = m.id)"
+_SRC_OK = ("EXISTS(SELECT 1 FROM movie_sources ms WHERE ms.movie_id = m.id "
+           "AND ms.available = 1 AND ms.play_url <> '' "
+           "AND ms.status NOT IN ('invalid','unsupported'))")
 
 
 def norm_name(name: Any) -> str:
@@ -307,8 +330,10 @@ def upsert_scanned_file(conn: sqlite3.Connection, parsed: Dict[str, Any],
 
 
 def refresh_aggregate(conn: sqlite3.Connection, movie_id: int) -> None:
+    # 纯在线影片的虚拟文件记录（kind='online'）不占磁盘，不计入体积与文件数
     row = conn.execute(
-        "SELECT COALESCE(SUM(size),0), COUNT(*) FROM movie_files WHERE movie_id = ? AND missing = 0",
+        "SELECT COALESCE(SUM(size),0), COUNT(*) FROM movie_files WHERE movie_id = ? "
+        "AND missing = 0 AND COALESCE(kind,'local') <> 'online'",
         (movie_id,),
     ).fetchone()
     # 内嵌字幕：多文件取最优（文本中字 > 图形中字），语言取并集
@@ -370,7 +395,8 @@ def prune_missing(conn: sqlite3.Connection, alive_paths: set[str], roots: Sequen
     removed = 0
     lowered_roots = [r.replace("\\", "/").lower().rstrip("/") for r in roots]
     rows = conn.execute(
-        "SELECT id, path, movie_id, missing, missing_since FROM movie_files").fetchall()
+        "SELECT id, path, movie_id, missing, missing_since FROM movie_files "
+        "WHERE COALESCE(kind,'local') <> 'online'").fetchall()
     for row in rows:
         if skip_prefixes and under_any(row["path"], skip_prefixes):
             continue  # 所在盘当前不可用：不动
@@ -418,7 +444,8 @@ def check_missing_files(conn: sqlite3.Connection,
 
     rows = query_all(
         conn,
-        "SELECT id, path FROM movie_files WHERE COALESCE(missing,0)=0",
+        "SELECT id, path FROM movie_files WHERE COALESCE(missing,0)=0 "
+        "AND COALESCE(kind,'local') <> 'online'",
     )
     checked = 0
     marked = 0
@@ -448,7 +475,8 @@ def check_missing_files(conn: sqlite3.Connection,
     if ok_prefixes:
         stale = query_all(
             conn,
-            "SELECT id, path FROM movie_files WHERE COALESCE(missing,0)=1",
+            "SELECT id, path FROM movie_files WHERE COALESCE(missing,0)=1 "
+            "AND COALESCE(kind,'local') <> 'online'",
         )
         for r in stale:
             p = str(r["path"] or "")
@@ -497,7 +525,17 @@ SELECT m.id, m.key, m.code, m.has_code, m.title, m.original_title, m.release_dat
        COALESCE(wp.duration, 0) AS duration_seconds,
        COALESCE(wp.finished, 0) AS progress_finished,
        (SELECT COUNT(*) FROM movie_files f
-          WHERE f.movie_id = m.id AND COALESCE(f.missing, 0) = 0) AS playable_cnt
+          WHERE f.movie_id = m.id AND COALESCE(f.missing, 0) = 0
+            AND COALESCE(f.kind, 'local') <> 'online') AS local_playable_cnt,
+       EXISTS(SELECT 1 FROM movie_files f WHERE f.movie_id = m.id AND COALESCE(f.missing,0)=0
+                AND COALESCE(f.kind,'local') <> 'online' AND COALESCE(f.strm_url,'') <> '') AS has_strm,
+       EXISTS(SELECT 1 FROM movie_sources ms WHERE ms.movie_id = m.id
+                AND ms.available = 1 AND ms.play_url <> ''
+                AND ms.status NOT IN ('invalid', 'unsupported')) AS online_playable,
+       (SELECT COUNT(*) FROM movie_sources ms WHERE ms.movie_id = m.id) AS source_count,
+       (SELECT group_concat(DISTINCT ms.site) FROM movie_sources ms
+          WHERE ms.movie_id = m.id AND ms.site <> '') AS source_sites,
+       (SELECT MAX(ms.last_checked) FROM movie_sources ms WHERE ms.movie_id = m.id) AS source_checked
 FROM movies m
 LEFT JOIN studios st ON st.id = m.studio_id
 LEFT JOIN series  se ON se.id = m.series_id
@@ -527,10 +565,12 @@ def _build_where(params: Dict[str, Any]) -> Tuple[str, List[Any]]:
             " OR m.director LIKE ? OR m.folder LIKE ?"
             " OR EXISTS(SELECT 1 FROM movie_actress ma JOIN actresses a ON a.id = ma.actress_id"
             "           WHERE ma.movie_id = m.id AND a.name LIKE ?)"
-            " OR EXISTS(SELECT 1 FROM movie_files f WHERE f.movie_id = m.id AND f.filename LIKE ?))"
+            " OR EXISTS(SELECT 1 FROM movie_files f WHERE f.movie_id = m.id AND f.filename LIKE ?)"
+            " OR EXISTS(SELECT 1 FROM movie_sources ms WHERE ms.movie_id = m.id"
+            "           AND (ms.site LIKE ? OR ms.title LIKE ?))"
         )
         args.append(code_like)
-        args.extend([like] * 7)
+        args.extend([like] * 9)
     if q_subs:
         clauses.append("(" + " OR ".join(q_subs) + ")")
 
@@ -628,6 +668,42 @@ def _build_where(params: Dict[str, Any]) -> Tuple[str, List[Any]]:
         if clause:
             clauses.append(clause)
 
+    # ---- 来源维度筛选（派生状态，不新增冗余列）----
+    states = _split_multi(params.get("source_state"))
+    if states:
+        subs: List[str] = []
+        for s in states:
+            if s == "local":
+                subs.append(f"({_LOCAL_ALIVE} AND NOT {_SRC_ANY})")
+            elif s == "hybrid":
+                subs.append(f"({_LOCAL_ALIVE} AND {_SRC_ANY})")
+            elif s == "online":
+                subs.append(f"(NOT {_LOCAL_ALIVE} AND {_SRC_OK})")
+            elif s == "page":
+                subs.append(f"(NOT {_LOCAL_ALIVE} AND {_SRC_ANY} AND NOT {_SRC_OK})")
+            elif s == "empty":
+                # 无任何持有：本地没有存活文件，也没有登记过在线来源
+                subs.append(f"(NOT {_LOCAL_ALIVE} AND NOT {_SRC_ANY})")
+        if subs:
+            # 来源状态互斥（一部影片只处于一种），多选只能是「任一满足」，
+            # 不能跟随全局 AND 逻辑，否则选两项必然为空。
+            clauses.append("(" + " OR ".join(subs) + ")")
+
+    for site in _split_multi(params.get("site")):
+        clauses.append("EXISTS(SELECT 1 FROM movie_sources ms WHERE ms.movie_id = m.id "
+                       "AND ms.site = ?)")
+        args.append(site)
+
+    if params.get("has_strm") in (1, "1", True, "true", "on"):
+        clauses.append("EXISTS(SELECT 1 FROM movie_files f WHERE f.movie_id = m.id "
+                       "AND f.missing = 0 AND COALESCE(f.kind,'local') <> 'online' "
+                       "AND COALESCE(f.strm_url,'') <> '')")
+
+    if params.get("no_strm") in (1, "1", True, "true", "on"):
+        clauses.append("NOT EXISTS(SELECT 1 FROM movie_files f WHERE f.movie_id = m.id "
+                       "AND f.missing = 0 AND COALESCE(f.kind,'local') <> 'online' "
+                       "AND COALESCE(f.strm_url,'') <> '')")
+
     # 顶层布尔 flag（智能清单规则以 {unwatched:1, favorite:1, ...} 形式直接传入）
     for fk, clause in FLAG_CLAUSES.items():
         val = params.get(fk)
@@ -715,7 +791,27 @@ def _row_to_card(row: Dict[str, Any]) -> Dict[str, Any]:
     row["studio"] = row.get("studio") or ""
     row["series"] = row.get("series") or ""
     row["watchlist"] = int(row.get("watchlist") or 0)
-    row["playable"] = int(row.get("playable_cnt") or 0) > 0
+    # 可播 = 本地有存活实体文件，或有一条已验证可用的在线播放地址。
+    # 虚拟在线记录不再单独算「可播」，否则链接失效的条目会一直显示可播。
+    row["local_playable"] = int(row.get("local_playable_cnt") or 0) > 0
+    row["online_playable"] = bool(row.get("online_playable"))
+    row["playable"] = row["local_playable"] or row["online_playable"]
+    # 来源状态（派生，不落库）：本地 / 双源 / 在线可播 / 仅页面可达 / 空壳
+    src = int(row.get("source_count") or 0)
+    if row["local_playable"] and src:
+        row["source_state"] = "hybrid"
+    elif row["local_playable"]:
+        row["source_state"] = "local"
+    elif src and row["online_playable"]:
+        row["source_state"] = "online"
+    elif src:
+        row["source_state"] = "page"
+    else:
+        row["source_state"] = "empty"
+    row["site_count"] = src
+    row["source_sites"] = [x for x in (row.get("source_sites") or "").split(",") if x]
+    row["source_checked"] = row.get("source_checked") or ""
+    row["has_strm"] = bool(row.get("has_strm"))
     row["display_code"] = row["code"] if row["has_code"] else ""
     return row
 
@@ -816,9 +912,23 @@ def movie_play_source(conn: sqlite3.Connection, movie_id: int):
                     "SELECT path, strm_url FROM movie_files WHERE movie_id=? AND missing=0 "
                     "ORDER BY part ASC, size DESC LIMIT 1",
                     (int(movie_id),))
-    if not row:
+    if row:
+        return {"path": row["path"], "strm_url": (row["strm_url"] or "").strip()}
+    # 纯在线影片可能还没有虚拟 movie_files 记录（例如先收藏页面、播放地址是
+    # 后来才补进来源表的）。直接从可用主源取地址，让 stream-info / HLS / 直链
+    # 播放都不必依赖那条虚拟记录，避免出现「列表里看得到、点开播不了」。
+    online = query_one(
+        conn,
+        "SELECT play_url FROM movie_sources WHERE movie_id = ? "
+        "AND available = 1 AND play_url <> '' "
+        "AND status NOT IN ('invalid','unsupported') "
+        "ORDER BY is_primary DESC, priority DESC, id ASC LIMIT 1",
+        (int(movie_id),))
+    if not online:
         return None
-    return {"path": row["path"], "strm_url": (row["strm_url"] or "").strip()}
+    from .movie_identity import virtual_path       # 延迟导入，避免模块循环
+    return {"path": virtual_path(movie_id),
+            "strm_url": str(online["play_url"] or "").strip()}
 
 
 def movie_primary_file(conn: sqlite3.Connection, movie_id: int):
@@ -1363,10 +1473,41 @@ def movie_detail(conn: sqlite3.Connection, movie_id: int) -> Optional[Dict[str, 
         row["tags_ai"] = []
     row["files"] = query_all(
         conn,
-        "SELECT id, path, filename, ext, size, mtime, part, missing, strm_url, sub_tracks "
+        "SELECT id, path, filename, ext, size, mtime, part, missing, strm_url, sub_tracks, "
+        "COALESCE(kind, 'local') AS kind "
         "FROM movie_files WHERE movie_id = ? ORDER BY missing ASC, part, filename",
         (movie_id,),
     )
+    # 在线来源列表：不回显 play_url（可能带签名，属临时凭据）
+    row["sources"] = query_all(
+        conn,
+        "SELECT id, kind, site, site_id, is_primary, available, status, title, "
+        "check_note, page_url, play_url, fetched_at, expires_at, last_checked "
+        "FROM movie_sources "
+        "WHERE movie_id = ? ORDER BY is_primary DESC, priority DESC, id ASC",
+        (movie_id,),
+    )
+    # 「回源站观看」与「打开源站」需要页面的规范地址；原始地址仍只给脱敏形态
+    from .movie_identity import canonical_url, mask_url
+    for s in row["sources"]:
+        s["open_url"] = canonical_url(str(s.get("page_url") or ""))
+        s["page_url"] = mask_url(str(s.get("page_url") or ""))
+        s["play_url"] = mask_url(str(s.get("play_url") or ""))
+        s["needs_site"] = "回源站观看" in str(s.get("check_note") or "")
+        # 页面入口是稳定身份；playable 反映「现在能否直接播」
+        s["has_page"] = bool(s["open_url"])
+        # 只有「已验证可用」才算可播；stale / invalid 都退回「回源站」主入口
+        s["playable"] = bool(
+            str(s.get("status") or "") == "valid"
+            and int(s.get("available") or 0) and s["play_url"])
+        s["page_label"] = str(s["page_url"]).replace("https://", "").replace("http://", "")
+        s["page_path"] = urlsplit(str(s["page_url"])).path or "/"
+    # 前端播放按钮的开关：哪怕还没有虚拟文件记录，只要有可用在线地址就能播
+    row["online_playable"] = bool(query_one(
+        conn,
+        "SELECT 1 FROM movie_sources WHERE movie_id = ? AND available = 1 "
+        "AND play_url <> '' AND status NOT IN ('invalid','unsupported') LIMIT 1",
+        (movie_id,)))
     row["progress"] = movie_progress(conn, movie_id)
     row["subtitles"] = subtitles.list_subtitles(conn, movie_id)
     return row
@@ -1593,7 +1734,8 @@ def _movie_snapshot(conn: sqlite3.Connection, movie_id: int, reason: str) -> boo
         "SELECT g.name FROM movie_genre mg JOIN genres g ON g.id = mg.genre_id "
         "WHERE mg.movie_id = ? ORDER BY g.name", (movie_id,))]
     files = [{"path": r["path"], "size": r["size"]} for r in query_all(
-        conn, "SELECT path, size FROM movie_files WHERE movie_id = ?", (movie_id,))]
+        conn, "SELECT path, size FROM movie_files WHERE movie_id = ? "
+              "AND COALESCE(kind,'local') <> 'online'", (movie_id,))]
     prog = query_one(
         conn, "SELECT position, finished FROM watch_progress WHERE movie_id = ?",
         (movie_id,)) or {}
@@ -1679,9 +1821,21 @@ def mark_played(conn: sqlite3.Connection, movie_id: int) -> None:
 
 def set_watch_progress(conn: sqlite3.Connection, movie_id: int,
                        position: float = 0, duration: float = 0) -> None:
-    """记录/更新播放进度（秒）。position=0 视为清除进度；看过即标记 watched。"""
+    """记录/更新播放进度（秒）。position=0 视为清除进度；看过即标记 watched。
+
+    duration 防御：心跳在流元数据未就绪（hls.js 切换期）时会报出极短的假时长，
+    实测把 150 分钟的正片写成 11.97 秒，继续播放判断全乱——
+    正片不可能短于 60 秒，这类值不采信；与已有时长骤降超 40% 的同样不采信。
+    """
     position = float(position or 0)
     duration = float(duration or 0)
+    old = query_one(
+        conn, "SELECT position, duration FROM watch_progress WHERE movie_id = ?", (movie_id,))
+    old_dur = float(old["duration"]) if old and old["duration"] else 0.0
+    if 0 < duration < 60:
+        duration = old_dur if old_dur >= 60 else 0.0
+    elif duration > 0 and old_dur > 0 and duration < old_dur * 0.6:
+        duration = old_dur
     finished = 1 if (duration and position >= duration * 0.95) else 0
     conn.execute(
         """INSERT INTO watch_progress(movie_id, position, duration, finished, updated_at)
@@ -2115,6 +2269,26 @@ def facets(conn: sqlite3.Connection, limit: int = 300) -> Dict[str, Any]:
             "SELECT CASE WHEN embed_sub_zh = 0 THEN 'none' "
             "WHEN embed_sub_zh_kind = 'text' THEN 'text' ELSE 'image' END AS kind, "
             "COUNT(*) AS count FROM movies GROUP BY kind"),
+        # 来源状态（派生）：纯本地 / 双源 / 在线可播 / 仅页面可达
+        "source_states": [
+            {"name": "local", "count": int(scalar(
+                conn, f"SELECT COUNT(*) FROM movies m WHERE {_LOCAL_ALIVE} AND NOT {_SRC_ANY}"))},
+            {"name": "hybrid", "count": int(scalar(
+                conn, f"SELECT COUNT(*) FROM movies m WHERE {_LOCAL_ALIVE} AND {_SRC_ANY}"))},
+            {"name": "online", "count": int(scalar(
+                conn, f"SELECT COUNT(*) FROM movies m WHERE NOT {_LOCAL_ALIVE} AND {_SRC_OK}"))},
+            {"name": "page", "count": int(scalar(
+                conn, f"SELECT COUNT(*) FROM movies m WHERE NOT {_LOCAL_ALIVE} "
+                      f"AND {_SRC_ANY} AND NOT {_SRC_OK}"))},
+            {"name": "empty", "count": int(scalar(
+                conn, f"SELECT COUNT(*) FROM movies m WHERE NOT {_LOCAL_ALIVE} "
+                      f"AND NOT {_SRC_ANY}"))},
+        ],
+        # 站点分面：登记过的来源站点及覆盖条目数，用于「按站点看收藏」
+        "sites": top(
+            "SELECT ms.site AS name, COUNT(DISTINCT ms.movie_id) AS count "
+            "FROM movie_sources ms WHERE ms.site <> '' GROUP BY ms.site "
+            "ORDER BY count DESC, ms.site LIMIT ?"),
     }
 
 
@@ -2144,28 +2318,32 @@ def actress_wall(conn: sqlite3.Connection, q: str = "", sort: str = "count",
 
 
 def storage_stats(conn):
-    """磁盘占用分布：按盘符、厂商、年份、文件类型，最大文件，以及整体汇总。"""
+    """磁盘占用分布：按盘符、厂商、年份、文件类型，最大文件，以及整体汇总。
+
+    纯在线影片的虚拟记录（kind='online'）不占磁盘，全部排除在文件口径之外。
+    """
+    local = "COALESCE(f.kind,'local') <> 'online'"
     by_disk = conn.execute(
         "SELECT substr(f.path, 1, 3) AS drive, COUNT(*) AS files, "
         "SUM(f.size) AS bytes, COUNT(DISTINCT f.movie_id) AS movies "
-        "FROM movie_files f WHERE f.missing = 0 GROUP BY drive ORDER BY bytes DESC"
+        "FROM movie_files f WHERE f.missing = 0 AND " + local + " GROUP BY drive ORDER BY bytes DESC"
     ).fetchall()
     by_studio = conn.execute(
         "SELECT COALESCE(s.name, '未知') AS studio, "
         "COUNT(*) AS n, SUM(f.size) AS bytes "
         "FROM movies m JOIN movie_files f ON f.movie_id = m.id AND f.missing = 0 "
         "LEFT JOIN studios s ON s.id = m.studio_id "
-        "GROUP BY studio ORDER BY bytes DESC LIMIT 15"
+        "WHERE " + local + " GROUP BY studio ORDER BY bytes DESC LIMIT 15"
     ).fetchall()
     by_year = conn.execute(
         "SELECT COALESCE(m.year, 0) AS year, COUNT(*) AS n, SUM(f.size) AS bytes "
         "FROM movies m JOIN movie_files f ON f.movie_id = m.id AND f.missing = 0 "
-        "GROUP BY year ORDER BY year DESC LIMIT 15"
+        "WHERE " + local + " GROUP BY year ORDER BY year DESC LIMIT 15"
     ).fetchall()
     by_ext = conn.execute(
         "SELECT COALESCE(NULLIF(f.ext, ''), '未知') AS ext, "
         "COUNT(*) AS files, SUM(f.size) AS bytes "
-        "FROM movie_files f WHERE f.missing = 0 GROUP BY ext ORDER BY bytes DESC"
+        "FROM movie_files f WHERE f.missing = 0 AND " + local + " GROUP BY ext ORDER BY bytes DESC"
     ).fetchall()
     by_genre = conn.execute(
         "SELECT COALESCE(g.name, '未分类') AS genre, "
@@ -2174,13 +2352,13 @@ def storage_stats(conn):
         "JOIN movie_files f ON f.movie_id = m.id AND f.missing = 0 "
         "LEFT JOIN movie_genre mg ON mg.movie_id = m.id "
         "LEFT JOIN genres g ON g.id = mg.genre_id "
-        "GROUP BY g.id ORDER BY bytes DESC LIMIT 15"
+        "WHERE " + local + " GROUP BY g.id ORDER BY bytes DESC LIMIT 15"
     ).fetchall()
     largest = conn.execute(
         "SELECT f.id AS file_id, f.size AS bytes, f.filename, f.ext, f.movie_id, "
         "COALESCE(NULLIF(m.title, ''), m.code, '#' || m.id) AS movie_name "
         "FROM movie_files f JOIN movies m ON m.id = f.movie_id "
-        "WHERE f.missing = 0 ORDER BY f.size DESC LIMIT 8"
+        "WHERE f.missing = 0 AND " + local + " ORDER BY f.size DESC LIMIT 8"
     ).fetchall()
     total = conn.execute(
         "SELECT COUNT(*) AS movies, SUM(file_count) AS files, SUM(size) AS bytes FROM movies"
@@ -2558,15 +2736,22 @@ def clean_software_storage(conn: sqlite3.Connection, targets: List[str]) -> Dict
 
 
 def integrity_issues(conn):
-    """完整性概览：缺失文件、缺封面、未识别番号。"""
-    missing = conn.execute("SELECT COUNT(*) AS c FROM movie_files WHERE missing = 1").fetchone()["c"]
+    """完整性概览：缺失文件、缺封面、未识别番号。
+
+    条目是否「在库」= 有存活本地文件，或登记过在线来源；纯在线条目也应参与
+    封面 / 番号完整性检查，虚拟文件记录不算本地文件。
+    """
+    alive = ("(EXISTS(SELECT 1 FROM movie_files f WHERE f.movie_id = m.id "
+             "AND f.missing = 0 AND COALESCE(f.kind,'local') <> 'online') "
+             "OR EXISTS(SELECT 1 FROM movie_sources ms WHERE ms.movie_id = m.id))")
+    missing = conn.execute(
+        "SELECT COUNT(*) AS c FROM movie_files "
+        "WHERE missing = 1 AND COALESCE(kind,'local') <> 'online'").fetchone()["c"]
     no_cover = conn.execute(
         "SELECT COUNT(*) AS c FROM movies m WHERE (m.cover IS NULL OR m.cover = '') "
-        "AND EXISTS(SELECT 1 FROM movie_files f WHERE f.movie_id = m.id AND f.missing = 0)"
-    ).fetchone()["c"]
+        "AND " + alive).fetchone()["c"]
     unrecognized = conn.execute(
-        "SELECT COUNT(*) AS c FROM movies m WHERE m.has_code = 0 "
-        "AND EXISTS(SELECT 1 FROM movie_files f WHERE f.movie_id = m.id AND f.missing = 0)"
+        "SELECT COUNT(*) AS c FROM movies m WHERE m.has_code = 0 AND " + alive
     ).fetchone()["c"]
     return {"missing_files": missing, "missing_cover": no_cover, "unrecognized": unrecognized}
 
@@ -2623,7 +2808,8 @@ def stats(conn: sqlite3.Connection) -> Dict[str, Any]:
     total = int(scalar(conn, "SELECT COUNT(*) FROM movies"))
     return {
         "movies": total,
-        "files": int(scalar(conn, "SELECT COUNT(*) FROM movie_files")),
+        "files": int(scalar(conn, "SELECT COUNT(*) FROM movie_files "
+                                     "WHERE COALESCE(kind,'local') <> 'online'")),
         "size": int(scalar(conn, "SELECT COALESCE(SUM(size),0) FROM movies")),
         "runtime": int(scalar(conn, "SELECT COALESCE(SUM(runtime),0) FROM movies")),
         "actresses": int(scalar(conn, "SELECT COUNT(*) FROM actresses")),
@@ -2638,6 +2824,28 @@ def stats(conn: sqlite3.Connection) -> Dict[str, Any]:
         "favorite": int(scalar(conn, "SELECT COUNT(*) FROM movies WHERE favorite = 1")),
         "watched": int(scalar(conn, "SELECT COUNT(*) FROM movies WHERE watched = 1")),
         "watchlist": int(scalar(conn, "SELECT COUNT(*) FROM movies WHERE watchlist = 1")),
+        # 在线收藏口径（与「本地资产」分开统计，避免容量/文件数被混算）
+        "sources": {
+            "online_movies": int(scalar(
+                conn, "SELECT COUNT(DISTINCT movie_id) FROM movie_sources")),
+            "hybrid": int(scalar(
+                conn, f"SELECT COUNT(*) FROM movies m WHERE {_LOCAL_ALIVE} AND {_SRC_ANY}")),
+            "online_only": int(scalar(
+                conn, f"SELECT COUNT(*) FROM movies m WHERE NOT {_LOCAL_ALIVE} AND {_SRC_ANY}")),
+            "page_only": int(scalar(
+                conn, f"SELECT COUNT(*) FROM movies m WHERE NOT {_LOCAL_ALIVE} "
+                      f"AND {_SRC_ANY} AND NOT {_SRC_OK}")),
+            "playable_online": int(scalar(
+                conn, "SELECT COUNT(DISTINCT movie_id) FROM movie_sources "
+                      "WHERE available = 1 AND play_url <> '' "
+                      "AND status NOT IN ('invalid','unsupported')")),
+            "invalid_sources": int(scalar(
+                conn, "SELECT COUNT(*) FROM movie_sources WHERE status = 'invalid'")),
+            "sites": int(scalar(
+                conn, "SELECT COUNT(DISTINCT site) FROM movie_sources WHERE site <> ''")),
+            "last_checked": str(scalar(
+                conn, "SELECT COALESCE(MAX(last_checked),'') FROM movie_sources") or ""),
+        },
         "top_actresses": query_all(
             conn,
             "SELECT a.name, COUNT(*) AS count FROM movie_actress ma "
@@ -2756,6 +2964,10 @@ def watch_history(conn: sqlite3.Connection, page: int = 1, size: int = 50,
         where.append("(m.code_norm LIKE ? OR m.title LIKE ?)")
         args.extend([code_like, like])
 
+    # 排除「点了外部播放按钮但从未真正播放」的占位会话：无时长、未结束、
+    # 上游也没写进度的行不进明细，避免 0 秒垃圾占据观看记录
+    where.append("(COALESCE(s.watched_sec,0) > 0 OR COALESCE(s.finished,0) = 1 "
+                 "OR s.ended_at IS NOT NULL)")
     wsql = (" WHERE " + " AND ".join(where)) if where else ""
 
     total = int(scalar(conn, f"SELECT COUNT(*) FROM watch_sessions s JOIN movies m ON m.id=s.movie_id{wsql}", args) or 0)
@@ -2764,9 +2976,16 @@ def watch_history(conn: sqlite3.Connection, page: int = 1, size: int = 50,
                s.finished, s.method, s.start_pos, s.end_pos,
                m.code, m.title, m.cover, m.year, st.name AS studio,
                (SELECT f.filename FROM movie_files f
-                  WHERE f.movie_id = m.id ORDER BY f.part ASC, f.id ASC LIMIT 1) AS file_name,
+                  WHERE f.movie_id = m.id AND COALESCE(f.kind,'local') <> 'online'
+                  ORDER BY f.part ASC, f.id ASC LIMIT 1) AS file_name,
+               (SELECT ms.site FROM movie_sources ms WHERE ms.movie_id = m.id
+                  ORDER BY ms.is_primary DESC, ms.priority DESC, ms.id ASC LIMIT 1) AS site,
                (SELECT COUNT(*) FROM movie_files f
-                  WHERE f.movie_id = m.id AND COALESCE(f.missing,0)=0) AS playable_cnt
+                  WHERE f.movie_id = m.id AND COALESCE(f.missing,0)=0
+                    AND COALESCE(f.kind,'local') <> 'online') AS local_playable_cnt,
+               EXISTS(SELECT 1 FROM movie_sources ms WHERE ms.movie_id = m.id
+                        AND ms.available = 1 AND ms.play_url <> ''
+                        AND ms.status NOT IN ('invalid','unsupported')) AS online_playable
         FROM watch_sessions s
         JOIN movies m ON m.id = s.movie_id
         LEFT JOIN studios st ON st.id = m.studio_id
@@ -2790,8 +3009,9 @@ def watch_history(conn: sqlite3.Connection, page: int = 1, size: int = 50,
         "cover": r["cover"],
         "studio": r["studio"],
         "year": r["year"],
-        "file_name": r["file_name"],
-        "playable": int(r["playable_cnt"] or 0) > 0,
+        "file_name": r["file_name"] or r["site"] or "",
+        "site": r["site"] or "",
+        "playable": int(r["local_playable_cnt"] or 0) > 0 or bool(r["online_playable"]),
         "started_at": r["started_at"],
         "ended_at": r["ended_at"],
         "watched_sec": float(r["watched_sec"] or 0),
@@ -2838,20 +3058,28 @@ def missing_overview(conn: sqlite3.Connection) -> Dict[str, Any]:
                m.play_count, m.watched,
                COUNT(f.id) AS missing_files,
                MIN(NULLIF(COALESCE(f.missing_since,''),'')) AS since,
-               (SELECT COUNT(*) FROM movie_files x WHERE x.movie_id = m.id) AS total_files,
                (SELECT COUNT(*) FROM movie_files x WHERE x.movie_id = m.id
-                  AND COALESCE(x.missing,0) = 0) AS alive_files,
+                  AND COALESCE(x.kind,'local') <> 'online') AS total_files,
+               (SELECT COUNT(*) FROM movie_files x WHERE x.movie_id = m.id
+                  AND COALESCE(x.missing,0) = 0
+                  AND COALESCE(x.kind,'local') <> 'online') AS alive_files,
+               (SELECT COUNT(*) FROM movie_sources x WHERE x.movie_id = m.id) AS online_sources,
+               EXISTS(SELECT 1 FROM movie_sources x WHERE x.movie_id = m.id
+                        AND x.available = 1 AND x.play_url <> ''
+                        AND x.status NOT IN ('invalid','unsupported')) AS online_playable,
                (SELECT COALESCE(SUM(watched_sec),0) FROM watch_sessions w
                   WHERE w.movie_id = m.id) AS watched_sec,
                (SELECT COALESCE(position,0) FROM watch_progress p
                   WHERE p.movie_id = m.id) AS progress
         FROM movies m JOIN movie_files f ON f.movie_id = m.id
-        WHERE COALESCE(f.missing,0) = 1 AND COALESCE(m.archived_at,'') = ''
+        WHERE COALESCE(f.missing,0) = 1 AND COALESCE(f.kind,'local') <> 'online'
+          AND COALESCE(m.archived_at,'') = ''
         GROUP BY m.id
         ORDER BY m.play_count DESC, since ASC
     """)
     paths: Dict[int, List[str]] = {}
-    for r in query_all(conn, "SELECT movie_id, path FROM movie_files WHERE COALESCE(missing,0) = 1"):
+    for r in query_all(conn, "SELECT movie_id, path FROM movie_files "
+                             "WHERE COALESCE(missing,0) = 1 AND COALESCE(kind,'local') <> 'online'"):
         paths.setdefault(int(r["movie_id"]), []).append(str(r["path"] or ""))
 
     items: List[Dict[str, Any]] = []
@@ -2878,6 +3106,8 @@ def missing_overview(conn: sqlite3.Connection) -> Dict[str, Any]:
             "missing_files": int(r["missing_files"] or 0),
             "total_files": int(r["total_files"] or 0),
             "alive_files": int(r["alive_files"] or 0),
+            "online_sources": int(r["online_sources"] or 0),
+            "online_playable": bool(int(r["online_playable"] or 0)),
             "since": r["since"] or "",
             "days": days,
             "offline": offline,
@@ -3179,16 +3409,20 @@ def health_check(conn: sqlite3.Connection) -> Dict[str, Any]:
         conn,
         "SELECT f.movie_id, m.code, m.title, f.path, f.part "
         "FROM movie_files f LEFT JOIN movies m ON m.id=f.movie_id "
-        "WHERE f.missing=1 AND COALESCE(m.archived_at,'') = ''")
+        "WHERE f.missing=1 AND COALESCE(f.kind,'local') <> 'online' "
+        "AND COALESCE(m.archived_at,'') = ''")
+    # 「是否在库」= 有存活本地文件，或登记过在线来源；纯在线条目也要查封面与番号
+    alive = "(EXISTS(SELECT 1 FROM movie_files f WHERE f.movie_id=m.id AND f.missing=0 " \
+            "AND COALESCE(f.kind,'local') <> 'online') " \
+            "OR EXISTS(SELECT 1 FROM movie_sources ms WHERE ms.movie_id=m.id))"
     no_cover = query_all(
         conn,
         "SELECT m.id, m.code, m.title FROM movies m "
-        "WHERE (m.cover IS NULL OR m.cover='') "
-        "AND EXISTS(SELECT 1 FROM movie_files f WHERE f.movie_id=m.id AND f.missing=0)")
+        "WHERE (m.cover IS NULL OR m.cover='') AND " + alive)
     unrecognized = query_all(
         conn,
         "SELECT m.id, m.code, m.title, m.folder FROM movies m "
-        "WHERE m.has_code=0 AND EXISTS(SELECT 1 FROM movie_files f WHERE f.movie_id=m.id AND f.missing=0)")
+        "WHERE m.has_code=0 AND " + alive)
     # 跨影片的"内容完全相同"文件（体检里叫重复影片）。
     # 判定依据是内容指纹 quick_hash 相同，而不是 size 相等——不同文件体积恰好相同
     # 是常态（尤其同一下载站拆出的等大分卷，如 FC2 的 xxx_1 / xxx_2），
@@ -3230,13 +3464,13 @@ def health_check(conn: sqlite3.Connection) -> Dict[str, Any]:
         conn,
         "SELECT m.id, m.code, m.title, COUNT(*) AS parts FROM movies m "
         "JOIN movie_files f ON f.movie_id=m.id AND f.missing=0 "
+        "AND COALESCE(f.kind,'local') <> 'online' "
         "WHERE m.file_count>1 GROUP BY m.id HAVING MAX(f.part) < m.file_count")
     # 占位图封面：文件存在但内容哈希命中已知占位图（如 DMM jppl.jpg）
     placeholder = query_all(
         conn,
         "SELECT m.id, m.code, m.title, m.cover FROM movies m "
-        "WHERE m.cover <> '' "
-        "AND EXISTS(SELECT 1 FROM movie_files f WHERE f.movie_id=m.id AND f.missing=0)")
+        "WHERE m.cover <> '' AND " + alive)
     placeholder = [dict(r) for r in placeholder if cover_is_placeholder(r["cover"])]
     return {
         "missing_files": [dict(r) for r in missing],

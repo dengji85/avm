@@ -111,6 +111,7 @@ def _movie_facts(conn, movie_id: int, cfg: Dict[str, Any]) -> Dict[str, Any]:
     seconds = float(row["runtime"] or 0) * 60
     if seconds <= 0:
         f = query_one(conn, "SELECT path FROM movie_files WHERE movie_id=? AND missing=0 "
+                            "AND COALESCE(kind,'local') <> 'online' "
                             "ORDER BY part LIMIT 1", (movie_id,))
         if f and f["path"] and os.path.isfile(f["path"]):
             seconds = _probe_duration(f["path"], cfg)

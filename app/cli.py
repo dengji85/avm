@@ -167,7 +167,8 @@ def cmd_organize(args) -> int:
         movies = query_all(conn, "SELECT * FROM movies WHERE has_code = 1")
         plan = []
         for m in movies:
-            files = query_all(conn, "SELECT * FROM movie_files WHERE movie_id = ? AND missing = 0", (m["id"],))
+            files = query_all(conn, "SELECT * FROM movie_files WHERE movie_id = ? AND missing = 0 "
+                                    "AND COALESCE(kind,'local') <> 'online'", (m["id"],))
             for f in files:
                 dst = _build_dst(args.template, m, f, args.root)
                 if dst.exists():

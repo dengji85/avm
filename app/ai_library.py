@@ -55,15 +55,16 @@ _TOOL_SYSTEM = (
 )
 
 _FLAGS = ["subtitle", "embedzh", "uncensored", "leak", "hd4k", "vr",
-          "favorite", "watched", "watchlist", "unwatched"]
-_SORTS = ["added_desc", "date_desc", "rating_desc", "play_desc", "year_asc", "size_desc"]
+          "favorite", "watched", "watchlist", "unwatched", "local", "online"]
+_SORTS = ["added_desc", "date_desc", "rating_desc", "play_desc", "year_asc",
+          "size_desc", "available_first", "checked_desc", "sites_desc"]
 
 _TOOLS: List[Dict[str, Any]] = [
     {
         "type": "function",
         "function": {
             "name": "search_movies",
-            "description": "在本地影片库里按条件检索影片（不联网、不写库）",
+            "description": "在影片库里按条件检索影片（含本地文件与在线收藏；不联网、不写库）",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -84,7 +85,14 @@ _TOOLS: List[Dict[str, Any]] = [
                     "year_max": {"type": "integer", "description": "发行年份上限"},
                     "min_rating": {"type": "number", "description": "最低评分"},
                     "flags": {"type": "array", "items": {"type": "string", "enum": _FLAGS},
-                              "description": "结构性筛选"},
+                              "description": "结构性筛选；local=有本地文件，online=登记过在线来源"},
+                    "source_state": {"type": "array",
+                                     "items": {"type": "string",
+                                               "enum": ["local", "hybrid", "online", "page", "empty"]},
+                                     "description": "来源状态：纯本地 / 双源 / 在线可播 / 仅页面可达 / 无来源"},
+                    "site": {"type": "array", "items": {"type": "string"},
+                             "description": "来源站点名（如 JavBus / Metatube），多个默认任一匹配"},
+                    "has_strm": {"type": "boolean", "description": "是否含 .strm 本地指针"},
                     "sort": {"type": "string", "enum": _SORTS},
                     "page_size": {"type": "integer", "description": "返回条数，默认 8"},
                     "why": {"type": "string", "description": "一句中文，说明你把这句话理解成了什么"},
@@ -162,6 +170,17 @@ def _cond_note(c: Dict[str, Any]) -> str:
         parts.append(str(c["year"]))
     if c.get("flags"):
         parts.append(", ".join(c["flags"]))
+    states = c.get("source_state")
+    if states:
+        label = {"local": "纯本地", "hybrid": "双源", "online": "在线可播",
+                 "page": "仅页面可达", "empty": "无来源"}
+        vals = states if isinstance(states, (list, tuple)) else [states]
+        parts.append("来源 " + " / ".join(label.get(str(v), str(v)) for v in vals))
+    if c.get("site"):
+        vals = c["site"] if isinstance(c["site"], (list, tuple)) else [c["site"]]
+        parts.append("站点 " + " / ".join(str(v) for v in vals))
+    if c.get("has_strm"):
+        parts.append("含 .strm 指针")
     like = c.get("like")
     if like:
         vals = like if isinstance(like, (list, tuple)) else [like]
