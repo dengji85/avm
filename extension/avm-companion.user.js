@@ -2,7 +2,7 @@
 // @name         AVM Companion（片匣浏览器接入）
 // @name:en      AVM Companion
 // @namespace    https://github.com/dengji85/avm
-// @version      0.4.7
+// @version      0.5.1
 // @description  把在线观看的影片与真实观看时长同步到本地 AVM 片库；仅在你主动点击后上报，页面正文不上传。
 // @author       AVM
 // @license      MIT
@@ -29,6 +29,10 @@
  */
 (function () {
   'use strict';
+
+  // 本机地址（AVM 自己的页面）不注入：那里没有可入库的第三方影片，
+  // 注入的浮标只会碍事。直接退出，不产生任何日志与 DOM。
+  if (/^(localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\]|::1)$/i.test(location.hostname)) return;
 
   // 版本号唯一来源是 @version（经 GM_info 读取），避免两处不同步
   const AVM_VER = (typeof GM_info !== 'undefined' && GM_info && GM_info.script)
@@ -525,6 +529,18 @@
         <div style="margin-top:8px;opacity:.5;font-size:11px">仅主动点击时上报；不上传正文。断网心跳会排队补报</div>
       </details>`;
     document.body.appendChild(panel);
+    // 点击面板外任意位置关闭：pointerdown 比 click 早，不会与浮标/面板内部
+    // 的点击（textarea 选词、按钮）冲突；浮标自身的点击由浮标逻辑处理。
+    document.addEventListener('pointerdown', (e) => {
+      if (!panel || panel.style.display === 'none') return;
+      const t = e.target;
+      if (!(t instanceof Node)) return;
+      if (panel.contains(t)) return;
+      // 浮标在 shadow 里：contains 查不到，用根节点判断
+      if (dotEl && (t === dotEl || (t.getRootNode && t.getRootNode() === dotEl.getRootNode()))) return;
+      if (hostEl && (t === hostEl || (t.getRootNode && t.getRootNode() === hostEl.getRootNode()))) return;
+      panel.style.display = 'none';
+    });
     const $ = (id) => panel.querySelector('#' + id);
     $('avm-url').value = cfg.baseUrl;
     $('avm-token').value = cfg.token;
@@ -573,6 +589,7 @@
   }
 
   let dotEl = null;
+  let hostEl = null;         // shadow 宿主（fixed 定位与层叠的载体）
   let existing = null;       // { movie_id } —— 当前页面已在库
   let pendingNoCode = false; // 未识别到番号：等用户在面板里确认是否加入
   let suppressClick = false; // 拖动结束后抑制这一次 click
@@ -728,14 +745,19 @@
       if (hit && hit !== dotEl && !dotEl.contains(hit)) {
         coverInfo = ((hit.tagName || '') + ' ' + (hit.className || hit.id || '')).slice(0, 80);
         console.warn('[AVM] 浮标被遮挡：', coverInfo);
-        if (dotEl.style.right !== 'auto') {
-          dotEl.style.right = 'auto';
-          dotEl.style.left = '16px';
-          const r2 = dotEl.getBoundingClientRect();
+        // 用户手动拖过位置就尊重它——自动换位曾与手动拖动打架：
+        // 拖回右下 5 秒后又被搬去左下，看起来就是「浮标又没了」
+        let dragged = false;
+        try { dragged = !!GM_getValue('fab_pos', null); } catch (e) { /* 忽略 */ }
+        if (dragged) return;
+        if (hostEl && hostEl.style.right !== 'auto') {
+          hostEl.style.right = 'auto';
+          hostEl.style.left = '16px';
+          const r2 = hostEl.getBoundingClientRect();
           const hit2 = document.elementFromPoint(r2.left + r2.width / 2, r2.top + r2.height / 2);
-          if (hit2 && hit2 !== dotEl && !dotEl.contains(hit2)) {
-            dotEl.style.left = 'auto';
-            dotEl.style.right = '16px';
+          if (hit2 && hit2 !== dotEl && hit2.getRootNode() === hostEl.shadowRoot) {
+            hostEl.style.left = 'auto';
+            hostEl.style.right = '16px';
             console.warn('[AVM] 左下角也被遮挡，浮标保留在右下');
           } else {
             coverInfo = '';
@@ -769,23 +791,14 @@
   }
 
   /** 浮标拖动：位置记在 GM 存储里，换页/刷新保持 */
-  function makeDraggable(el) {
-    try {
-      const saved = GM_getValue('fab_pos', null);
-      if (saved && typeof saved.x === 'number' && typeof saved.y === 'number') {
-        el.style.left = saved.x + 'px';
-        el.style.top = saved.y + 'px';
-        el.style.right = 'auto';
-        el.style.bottom = 'auto';
-      }
-    } catch (e) { /* 存储不可用 */ }
+  function makeDraggable(fab, host) {
     let drag = null;
     let pressTimer = 0;
-    el.addEventListener('pointerdown', (e) => {
+    fab.addEventListener('pointerdown', (e) => {
       if (e.button !== 0) return;
-      const r = el.getBoundingClientRect();
-      drag = { sx: e.clientX, sy: e.clientY, ox: r.left, oy: r.top, moved: false, longpress: false };
-      el.style.transform = 'scale(.92)';   // 按下立即反馈
+      const hr = host.getBoundingClientRect();
+      drag = { sx: e.clientX, sy: e.clientY, ox: hr.left, oy: hr.top, moved: false, longpress: false };
+      fab.style.transform = 'scale(.92)';   // 按下立即反馈
       pressTimer = setTimeout(() => {
         if (drag && !drag.moved) {
           drag.longpress = true;
@@ -794,9 +807,9 @@
           setTimeout(() => { suppressClick = false; }, 500);
         }
       }, 650);
-      try { el.setPointerCapture(e.pointerId); } catch (err) { /* 忽略 */ }
+      try { fab.setPointerCapture(e.pointerId); } catch (err) { /* 忽略 */ }
     });
-    el.addEventListener('pointermove', (e) => {
+    fab.addEventListener('pointermove', (e) => {
       if (!drag || drag.longpress) return;
       const dx = e.clientX - drag.sx;
       const dy = e.clientY - drag.sy;
@@ -804,10 +817,10 @@
       drag.moved = true;
       const x = Math.min(window.innerWidth - 42, Math.max(4, drag.ox + dx));
       const y = Math.min(window.innerHeight - 42, Math.max(4, drag.oy + dy));
-      el.style.left = x + 'px';
-      el.style.top = y + 'px';
-      el.style.right = 'auto';
-      el.style.bottom = 'auto';
+      host.style.left = x + 'px';
+      host.style.top = y + 'px';
+      host.style.right = 'auto';
+      host.style.bottom = 'auto';
     });
     const end = () => {
       clearTimeout(pressTimer);
@@ -815,15 +828,15 @@
       const moved = drag.moved;
       const held = drag.longpress;
       drag = null;
-      el.style.transform = '';
+      fab.style.transform = '';
       if (held || !moved) return;
       suppressClick = true;
       setTimeout(() => { suppressClick = false; }, 60);
-      const r = el.getBoundingClientRect();
-      try { GM_setValue('fab_pos', { x: Math.round(r.left), y: Math.round(r.top) }); } catch (e) { /* 忽略 */ }
+      const hr = host.getBoundingClientRect();
+      try { GM_setValue('fab_pos', { x: Math.round(hr.left), y: Math.round(hr.top) }); } catch (e) { /* 忽略 */ }
     };
-    el.addEventListener('pointerup', end);
-    el.addEventListener('pointercancel', () => { clearTimeout(pressTimer); drag = null; });
+    fab.addEventListener('pointerup', end);
+    fab.addEventListener('pointercancel', () => { clearTimeout(pressTimer); drag = null; });
   }
 
   let lastAdded = null;   // { source_id, movie_id, at } —— 撤销窗口内可用
@@ -848,41 +861,59 @@
     }
   }
 
-  /** 创建（或重新挂载）浮标：站点脚本有时会清 DOM，需要可重入 */
+  /**
+   * 创建（或重新挂载）浮标：Shadow DOM 隔离。
+   *
+   * 普通 div 会被站点 CSS 渗透（jable 的全局 div 规则 / 遮挡层让浮标
+   * 不可拖动甚至不可见）；shadow 边界 + `all:initial` 让站点样式完全
+   * 无法渗入。宿主常驻 body 末尾——同 z-index 时后插入者在上。
+   */
   function mountFab() {
-    let f = document.getElementById('avm-fab');
-    if (!f) {
-      f = document.createElement('div');
-      f.id = 'avm-fab';
-      f.textContent = 'A';
-      document.body.appendChild(f);
+    let host = document.getElementById('avm-fab-host');
+    if (!host || !host.shadowRoot) {
+      if (!host) {
+        host = document.createElement('div');
+        host.id = 'avm-fab-host';
+        document.body.appendChild(host);
+      }
+      const root = host.attachShadow({ mode: 'open' });
+      root.innerHTML = '<div id="avm-fab">A</div>';
     }
-    dotEl = f;
-    Object.assign(dotEl.style, {
-      position: 'fixed', right: '16px', bottom: '16px',
-      // 2147483647 是 int 上限：站点自己的浮层常用很大 z-index，直接顶到头
-      zIndex: '2147483647',
-      width: '34px', height: '34px', borderRadius: '50%', background: '#6c5ce7',
-      // 白色描边 + 阴影：暗色主题站点（jable 等黑底）上也能一眼看到
-      border: '2px solid #fff', boxShadow: '0 2px 10px rgba(0,0,0,.55)',
-      color: '#fff', textAlign: 'center', lineHeight: '30px', cursor: 'pointer',
-      fontSize: '15px', fontWeight: '700', userSelect: 'none', touchAction: 'none',
-    });
+    // 常驻 body 末尾：同 z-index 时 DOM 顺序靠后者在上，防被后插入元素盖住
+    document.body.appendChild(host);
+    host.style.cssText =
+      'all:initial;position:fixed;right:16px;bottom:16px;z-index:2147483647;' +
+      'width:34px;height:34px;pointer-events:none;background:transparent;';
+    try {
+      const pos = GM_getValue('fab_pos', null);
+      if (pos && typeof pos.x === 'number' && typeof pos.y === 'number') {
+        host.style.right = 'auto';
+        host.style.bottom = 'auto';
+        host.style.left = pos.x + 'px';
+        host.style.top = pos.y + 'px';
+      }
+    } catch (e) { /* 存储不可用 */ }
+    dotEl = host.shadowRoot.getElementById('avm-fab');
+    dotEl.style.cssText =
+      'pointer-events:auto;width:34px;height:34px;border-radius:50%;background:#6c5ce7;' +
+      'border:2px solid #fff;box-shadow:0 2px 10px rgba(0,0,0,.55);color:#fff;' +
+      'text-align:center;line-height:30px;cursor:pointer;font-size:15px;font-weight:700;' +
+      'user-select:none;touch-action:none;';
     loadLastAdded();
     applyFabState();
     refreshVis();
-    if (f.dataset.avmBound !== '1') {
-      f.dataset.avmBound = '1';
-      makeDraggable(f);   // v0.4.2 重构时漏了这行，导致拖动失效
+    if (dotEl.dataset.avmBound !== '1') {
+      dotEl.dataset.avmBound = '1';
+      makeDraggable(dotEl, host);
       // 单击立即执行（图标已说明结果）；右键 / 长按 = 面板
-      f.addEventListener('click', () => {
+      dotEl.addEventListener('click', () => {
         if (suppressClick) return;
         quickAdd();
       });
-      f.addEventListener('contextmenu', (e) => { e.preventDefault(); togglePanel(); });
+      dotEl.addEventListener('contextmenu', (e) => { e.preventDefault(); togglePanel(); });
       // 弱信号页面浮标偏淡，鼠标移上去时恢复不透明（避免被误认为「没启用」）
-      f.addEventListener('mouseenter', () => { if (dotEl) dotEl.style.opacity = '1'; });
-      f.addEventListener('mouseleave', () => refreshVis());
+      dotEl.addEventListener('mouseenter', () => { if (dotEl) dotEl.style.opacity = '1'; });
+      dotEl.addEventListener('mouseleave', () => refreshVis());
     }
   }
 
@@ -924,7 +955,7 @@
     [3, 6, 9].forEach((t) => setTimeout(() => dlog('alive+' + t + 's'), t * 1000));
     // 看门狗：站点脚本或扩展把浮标从 DOM 里删掉时，自动重新挂载
     setInterval(() => {
-      if (isTop && !document.getElementById('avm-fab')) {
+      if (isTop && !document.getElementById('avm-fab-host')) {
         console.warn('[AVM] 浮标被页面移除，已重新挂载');
         try { mountFab(); popFab(); } catch (e) { /* 忽略 */ }
       }
