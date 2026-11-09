@@ -4,9 +4,11 @@
   <b>本地優先 · 隱私安全 · 可自託管</b><br/>
   把硬碟裡命名亂七八糟、散落各處的 AV 收藏，變成一處<b>能檢索、能策展、能回看</b>的私人資料庫。
 </p>
+<p align="center"><sub>本翻譯可能落後於 <a href="README.md">簡體中文版</a>，請以簡中版為準。</sub></p>
+
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-1.11.0-1f6feb.svg"/>
+  <img src="https://img.shields.io/badge/version-1.17.0-1f6feb.svg"/>
   <img src="https://img.shields.io/badge/backend-FastAPI-009688.svg"/>
   <img src="https://img.shields.io/badge/frontend-Vue%203%20%2F%20Vite-42b883.svg"/>
   <img src="https://img.shields.io/badge/database-SQLite-003b57.svg"/>

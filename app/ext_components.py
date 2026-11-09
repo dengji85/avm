@@ -1056,6 +1056,21 @@ def import_bundle(src: str) -> Dict[str, Any]:
     return {"ok": True}
 
 
+def _maybe_remove_uploaded_bundle(src: str) -> None:
+    """后台整合包任务结束后删除上传的临时包，释放 NAS / 小数据卷空间。
+
+    只删 ``ext_root()/_tmp/uploads/`` 里的文件：用户填的服务器路径（可能是
+    NAS 共享目录里的原包）绝不能碰。
+    """
+    try:
+        updir = os.path.abspath(os.path.join(ext_root(), "_tmp", "uploads"))
+        p = os.path.abspath(src)
+        if os.path.commonpath([p, updir]) == updir and os.path.isfile(p):
+            os.remove(p)
+    except (OSError, ValueError):
+        pass
+
+
 def _run_bundle_import(src: str) -> None:
     try:
         result = _do_import_bundle(src)
@@ -1067,6 +1082,8 @@ def _run_bundle_import(src: str) -> None:
     except Exception as e:                               # noqa: BLE001 任务层兜底
         _set(running=False, state="failed", message=str(e)[:300], ended=int(time.time()))
         _log("失败：" + str(e)[:160])
+    finally:
+        _maybe_remove_uploaded_bundle(src)
 
 
 def _do_import_bundle(src: str) -> Dict[str, Any]:

@@ -75,6 +75,24 @@ def ingest_link(payload: Dict[str, Any] = Body(default={})) -> Dict[str, Any]:
     return res
 
 
+@router.post("/ingest/sync")
+def ingest_sync(payload: Dict[str, Any] = Body(default={})) -> Dict[str, Any]:
+    """插件自动续期：只更新已入库来源的播放地址，不新建影片 / 来源。
+
+    仅在该页面已在库时由插件调用；地址没变返回 unchanged，页面不在库返回
+    not_found（绝不建片）。更新成功会排队一次轻量验证回填有效期。
+    """
+    from .. import ingest, stream_verify
+    from ..db import db
+    if not isinstance(payload, dict) or not payload:
+        raise HTTPException(status_code=400, detail="请求内容不能为空")
+    with db() as conn:
+        res = _check(ingest.sync(conn, payload))
+    if res.get("status") == "updated" and ingest.cfg().get("verify_on_link", True):
+        stream_verify.submit_check(int(res["source_id"]))
+    return res
+
+
 @router.post("/ingest/events")
 def ingest_events(payload: Dict[str, Any] = Body(default={})) -> Dict[str, Any]:
     """观看事件：start / heartbeat / pause / end → watch_sessions + watch_progress。"""

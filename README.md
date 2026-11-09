@@ -1,333 +1,204 @@
-<h1 align="center">片匣 · AVM（Adult Video Manager）</h1>
+<h1 align="center">片匣 · AVM</h1>
+
+<p align="center"><b>Adult Video Manager</b> — 本地优先、自托管的 AV 收藏资料库</p>
 
 <p align="center">
-  <a href="README.md">中文（简体）</a> ·
-  <a href="README.zh-TW.md">中文（繁體）</a> ·
-  <a href="README.en.md">English</a> ·
-  <a href="README.ja.md">日本語</a>
+  <a href="README.md">简体中文</a> · <a href="README.zh-TW.md">繁體中文</a> ·
+  <a href="README.en.md">English</a> · <a href="README.ja.md">日本語</a>
 </p>
 
 <p align="center">
-  <b>本地优先 · 隐私安全 · 可自托管 · 技术栈性能优异</b><br/>
-  把硬盘里命名乱七八糟、散落各处的 AV 收藏，变成一处<b>能管理、能刮削、能统计、能分析</b>的私人资料库——<b>不只是存片，更是帮你读懂自己的口味</b>；片单即播、小工具傍身、局域网/移动端随处看。
+  <img src="https://img.shields.io/badge/version-1.17.0-1f6feb" alt="version"/>
+  <img src="https://img.shields.io/badge/Python-3.11-3776ab" alt="Python 3.11"/>
+  <img src="https://img.shields.io/badge/FastAPI-009688" alt="FastAPI"/>
+  <img src="https://img.shields.io/badge/Vue%203%20%2F%20Vite-42b883" alt="Vue 3"/>
+  <img src="https://img.shields.io/badge/SQLite-003b57" alt="SQLite"/>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT"/></a>
+  <a href="https://github.com/dengji85/avm/releases"><img src="https://img.shields.io/github/v/release/dengji85/avm?color=1f6feb" alt="release"/></a>
+  <a href="https://github.com/dengji85/avm/stargazers"><img src="https://img.shields.io/github/stars/dengji85/avm?style=flat" alt="stars"/></a>
 </p>
 
 <p align="center">
-  <b>AVM (Adult Video Manager)</b> — a local-first, privacy-safe media library for your AV collection. It scrapes metadata, deduplicates, analyzes your taste, and turns scattered files into a searchable personal archive you fully own.
-  <br/>▶ <b>See it in 30 seconds — demo below.</b>
+  <img src="docs/assets/avm_影片库.PNG" alt="影片库" width="960"/>
+  <br/><sub>影片库 · 分面筛选 / 卡片墙 / 来源角标（封面为中性占位块）</sub>
 </p>
 
-<p align="center">
-  <img src="https://img.shields.io/badge/version-1.15.1-1f6feb.svg"/>
-  <img src="https://img.shields.io/badge/backend-FastAPI-009688.svg"/>
-  <img src="https://img.shields.io/badge/frontend-Vue%203%20%2F%20Vite-42b883.svg"/>
-  <img src="https://img.shields.io/badge/database-SQLite-003b57.svg"/>
-  <img src="https://img.shields.io/badge/license-MIT-blue.svg"/>
-  <img src="https://img.shields.io/github/stars/dengji85/avm?style=flat&amp;color=1f6feb"/>
-  <img src="https://img.shields.io/github/forks/dengji85/avm?style=flat"/>
-  <img src="https://img.shields.io/github/downloads/dengji85/avm/total?style=flat&amp;color=2ea043"/>
-  <img src="https://img.shields.io/github/last-commit/dengji85/avm?style=flat"/>
-</p>
+把命名混乱、散落各处的收藏，变成一处**能搜、能去重、能刮削、能统计、能播放**的私人资料库。
 
-<p align="center">
-  <a href="#下载与安装">下载</a> ·
-  <a href="#解决的问题">解决的问题</a> ·
-  <a href="#产品理念">产品理念</a> ·
-  <a href="#核心功能">核心功能</a> ·
-  <a href="#为什么选片匣而不是别的工具">为什么选它</a> ·
-  <a href="#v1150-更新亮点">更新亮点</a> ·
-  <a href="#快速开始">快速开始</a>
-</p>
+- **本地优先**：FastAPI + SQLite + Vue 3，单文件 exe 或 Docker 运行，数据全在你自己的机器上，无需账号。
+- **领域适配**：番号归一、多版本归并、素人/无码元数据补齐，不是把通用影视刮削器硬套过来。
+- **按需增强**：AI、语音识别、人脸裁切、浏览器插件全部可选，不装也能用核心功能。
+
+**[目录](#目录)** · [特性](#特性) · [快速开始](#快速开始) · [配置](#配置) · [插件与扩展](#插件与扩展) · [开发](#开发) · [文档](#文档) · [许可证](#许可证)
 
 ---
 
-> **一句话**：把散落硬盘的 AV 文件，扫成**能搜、能去重、能看女优资料、能网页即播**的私人资料库——全程本地运行，数据全在你自己手里。
+## 特性
 
----
+| 领域 | 能力 |
+| --- | --- |
+| **建库识别** | 递归扫描、番号归一（`IRO061C` → `IRO-061`）、字幕/无码/VR/分卷标记识别；多版本归并 + 内容级去重 |
+| **元数据** | 可插拔刮削源（JavBus / JavDB / AV-Wiki / FC2 / 本地 NFO / 自定义规则）跨源回退；封面、竖版海报、女优资料、NFO 双向归档 |
+| **检索策展** | 分面筛选、全文搜索、女优墙、标签云、智能片单、相似推荐、键盘流操作 |
+| **播放观看** | 网页播放本地文件 / `.strm` / HLS；续播、播放队列、系统播放器监控、年度回顾；字幕匹配、AI 翻译与时间轴校准 |
+| **在线来源** | 来源管理与失效自愈、浏览器插件一键入库、观看心跳与断网补报、文本批量导入番号、统一代理出口 |
+| **维护整理** | 数据健康体检、来源体检、定时增量扫描、NFO/CSV 导出 |
+| **访问隐私** | 令牌 + HttpOnly 会话、TOTP、隐私锁、局域网扫码、反代鉴权；默认不联网上报，四语言界面 |
 
-## 📦 下载与安装
-
-<p align="center">
-  <a href="https://github.com/dengji85/avm/releases/latest">
-    <img src="https://img.shields.io/github/v/release/dengji85/avm?label=下载%20最新版&color=1f6feb" alt="GitHub Release"/>
-  </a>
-</p>
-
-**方式一：Windows 免安装单文件 exe（推荐）**
-
-1. 到 **[Releases](https://github.com/dengji85/avm/releases)** 下载单个 `AVM-<版本号>.exe`（如 `AVM-1.15.0.exe`）。同页 `ext-bundle` Release 里的 zip 是**可选扩展组件**的离线安装包，由程序内「安装 / 导入整合包」使用，无需手动处理。
-2. 放到任意目录（如 `D:\AVM\`），双击启动，自动打开浏览器进入 Web UI。
-3. 升级时**把新 `AVM-*.exe` 放到同目录、删掉旧 exe 即可**——数据（`data/` 库/封面/配置）在同目录自动保留，无需手动替换前端资源。
-4. 备份迁移：`AVM-*.exe` 与 `data/` 一起拷贝即可。
-
-**方式二：Docker / NAS 部署（群晖 · 威联通 · Unraid · TrueNAS）**
-
-镜像由 GitHub Actions 自动构建并推送到 GHCR（`linux/amd64` + `linux/arm64`），NAS 上**无需编译**：
-
-```bash
-docker run -d --name avm \
-  -p 8770:8770 \
-  -e TZ=Asia/Shanghai \
-  -e PUID=1000 -e PGID=1000 \
-  -v /path/to/data:/data \
-  -v /path/to/media:/media:ro \
-  --shm-size=256m \
-  --restart unless-stopped \
-  ghcr.io/dengji85/avm:latest
-```
-
-或使用仓库根目录提供的 `docker-compose.yml`：
-
-```bash
-docker compose pull && docker compose up -d
-```
-
-**镜像标签怎么选**：
-
-| 标签 | 含义 | 适合 |
-| --- | --- | --- |
-| `latest` | 最近一次正式发布，稳定 | 日常使用（推荐） |
-| `latest-full` | 全量插件版：内置语音对白提取依赖（仅 x86_64，模型另放挂载卷） | 想在 NAS 上跑「提取对白 → AI 理解剧情」 |
-| `main` | `main` 分支最新构建，含尚未正式发布的修复 | 想第一时间验证新修复、反馈问题 |
-| `1.15.0` | 固定版本，不随更新变化 | 需要版本可控 |
-
-> 说明：`latest` 只在发布新版本时更新，**不会被 `main` 的构建覆盖**；想提前拿到修复就拉 `main`。
-
-* **首次访问需要登录**：令牌写在容器内 `data/access_token.txt`（`docker compose exec avm cat /data/access_token.txt`），也可用环境变量 `AVM_ACCESS_TOKEN` 预设；打开页面粘贴令牌即可登录，登录后可在「设置 → 访问」退出登录 / 管理会话；
-* 媒体库在「设置 → 媒体库」里填**容器内路径**（如 `/media`）；
-* 数据（配置 / 数据库 / 封面 / 头像 / 预览）全在 `/data` 卷，升级只换镜像、库自动迁移；
-* 镜像默认内置 `ffmpeg`（抽帧/预览）与 `chromium`（av-wiki 抓取）；自建时可用 `--build-arg INSTALL_CHROMIUM=0` 精简；
-* 容器内无桌面环境，「用系统播放器 / 在文件夹中显示」会自动隐藏，删除文件默认「仅移出媒体库」。
-
-**⬆️ 升级（数据都在 `data/`，自动迁移，无需重建库）**：
-
-* **Windows**：下载新 `AVM-*.exe` 放到原目录替换旧 exe，重启即可；
-* **Docker**：`docker compose pull && docker compose up -d`（数据在 `/data` 卷，原地保留）；
-* 用 `latest-full` 的同样 `pull` 升级，模型在 `/data/models` 不受影响；
-* 详细迁移 / 回滚见 **[docs/升级指南.md](docs/升级指南.md)**。
-
-> 完整说明（NAS 各平台、环境变量、反向代理、升级、FAQ）见 **[docs/Docker部署.md](docs/Docker部署.md)**；反代部署下的鉴权与会话安全必读 **[docs/安全与隐私设计.md](docs/安全与隐私设计.md)**。
-
----
-
-## 💡 产品理念
-
-> **片匣不只是把片子存起来，而是帮你认识自己的喜好——从「囤片」到「懂片」，再顺手「看好片」。**
-
-我们把这条链路拆成六步，层层递进：
-
-1. **管理** —— 本地、隐私、零账号，上千部影片井井有条，番号归一、去重归并，不再靠记忆翻找。
-2. **刮削** —— 多源自动补全元数据（封面、女优、类型、系列、评分、简介），把一堆文件变成「有结构的数据」。
-3. **统计 + 分析** —— 收藏沉淀为可量化的**个人观影画像**：类型分布、女优偏好、时长与年份趋势、看没看完。
-4. **片单 + 喜好洞察** —— 系统片单（播放最多 / 评分最高 / 群星荟萃 / 最近入库）与智能片单（多维条件自动聚合）不只是「分类」，更是**你口味的可视化**：一眼看见「原来我偏爱这类题材、这位女优、这种节奏」。
-5. **更好的观看体验** —— 片单即点即播、续播进度自动记住；局域网/移动端随处看，手机扫码进、平板接着播，下饭不挑设备。
-6. **小工具傍身** —— 内容级去重、大文件/劣质片检查、字幕匹配、健康体检，把「整理收藏」变成一键小事。
-
-**为什么快而稳**：前端 Vue 3 + 后端 FastAPI（异步 ASGI）+ SQLite 轻量存储，**技术栈性能优异**——扫描、刮削、检索都在本地异步跑，千部规模依旧秒开秒搜，不卡顿。
-
-**关键转化**：数据是你的，分析也是为你自己服务的——**越用，越懂你，越好看。**
-
----
-
-## 🧩 解决的问题
-
-- **找不到**：上千部命名混乱的文件，靠记忆翻——番号自动归一 + 分面筛选 + 语义搜索，秒定位。
-- **重复多**：同一部无码/有码/中字躺了七八份——内容级去重 + 多版本归并，只留最佳版。
-- **刮不全**：封面缺失、素人片没封面、刮削失败——多源可插拔 + 跨源回退，有番号素人片也补齐。
-- **记不住**：上次那部女主是老师的、看到哪了——AI 语义搜索 + 零配置观看进度，下饭不纠结。
-- **怕丢失**：怕平台关站、怕隐私泄露——全程本地、无账号、不联网上报，数据拷走即用。
-
-> **全程本地运行，默认不联网上报。AI 也走你自己的端点，密钥只发给你配的地址——你的收藏，始终是你自己的。**
-
----
-
-## ✨ 核心功能
-
-<p align="center">
-  <img src="docs/assets/avm_影片库.PNG" alt="AVM 系统一览" width="1100"/>
-</p>
-
-<p align="center">
-<table>
-  <tr>
-    <td align="center"><img src="docs/assets/avm_影片库.PNG" alt="影片库" width="300"/><br/><sub>影片库：分面筛选 · 卡片墙 · 排序 · 多选整理</sub></td>
-    <td align="center"><img src="docs/assets/avm_片单.PNG" alt="片单" width="300"/><br/><sub>片单：系统片单 / 智能片单，即点即播</sub></td>
-    <td align="center"><img src="docs/assets/avm_播放队列.PNG" alt="播放队列" width="300"/><br/><sub>播放队列：连续播放 · 顺序/乱序 · 循环 · 进度</sub></td>
-  </tr>
-</table>
-</p>
-
-- **🗂 自动扫描建库**：递归扫描、剥离站点噪声、跳过 sample/预告；支持自动嗅探同目录图片作本地封面。
-- **🔍 野路子番号识别**：`IRO061C`/`SONE-760CH`/`300MAAN-123` 归一为 `IRO-061`/`SONE-760`，自动识别字幕/无码/VR/4K/分卷。
-- **🧹 多版本归并 + 内容去重**：无码/有码/中字归同一部；按大小+内容哈希识别精确重复，分段 `-cd1`/`(1)`/`-a` 识别为合集绝不误删。
-- **🖼 元数据刮削**：可插拔数据源（JavBus / JavDB / AV-Wiki / 本地 `.nfo` / 自定义 JSON·网页规则），补齐封面、女优、类型、系列、评分、简介；支持手动补与 NFO 双向归档。
-- **🤖 可选 AI 增强**：兼容任意 OpenAI 协议端点（云端 Key 或本地 Ollama 免 Key），未启用自动降级。AI 助手悬浮球随处唤起：自然语言找片、写简介/标签、字幕翻译、剧情问答（标注时间依据）、**问库**（口味画像 / 观看统计 / 库健康——统计在本机执行，模型只解析意图，库数据不出本机）。
-- **🌐 网络串流（`.strm`）**：入库 Emby / Jellyfin / OpenList 的 `.strm`，网页直接播放直链与 HLS；直连优先、遇防盗链自动走服务端代理，观看时长照常统计。
-- **🎬 网页内播放 + 观看监控**：内置播放器网页串流即点即看，也能监控 VLC/PotPlayer/mpv 自动记进度；续播、相似推荐、「我的观影」偏好分析一应俱全。
-- **🩺 数据健康体检**：六类媒体问题 + 四类劣质片筛查，一键保留最佳版、清理冗余。
-- **🎴 画廊策展**：卡片墙/女优墙/标签云/相似推荐；智能片单与合集按类型·女优·系列+状态多选（AND/OR）自动聚合，内置「播放最多/评分最高/群星荟萃/最近入库」系统片单。
-- **🧑‍🎤 女优资料与管理**：女优墙一览全部女优；详情含维基百科整篇简介 + gfriends 头像（可看大图）；支持关注、收藏、合并重名、重命名，并从影片详情以弹框形式查看不丢当前页。
-- **👆 滑动刷片**：卡片式左右滑——想看 / 跳过 / 收藏 / 评分 / 撤销，支持随机、未看、未评分等模式，随手整理口味。
-- **📅 年度回顾**：基于观看与收藏数据生成年度观影报告。
-- **💬 字幕匹配**：浏览器选文件上传，按番号对齐重命名，播放器打开即加载。
-- **🔌 可插拔插件**：女优资料（维基百科 / gfriends 头像）等以插件形式挂载，设置页统一开关，架构可扩展。
-- **📡 手机访问**：局域网扫码即登录（一次性二维码，5 分钟失效），统一「访问令牌 + 访问保护」一套模型；附防火墙放行提示（`edge=yes` 边缘穿越）。
-- **⏱ 定时自动扫描**：新片按周期自动增量入库。
-
----
-
-## 🆚 为什么选片匣而不是别的工具
-
-市面方案大致两类：**通用媒体刮削器**（TinyMediaManager、MediaElch、XBVR 等——影视为主，AV 只是勉强兼容）和**各种 JAV 小脚本**（能力单一、无界面）。片匣是**专为 AV 收藏做领域适配的一站式本地资料库**。
-
-| 你真正在乎的 | 通用刮削器 | 自建脚本 | **片匣 AVM** |
-| --- | --- | --- | --- |
-| **野路子番号认得出？** | 通常只认规范命名 | 单源查号，无归一化 | 专用番号解析，归一化 + 标记识别 |
-| **同一部不再躺七八份？** | 多版本需手动归并 | 基本不支持 | 自动归并 + 内容级去重，分段不误判 |
-| **AV 元数据准？** | 对 AV 编目偏弱、封面易错 | 依赖单站，挂了即空 | 多源可插拔 + 跨源回退，有番号素人片也补封面 |
-| **强反爬源（AV-Wiki）？** | 不涉及 | 需手动养浏览器 | 内置 CDP 抓取，常驻 headless Chrome 自动绕过验证页（需本机已装 Chrome，否则自动回退普通请求） |
-| **以「作品」而非「文件夹」策展？** | 以文件夹为中心 | 只有列表 | 女优墙 / 标签云 / 智能片单 / 相似推荐 |
-| **中断能续播？** | 需播放器插件 | 无 | 网页内串流即看，并监控任意系统播放器自动记进度，随时续播 |
-| **库脏了能一键看清？** | 基本无 | 无 | 六类体检 + 四类劣质片筛查，一键清理 |
-| **AI 语义搜索？** | 多数无 | 无 | 可选，兼容任意 OpenAI 端点 / 本地 Ollama |
-| **隐私 & 部署？** | 桌面 GUI / 常驻服务 | 散装脚本 | 纯本地 Web、无账号、单命令打包免安装 exe |
-
-> **简言之：它不是又一个「能放视频的网页」，而是为 AV 收藏这个特殊领域做了大量领域适配（番号、去重、素人、观看回归、体检）的本地资料库。**
-
----
-
-## 🌟 v1.15.0 更新亮点
-
-- **🔊 提取对白**：内置语音识别（Whisper）从影片提取对白——没有字幕的片也能生成简介、回答剧情问题。
-- **🌐 AI 字幕翻译**：内嵌 / 外挂字幕译成简 / 繁 / 英（可双语）；女优名、系列名用术语表固定译法。
-- **📝 AI 总结剧情**：按字幕（有对白按对白）生成简介并标注依据；支持批量处理，可中途取消。
-- **🖥 网页播放外挂字幕**：同目录字幕登记后播放器直接选用，不必依赖系统播放器。
-- **📤 导出到媒体库**：NFO + 封面写给 Emby / Jellyfin / Kodi（维护页工具，后台任务、可取消）。
-- **✨ AI 助手**：自然语言找片、问库统计、联网查资料（可选，默认不联网）。
-
-完整变更见 **[`CHANGELOG.md`](CHANGELOG.md)**。
-
----
-
-## 👋 首次打开会看到什么
-
-1. 程序会自动打开浏览器；如果没自动打开，手动访问 `http://127.0.0.1:8770`（Docker 用宿主机 IP + 映射端口）。
-2. 首次访问需要**访问令牌**：桌面版在 `data/access_token.txt`，容器版用 `docker compose exec avm cat /data/access_token.txt`；登录页里也有「令牌在哪」指引。
-3. 首次会弹出 **3 步向导**：选语言 → 添加影片目录 → 选「想先做成什么」。容器里填**容器内路径**（如 `/media`），桌面版可直接用「浏览」选文件夹。
-4. 点「保存并开始扫描」后，向导会等扫描结束并告诉你**找到了几部影片**；如果一部都没扫到，会直接列出排查项（目录、100MB 最小体积、扩展名、被跳过的关键字），不会把你丢进空白页面。
-5. 点「稍后设置」也没关系：只要库还是空的，首页就会显示**起步清单**；右上角「? 上手指南」可以随时重开向导、查看常见问题，设置页还能切成「只看基础设置」。
-6. 预览图、补封面、播放转封装需要 **ffmpeg**，exe 版不内置；向导检测到缺失会提示，到「设置 → 扩展组件」一键安装即可。
-
----
-
-## 🚀 快速开始
-
-### 源码运行（开发）
-
-```bash
-pip install -r requirements.txt
-python run.py serve            # 后端 http://127.0.0.1:8770
-cd web_src && npm install && npm run dev   # 前端 http://localhost:5173
-```
-
-### 打包为免安装单文件 exe
-
-```bash
-cd web_src && npm run build
-python build.py                # 生成单文件 dist/AVM.exe（已内嵌前端）
-```
-
----
-
-## 🤖 AI 增强使用教程（可选）
-
-> AI 走你自己配置的端点（云端 Key 或本地 Ollama 免 Key），未启用时相关功能自动降级为规则 / 统计版，不影响其它功能。配置入口：**AI 中心**（模型 / 提示词 / 调用记录 / 术语表）。
-
-### AI 助手（右下角 ✨ 悬浮球）
-
-任何页面点悬浮球唤起；打开某部影片详情后，助手自动带上该片的上下文。
-
-- **影片模式**（有上下文）：AI 写简介（有字幕按字幕总结，没有按元数据）、标签建议、字幕翻译、剧情问答（回答标注 `[分:秒]` 依据，可点击跳播）、相似推荐。
-- **库模式**（无上下文）：问整个收藏——
-  - **自然语言找片**：「小峰由莉的高分片」「S1 的古装」→ 解析成条件 → 卡片结果直接点开；
-  - **问库**：「我最常看哪类片」「看了多少部」「多少部还没简介」「磁盘还剩多少」→ 统计在本机执行，**模型只负责理解问题，库数据不出本机**；
-  - **今晚看什么**：按观看历史的口味加权推荐，不花 token。
-- **隐私**：意图与结果都可在「AI 中心 → 调用记录」查看并清空；「AI 解读」（把统计组织成一段话）默认关闭，开启后云端模型收到的也只有聚合数字，本地 Ollama 模型自动全量。
-
-### 扩展组件（设置 → 扩展组件）
-
-按需安装，全程图形界面，不用敲命令行。各组件也可在 **[ext-bundle 离线资源](https://github.com/dengji85/avm/releases/tag/ext-bundle)** 一次下载，导入装齐（适合网络慢或离线机器）：
-
-1. **FFmpeg**（约 100MB）：封面抽帧、预览图、内嵌字幕探测、浏览器播放转封装都依赖它 → 一键安装。
-2. **人脸定位**（运行库约 54MB）：竖版海报**智能裁切**——横版封面裁 2:3 自动对准人物；装好后到 设置 → 封面 把海报策略选为「智能裁切」。
-3. **语音识别**（组件约 170MB + 模型 small 约 460MB）：两样装好 → 打开影片详情「提取对白」→ AI 依据对白理解剧情。
-4. **MetaTube**（可选）：补充 FC2 / 无码 / 素人刮削源，装后在 设置 → 刮削数据源 启用。
-5. 装不上 / 不想联网：在 ext-bundle 下载整合包，扩展组件页「导入整合包」一次装齐；单组件也可「手动导入」。Docker 镜像已预装 FFmpeg。
-
-按平台详细教程（Windows 便携版 / 源码 / Docker NAS / 离线内网）见 **[docs/扩展组件手册.md](docs/扩展组件手册.md)**。
-
----
-
-## 🖼 更多界面
+> AI 功能兼容任意 OpenAI 协议端点或本地 Ollama，**未启用自动降级**，库数据不因 AI 外发。
 
 <details>
-<summary><b>展开模块截图</b>（数据健康 · 统计 · 详情）</summary>
+<summary><b>更多截图</b>（片单 · 播放队列 · 详情 · 统计 · 健康体检）</summary>
 
-<br/>
-
-<p align="center">
-  <img src="docs/assets/readme_health.png" alt="数据健康" width="900"/>
-  <br/><sub>数据健康：六类体检 + 四类劣质片筛查</sub>
-</p>
-
-<p align="center">
-  <img src="docs/assets/readme_stats.png" alt="统计" width="900"/>
-  <br/><sub>统计：存储 / 影片数 / 时长 / 已看占比 + 年份趋势 + 标签云 + 女优榜</sub>
-</p>
-
-<p align="center">
-  <img src="docs/assets/avm详情.PNG" alt="详情抽屉" width="680"/>
-  <br/><sub>详情抽屉：封面 + 续播 + AI 简介 + 相似推荐</sub>
-</p>
+<table><tr>
+<td align="center"><img src="docs/assets/avm_片单.PNG" width="280"/><br/><sub>片单</sub></td>
+<td align="center"><img src="docs/assets/avm_播放队列.PNG" width="280"/><br/><sub>播放队列</sub></td>
+<td align="center"><img src="docs/assets/avm详情.PNG" width="280"/><br/><sub>详情抽屉</sub></td>
+</tr></table>
+<p align="center"><img src="docs/assets/readme_stats.png" width="760"/><br/><sub>统计</sub></p>
+<p align="center"><img src="docs/assets/readme_health.png" width="760"/><br/><sub>数据健康体检</sub></p>
 
 </details>
 
-> 截图中封面区域为中性占位块，不代表真实内容；真实封面由你本地元数据决定。
-
 ---
 
-## 🔒 隐私与合规
+## 快速开始
 
-- 所有收藏数据均在本地，**默认不联网上报**。
-- 联网仅发生在：你启用的数据源、以及你自行配置的 AI 端点。
-- 请仅用于管理你**合法持有**的本地文件，并遵守所在地区法律法规与数据源站点服务条款。
-
----
-
-## 🛠 技术栈
-
-| 层 | 技术 |
+| 部署方式 | 要求 |
 | --- | --- |
-| 后端 | Python · FastAPI · SQLite |
-| 前端 | Vue 3 · Vite · 原生 CSS 变量主题 |
-| 抓取 | Chrome DevTools Protocol（headless Chrome）· 多源适配器 |
-| 打包 | PyInstaller · npm run build |
+| Windows 单文件 exe | Windows 10/11 x64；无需 Python / Node |
+| Docker / NAS | `linux/amd64`、`linux/arm64`（full 仅 amd64），≥1GB 内存，建议 `--shm-size=256m` |
+| 源码运行 | **Python 3.11+**、**Node 20+** |
 
-## 📈 项目数据
+### ① Windows 单文件（最省事）
 
-<p align="center">
-  <a href="https://star-history.com/#dengji85/avm&amp;Date">
-    <img src="https://api.star-history.com/svg?repos=dengji85/avm&amp;type=Date" alt="Star History" width="640"/>
-  </a>
-</p>
+从 **[Releases](https://github.com/dengji85/avm/releases/latest)** 下载 `AVM-1.17.0.exe` → 放到任意目录双击启动 → 用 `data/access_token.txt` 里的令牌登录。升级只需替换 exe，`data/` 原地保留。
 
-- **Star 增长曲线**：由 [star-history.com](https://star-history.com) 依据 GitHub 公开 API 绘制
-- **安装包下载量**：GitHub Releases 的累计下载次数（上方 Downloads 徽章）
+### ② Docker / NAS（推荐常驻）
 
-## 📄 许可证
+```bash
+docker run -d --name avm \
+  -p 8770:8770 -e TZ=Asia/Shanghai -e PUID=1000 -e PGID=1000 \
+  -v /path/to/data:/data -v /path/to/media:/media:ro \
+  --shm-size=256m --restart unless-stopped \
+  ghcr.io/dengji85/avm:latest
+```
 
-MIT —— 仅供个人学习与管理自用收藏。
+也可直接用 [`docker-compose.yml`](docker-compose.yml)：`docker compose pull && docker compose up -d`。
+镜像标签：`latest`（稳定）· `latest-full`（含语音依赖，仅 amd64）· `main`（最新构建）· `1.17.0`（固定版本）。
+首次令牌：`docker compose exec avm cat /data/access_token.txt`；媒体目录填**容器内路径**（如 `/media`）。详见 [Docker 部署指南](docs/Docker部署.md)。
+
+### ③ 源码运行（开发）
+
+```bash
+git clone https://github.com/dengji85/avm.git && cd avm
+pip install -r requirements.txt
+cd web_src && npm install && npm run build && cd ..
+python run.py serve                       # http://127.0.0.1:8770
+```
+
+热更新开发：后端 `python run.py serve --reload --no-browser`（8770），前端 `cd web_src && npm run dev`（5173，`/api` 自动代理）。
+
+### 首次使用
+
+打开 `http://127.0.0.1:8770` → 粘贴 `data/access_token.txt` 令牌 → 跟随 3 步向导（语言 / 影片目录 / 目标）→ 自动扫描并报告找到多少部。抽帧与转封装需要 FFmpeg（exe 版不内置），到「设置 → 扩展组件」安装即可。详见 [使用手册](docs/使用手册.md)。
 
 ---
 
-完整使用说明见 **[`docs/使用手册.md`](docs/使用手册.md)**，开发文档见 **[`docs/开发文档.md`](docs/开发文档.md)**，升级迁移见 **[`docs/升级指南.md`](docs/升级指南.md)**，安全与隐私（反代鉴权、会话、防窥）见 **[`docs/安全与隐私设计.md`](docs/安全与隐私设计.md)**，更新历史见 **[`CHANGELOG.md`](CHANGELOG.md)**。
+## 配置
+
+运行时数据集中在一处，整体拷贝即备份（Docker 对应 `/data` 卷）：
+
+```
+data/
+├── library.db          SQLite 主库
+├── config.json         配置（设置页写入，新版本自动补默认值）
+├── access_token.txt    访问令牌（0600）
+├── covers/             封面 / 海报 / 头像
+└── ext/packages/       扩展组件离线包目录
+```
+
+| 环境变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `AVM_DATA_DIR` | `./data`（容器 `/data`） | 数据目录 |
+| `AVM_HOST` / `AVM_PORT` | `127.0.0.1` / `8770`（容器 `0.0.0.0`） | 监听地址 |
+| `AVM_ACCESS_TOKEN` | 启动时随机生成 | 预设访问令牌 |
+| `AVM_PUBLIC_URL` | 空 | 反代 / 局域网对外地址（影响扫码） |
+| `PUID` / `PGID` / `TZ` | `1000` / `1000` / 系统 | 容器属主与时区 |
+| `HTTP_PROXY` / `HTTPS_PROXY` | 空 | 容器不继承宿主代理，需要时显式声明 |
+
+主要配置段：`network`（统一代理）、`stream`、`ingest`、`ai`、`scraper`、`cover`、`server`、`privacy`。反向代理部署请先读 [安全与隐私设计](docs/安全与隐私设计.md)。
+
+**升级 / 备份**：exe 换文件、Docker 换镜像即可，数据库自动迁移；备份 = 停止服务后拷贝整个 `data/`。详见 [升级指南](docs/升级指南.md)。
+
+---
+
+## 插件与扩展
+
+**[AVM Companion](extension/avm-companion.user.js)**（`v0.5.1`，**版本独立于主程序**）是 Tampermonkey / Violentmonkey 用户脚本：影片页一键入库、上报真实观看时长、断网补报。安装脚本 → 在 AVM「设置 → 浏览器接入」复制专用令牌 → 播放几秒后点浮标。只在**主动点击后**上报番号、标题、页面地址与播放地址，不上传正文 / Cookie / DOM；本机地址不注入。协议见 [插件设计文档](docs/浏览器插件与在线资源设计.md)。
+
+**可选扩展组件**：FFmpeg（抽帧 / 转封装）、人脸定位（海报智能裁切）、语音识别 + 模型（提取对白）、MetaTube（补充刮削源）。
+离线安装推荐：把 `.zip` 放进 `data/ext/packages/`，在「设置 → 扩展组件 → 手动导入」下拉选中即可（零上传）；NAS 可指定共享目录。详见 [扩展组件手册](docs/扩展组件手册.md)。
+
+## 项目结构
+
+```
+app/              FastAPI 后端（api.py / routers / store.py / db.py / config.py）
+  providers/      可插拔刮削源      ai_*.py / agent.py   可选 AI 能力
+  ingest.py       浏览器接入        images.py            封面与海报
+web_src/src/      Vue 3 前端（views / components / i18n 四语言）
+web_dist/         前端构建产物      extension/           浏览器用户脚本
+docs/             使用 / 部署 / 开发 / 安全文档     tools/   离线包打包脚本
+run.py / build.py CLI 入口 / PyInstaller 打包
+```
+
+**技术栈**：Python 3.11 · FastAPI · Uvicorn · SQLite / Vue 3 · Vite 4 · video.js / requests · BeautifulSoup · 可选 CDP / PyInstaller · Docker 多架构镜像。
+
+---
+
+## 开发
+
+```bash
+python -m compileall -q app                                        # 语法检查
+python -c "from app.main import app; print(len(app.openapi()['paths']))"   # 路由干跑
+cd web_src && npm run build                                       # 前端构建
+python run.py scan --full / dedupe / stats / export / organize / mcp / ai-check / web-check
+python build.py                                                   # → dist/AVM-1.17.0.exe
+```
+
+> 项目**目前没有单元测试框架**，CI 只做多架构镜像与 Release 构建；正确性依赖编译检查、OpenAPI 干跑、前端构建与真实浏览器验证。开发约定见 [AGENTS.md](AGENTS.md) 与 [开发文档](docs/开发文档.md)。
+
+## 文档
+
+| 使用 | 部署与运维 | 设计与开发 |
+| --- | --- | --- |
+| [使用手册](docs/使用手册.md) | [Docker 部署](docs/Docker部署.md) | [开发文档](docs/开发文档.md) · [AGENTS.md](AGENTS.md) |
+| [扩展组件手册](docs/扩展组件手册.md) | [升级指南](docs/升级指南.md) | [安全与隐私设计](docs/安全与隐私设计.md) |
+| [常见问题见下方](#常见问题) | [打包指南](docs/打包指南.md) | [AI 能力设计](docs/AI能力设计.md) · [插件设计](docs/浏览器插件与在线资源设计.md) · [CHANGELOG](CHANGELOG.md) |
+
+## 隐私与安全
+
+数据全部本地保存，**默认不联网上报**；联网只发生在你启用的数据源、AI 端点与插件主动入库时。令牌本地随机生成，会话为 HttpOnly Cookie，支持 TOTP、可信设备、隐私锁与登录审计。
+发现安全问题请**不要开公开 Issue**，通过 GitHub 私密安全公告或私信维护者报告。请仅用于管理**合法持有**的本地文件，并遵守当地法律与数据源条款。
+
+## 常见问题
+
+| 问题 | 处理 |
+| --- | --- |
+| 扫不到影片 | 检查目录、100MB 最小体积、扩展名与忽略关键词；向导会列出排查项 |
+| 令牌在哪 | 桌面版 `data/access_token.txt`；容器 `docker compose exec avm cat /data/access_token.txt` |
+| Docker 填哪个路径 | 一律填**容器内**路径（如 `/media`），并挂载宿主目录 |
+| 封面糊 / 无预览图 | 安装 FFmpeg；过小的源图会回退到清晰的裁切版本 |
+| 播放 403 / 黑屏 | 看「来源体检」的原因：Cloudflare 硬阻断需换出口节点或回源站 |
+| 前端改了看不到 | 强制刷新（Ctrl+F5）；开发时用 `http://localhost:5173` 热更新 |
+
+---
+
+## 许可证
+
+[MIT](LICENSE) © dengji85 — 仅供个人学习与管理自用收藏；请遵守当地法律与数据源条款。
+多语言 README 更新可能滞后，**以简体中文版为准**。
+
+## 致谢
+
+[FastAPI](https://fastapi.tiangolo.com/) · [Vue.js](https://vuejs.org/) · [Vite](https://vitejs.dev/) · [video.js](https://videojs.com/) · [Pillow](https://python-pillow.org/) · [faster-whisper](https://github.com/SYSTRAN/faster-whisper) · [SQLite](https://sqlite.org/) · [PyInstaller](https://pyinstaller.org/) 及所有数据源与头像项目的维护者。

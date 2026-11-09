@@ -13,6 +13,8 @@
 """
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
+
 import html
 import ipaddress
 import re
@@ -328,7 +330,10 @@ def probe(url: str, headers: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
     if not res["ok"] or res["status"] >= 400:
         note = res["note"] or _block_note(res)
         soft = res["status"] in (0, 401, 403, 410, 429)
-        return {"status": "stale" if soft else "invalid", "note": note, "hls": hls}
+        # 410 Gone 是签名地址「明确过期」：日常体检仍按软错误保留来源
+        # （不判死、等重试），但续期流程要靠 gone 标记去重新取地址。
+        return {"status": "stale" if soft else "invalid", "note": note, "hls": hls,
+                "http": int(res["status"] or 0), "gone": int(res["status"] or 0) == 410}
     ctype = str(res["headers"].get("content-type") or "").lower()
     text = res["text"]
     if "html" in ctype or text.lstrip().lower().startswith(("<!doctype html", "<html")):
@@ -440,7 +445,9 @@ def refresh_source(source_id: int, play_url: str = "", page_url: str = "") -> Di
 
     if not new_url and old:
         res = probe(old, upstream_headers(old, source_id=source_id))
-        if res["status"] in ("valid", "stale"):
+        # 410（签名过期）不能当成「地址还能用」：必须继续走下面的页面重新提取
+        gone = bool(res.get("gone")) or "HTTP 410" in str(res.get("note") or "")
+        if res["status"] in ("valid", "stale") and not gone:
             # 403 等只是「需要防盗链头」，不是死链：保留地址、标待验证，
             # 别把播放器还能用的来源判成失效。
             soft = res["status"] == "stale"
@@ -465,6 +472,11 @@ def refresh_source(source_id: int, play_url: str = "", page_url: str = "") -> Di
         return {"ok": True, "refreshed": True, "note": note or "已重新获取播放地址", **(out or {})}
 
     msg = note or "未能重新获取播放地址，请手动填写新地址或配置 Referer"
+    # 源站页面要浏览器会话 / 被 CF 挡时服务端拿不到新签名地址：给出能走通的路径，
+    # 而不是让用户反复点「续期」。浏览器插件重新捕获后点「立即加入片库」会更新来源。
+    if not new_url and ("410" in msg or "403" in msg or "Cloudflare" in msg or not msg):
+        msg += ("；源站页面可能需要浏览器会话，请用浏览器插件重新打开该片播放几秒，"
+                "在插件面板点「立即加入片库」更新播放地址，或手动填写新地址")
     with db() as conn:
         _apply(conn, source_id, "stale", msg)
     return {"ok": False, "message": msg}
@@ -580,6 +592,62 @@ def ensure_fresh(conn, movie_id: int) -> Dict[str, Any]:
 def schedule_refresh(source_id: int) -> None:
     """调用方事务提交后再排队续期，避免短任务抢占未提交的写事务。"""
     submit_task(refresh_source, int(source_id), "", "")
+
+
+# 播放前的同步续期：与后台短任务池分开，避免排队等待；超时后任务继续跑，
+# 不阻塞播放请求（此时前端仍拿旧地址，失败会照常切源 / 提示）。
+_RENEW_POOL = ThreadPoolExecutor(max_workers=2, thread_name_prefix="avm-renew")
+
+
+def refresh_now(source_id: int, wait: float = 6.0) -> bool:
+    """播放前有限等待续期完成；返回是否在等待窗口内完成。"""
+    fut = _RENEW_POOL.submit(refresh_source, int(source_id))
+    try:
+        fut.result(timeout=max(0.5, float(wait)))
+        return True
+    except Exception:
+        return False
+
+
+def renew_due(limit: int = 20, cooldown_minutes: int = 30) -> Dict[str, Any]:
+    """后台自动续期：扫描已过期 / 明确 410 的在线来源并重新获取播放地址。
+
+    完全在后端完成，不依赖浏览器插件；同一来源冷却期内不重复请求源站
+    （成功/失败都会由 _apply 更新 updated_at）。源站要求浏览器会话时会
+    留下可读原因，换出口或站点恢复访问后下一轮自动生效。
+    """
+    from datetime import timedelta
+    # 冷却判断在 Python 里做：updated_at 可能是 SQLite 的「空格分隔」或
+    # 旧数据里的 ISO「T 分隔」，直接按字符串比较会因格式不同误判。
+    cutoff_dt = datetime.now() - timedelta(minutes=max(1, int(cooldown_minutes)))
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT id, expires_at, check_note, updated_at FROM movie_sources "
+            "WHERE available = 1 AND play_url <> '' AND refresh_from <> '' "
+            "ORDER BY updated_at ASC LIMIT ?",
+            (max(1, int(limit)) * 8,)).fetchall()
+
+    def _due(row) -> bool:
+        if not (expired(row["expires_at"]) or "410" in str(row["check_note"] or "")):
+            return False
+        raw = str(row["updated_at"] or "").strip()
+        if not raw:
+            return True
+        try:
+            return datetime.fromisoformat(raw.replace(" ", "T")) <= cutoff_dt
+        except ValueError:
+            return True
+
+    due = [r for r in rows if _due(r)]
+    checked = renewed = 0
+    for r in due[:max(1, int(limit))]:
+        checked += 1
+        try:
+            if refresh_source(int(r["id"])).get("ok"):
+                renewed += 1
+        except Exception:  # noqa: BLE001 后台任务不因单条失败中断
+            pass
+    return {"ok": True, "checked": checked, "renewed": renewed}
 
 
 def _failover(conn, failed_id: int, reason: str) -> str:

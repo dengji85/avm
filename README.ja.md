@@ -4,9 +4,11 @@
   <b>ローカル優先 · プライバシー安全 · セルフホスト可能</b><br/>
   ドライブ内のごちゃごちゃで散乱したAVコレクションを、<b>検索・キュレーション・再視聴</b>できる私設ライブラリに変えます。
 </p>
+<p align="center"><sub>本翻訳は更新が遅れる場合があります。最新版は <a href="README.md">簡体字中国語版</a> をご参照ください。</sub></p>
+
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-1.11.0-1f6feb.svg"/>
+  <img src="https://img.shields.io/badge/version-1.17.0-1f6feb.svg"/>
   <img src="https://img.shields.io/badge/backend-FastAPI-009688.svg"/>
   <img src="https://img.shields.io/badge/frontend-Vue%203%20%2F%20Vite-42b883.svg"/>
   <img src="https://img.shields.io/badge/database-SQLite-003b57.svg"/>

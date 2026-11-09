@@ -2,6 +2,7 @@
   <div>
           <div class="aic-bar">
             <span class="hint">{{ $t('aiCenter.extHint') }}</span>
+            <span class="hint">· {{ $t('aiCenter.extPackagesHint') }}</span>
             <div class="aic-bar-ops">
               <button class="btn tiny ghost" :disabled="ext.loading" @click="loadExt">
                 {{ $t('aiCenter.extRecheck') }}
@@ -94,7 +95,7 @@
               <button v-if="c.state !== 'ready'" class="btn tiny" @click="installExt(c.id)">
                 {{ $t('aiCenter.extInstall') }}
               </button>
-              <button v-if="c.state !== 'ready'" class="btn tiny ghost" @click="startImport(c.id)">
+              <button class="btn tiny ghost" @click="startImport(c.id)">
                 {{ $t('aiCenter.extImport') }}
               </button>
               <button v-if="c.state === 'ready' && c.source === 'ext'" class="btn tiny ghost"
@@ -123,15 +124,58 @@
             <div class="aic-card-head">
               <strong>{{ $t('aiCenter.extImportTitle', { name: $t('aiCenter.extName.' + imp.cid) }) }}</strong>
             </div>
-            <p class="hint">{{ $t('aiCenter.extImportHint') }}</p>
-            <div class="aic-bar-ops">
-              <input v-model="imp.dir" class="ext-import-input"
-                     :placeholder="$t('aiCenter.extImportPh')" />
-              <button class="btn tiny" :disabled="imp.busy || !imp.dir" @click="doImport">
-                {{ $t('aiCenter.extImportGo') }}
-              </button>
-              <button class="btn tiny ghost" @click="imp.cid = ''">{{ $t('common.cancel') }}</button>
+            <p class="hint">{{ $t('aiCenter.extImportSteps', { dir: imp.defaultDir || 'data/ext/packages' }) }}</p>
+            <div class="aic-bar-ops" style="margin-bottom:6px">
+              <select v-model="imp.dir" class="ext-import-input" :disabled="imp.busy"
+                      @change="onPickPackage">
+                <option value="">{{ $t('aiCenter.extImportPickLocal') }}</option>
+                <option v-for="f in imp.packages" :key="f.path" :value="f.path">
+                  {{ f.name }}（{{ fmtSize(f.size) }}）
+                </option>
+              </select>
+              <span class="hint">
+                {{ imp.sameHost ? $t('aiCenter.extImportSameHost') : $t('aiCenter.extImportRemoteDir') }}
+              </span>
             </div>
+            <div v-if="!imp.packages.length" class="hint">
+              {{ $t('aiCenter.extImportEmpty', { dir: imp.defaultDir || 'data/ext/packages' }) }}
+              <button class="btn tiny ghost" :disabled="imp.busy" @click="refreshPackages">
+                {{ $t('aiCenter.extImportRefresh') }}
+              </button>
+            </div>
+            <div class="aic-bar-ops">
+              <button class="btn tiny" :disabled="imp.busy || (!imp.file && !imp.dir)" @click="doImport">
+                {{ imp.busy ? $t('aiCenter.extImportBusy') : $t('aiCenter.extImportGo') }}
+              </button>
+              <button class="btn tiny ghost" :disabled="imp.busy" @click="imp.cid = ''">{{ $t('common.cancel') }}</button>
+            </div>
+            <div v-if="imp.busy && imp.progress > 0" class="ext-progress" style="margin-top:6px">
+              <div class="ext-bar"><div class="ext-bar-in" :style="{ width: imp.progress + '%' }"></div></div>
+              <span class="hint">{{ $t('aiCenter.extImportUploading') }} {{ imp.progress }}%</span>
+            </div>
+            <details style="margin-top:8px">
+              <summary style="cursor:pointer;opacity:.7;font-size:12px">{{ $t('aiCenter.extImportAdvanced') }}</summary>
+              <p class="hint" style="margin:8px 0 4px">{{ $t('aiCenter.extImportCustomDir') }}</p>
+              <div class="aic-bar-ops">
+                <input v-model="imp.customDir" class="ext-import-input"
+                       :placeholder="$t('aiCenter.extImportCustomDirPh')" />
+                <button class="btn tiny ghost" :disabled="imp.busy" @click="refreshPackages">
+                  {{ $t('aiCenter.extImportRefresh') }}
+                </button>
+              </div>
+              <p class="hint" style="margin:8px 0 4px">{{ $t('aiCenter.extImportUploadAdv') }}</p>
+              <div class="aic-bar-ops">
+                <input type="file" accept=".zip,.tar.gz,.tgz,.tar" @change="onPickFile"
+                       :disabled="imp.busy" />
+                <span class="hint">{{ $t('aiCenter.extImportNasHint') }}</span>
+              </div>
+              <div v-if="imp.fileName" class="hint">{{ $t('aiCenter.extImportPicked') }}：{{ imp.fileName }}</div>
+              <p class="hint" style="margin:8px 0 4px">{{ $t('aiCenter.extImportServerPath') }}</p>
+              <div class="aic-bar-ops">
+                <input v-model="imp.dir" class="ext-import-input"
+                       :placeholder="$t('aiCenter.extImportPh')" />
+              </div>
+            </details>
           </div>
 
           <!-- 语音识别的使用配置：组件安装与参数设置合并成一页 -->
@@ -199,6 +243,7 @@ import { state } from '../state.js'
 
 import {
   extCancel, extImport, extBundleImport, extInstall, extSelftest, extStatus, extTask, extUninstall, getConfig, putConfig,
+  extUpload, extBundleUpload, extUploadWithProgress, extPackages,
   mtStart, mtStop, mtTest,
 } from '../api.js'
 import { t } from '../i18n/index.js'
@@ -211,7 +256,8 @@ const task = reactive({
   running: false, cid: '', state: '', percent: 0, message: '',
   downloaded: 0, total: 0, speed: 0, log: [],
 })
-const imp = reactive({ cid: '', dir: '', busy: false })
+const imp = reactive({ cid: '', dir: '', file: null, fileName: '', busy: false, progress: 0,
+  packages: [], sameHost: false, defaultDir: '', customDir: '' })
 let extTimer = null
 
 /* ---------- 组件分组：新增组件只要在组件对象上带 group 字段就会归组 ---------- */
@@ -343,16 +389,67 @@ async function cancelExt() {
   try { await extCancel() } catch (e) { toast(e.message, 'err') }
 }
 
-function startImport(cid) {
+async function loadPackages(dir = '') {
+  try {
+    const r = await extPackages(dir)
+    imp.sameHost = !!r.same_host
+    imp.defaultDir = r.default_dir || ''
+    imp.packages = (r.groups || []).flatMap(g => g.files.map(f => ({ ...f, group: g.dir })))
+  } catch (e) { /* 列表不可用时静默退化为上传 / 路径 */ }
+}
+
+async function startImport(cid) {
   imp.cid = cid
   imp.dir = ''
+  imp.file = null
+  imp.fileName = ''
   imp.busy = false
+  imp.progress = 0
+  imp.packages = []
+  imp.sameHost = false
+  imp.defaultDir = ''
+  imp.customDir = ''
+  await loadPackages()
+}
+
+function refreshPackages() {
+  loadPackages(imp.customDir.trim())
+}
+
+function onPickFile(e) {
+  imp.file = (e.target.files && e.target.files[0]) || null
+  imp.fileName = imp.file ? imp.file.name : ''
+  if (imp.file) imp.dir = ''   // 上传优先，清掉服务端路径避免混淆
+}
+
+function onPickPackage() {
+  imp.file = null              // 选了服务端已有包 → 零上传
+  imp.fileName = ''
 }
 
 async function doImport() {
-  if (!imp.dir || imp.busy) return
+  if (imp.busy) return
   imp.busy = true
   try {
+    // 优先走「选择文件」：浏览器直传，服务器与浏览器不在同一台机器（NAS / Docker）也能用
+    if (imp.file) {
+      const fd = new FormData()
+      fd.append('file', imp.file)
+      imp.progress = 0
+      const path = imp.cid === 'bundle' ? '/ext/bundle/upload' : `/ext/${imp.cid}/upload`
+      await extUploadWithProgress(path, fd, (p) => { imp.progress = p })
+      if (imp.cid === 'bundle') {
+        imp.cid = ''
+        startExtPoll()
+        await loadExt()
+        return
+      }
+      toast(t('aiCenter.extImported'), 'ok')
+      imp.cid = ''
+      await loadExt()
+      return
+    }
+    if (!imp.dir) return
     if (imp.cid === 'bundle') {
       // 整合包导入是后台任务（解压 + 逐组件搬运，可能一两分钟），走进度轮询
       await extBundleImport(imp.dir)

@@ -2,7 +2,7 @@
 // @name         AVM Companion（片匣浏览器接入）
 // @name:en      AVM Companion
 // @namespace    https://github.com/dengji85/avm
-// @version      0.5.1
+// @version      0.5.6
 // @description  把在线观看的影片与真实观看时长同步到本地 AVM 片库；仅在你主动点击后上报，页面正文不上传。
 // @author       AVM
 // @license      MIT
@@ -14,6 +14,7 @@
 // @grant        GM_getValue
 // @grant        GM_registerMenuCommand
 // @grant        GM_notification
+// @grant        GM_setClipboard
 // @grant        GM_info
 // @connect      *
 // @run-at       document-start
@@ -22,6 +23,8 @@
 /*
  * 隐私与边界（见 docs/浏览器插件与在线资源设计.md）：
  *  - 默认不自动上报：只有点击浮标/菜单后才读取页面元信息与播放器状态；
+ *    唯一例外是「已在库的页面」自动续期：捕获到新的播放地址时只 POST 该地址
+ *    与页面 URL，用于更新已有来源（不新建影片、不传正文），可在面板里关闭；
  *  - 只上报番号、标题、页面地址、站内 ID、可播放地址与播放秒数，不上传页面正文、Cookie 或 DOM；
  *  - 令牌与待补报队列只存在脚本自己的存储里，不写日志、不回显；
  *  - 播放地址候选只取 URL，不读取响应内容；界面上一律脱敏显示；
@@ -45,12 +48,38 @@
   };
   dlog('1 IIFE 启动', location.host + (window.top === window.self ? '' : '（子帧）'));
 
+  // 错误收集：CSP 拦截、初始化异常、浮标不可见……都记下来，
+  // 油猴菜单「诊断信息」一键弹出并复制，用户不用开控制台也能反馈证据。
+  const avmErrors = [];
+  function recordError(msg) {
+    try {
+      const s = String(msg).slice(0, 160);
+      if (avmErrors[avmErrors.length - 1] !== s) avmErrors.push(s);
+      if (avmErrors.length > 8) avmErrors.shift();
+    } catch (e) { /* 忽略 */ }
+  }
+  try {
+    window.addEventListener('securitypolicyviolation', (e) => {
+      recordError('CSP拦截:' + (e.violatedDirective || '?') + ' ' +
+        String(e.blockedURI || '').slice(0, 60));
+    });
+  } catch (e) { /* 忽略 */ }
+
   const DEFAULTS = {
-    baseUrl: 'http://127.0.0.1:8770', token: '', autoWatch: true, manualPlayUrl: '',
+    baseUrl: 'http://127.0.0.1:8770', token: '', autoWatch: true,
+    autoSync: true,          // 已在库的页面捕获到新签名地址时自动更新来源
+    manualPlayUrl: '',
   };
   const HEARTBEAT_MS = 10000;
   const QUEUE_MAX = 200;
   const cfg = Object.assign({}, DEFAULTS, GM_getValue('cfg', {}));
+  // 自动续期状态提前声明：PerformanceObserver 的 buffered 回调可能在脚本
+  // 后半段的状态声明之前就触发 remember()；访问未初始化的 let 会抛 TDZ 异常，
+  // 被捕获回调的 catch 吞掉后表现为「浮标还在，但自动同步永远不触发」。
+  let existing = null;       // { movie_id } —— 当前页面已在库
+  let lastSyncKey = '';
+  let lastSyncAt = 0;
+  let syncing = false;
   const isTop = (() => { try { return window.top === window; } catch (e) { return false; } })();
   const deviceId = (() => {
     let v = GM_getValue('device_id', '');
@@ -167,6 +196,7 @@
       GM_setValue('captured_at', Date.now());
     } catch (e) { /* 存储不可用 */ }
     refreshVis();   // 一旦捕获到地址，浮标立刻恢复正常亮度
+    maybeAutoSync(); // 已在库的页面换了新的签名地址 → 自动更新来源
   }
   // 捕获方式：只用 PerformanceObserver 观察资源请求，**不包装原生 fetch / XHR**。
   //
@@ -380,6 +410,8 @@
       get captured() { return allCandidates().length; },
       get api() { return lastApi; },
       get cover() { return coverInfo; },
+      get fabMode() { return fabMode; },
+      get errors() { return avmErrors.slice(); },
     };
   } catch (e) { /* 忽略 */ }
 
@@ -428,6 +460,12 @@
     $('avm-cands').value = cfg.manualPlayUrl || (best ? best.u : '');
     const openBtn = $('avm-open');
     if (openBtn) openBtn.style.display = (existing && existing.movie_id) ? 'block' : 'none';
+    // 已在库时主按钮就是「更新播放地址」：捕获到正确地址后点一下即可覆盖库中的错误地址
+    const linkBtn = $('avm-link');
+    if (linkBtn) {
+      linkBtn.textContent = (existing && existing.movie_id)
+        ? '更新播放地址（覆盖当前来源）' : '立即加入片库';
+    }
     const confirmBox = $('avm-confirm');
     if (confirmBox) {
       confirmBox.style.display =
@@ -515,6 +553,8 @@
       <div id="avm-diag" style="opacity:.55;font-size:11px;margin-bottom:8px"></div>
       <button id="avm-open" style="display:none;width:100%;padding:8px;margin-bottom:6px;font-weight:600;cursor:pointer;background:#1f9d55;color:#fff;border:0;border-radius:6px">已在片库 · 打开 AVM 详情</button>
       <button id="avm-link" style="width:100%;padding:8px;font-weight:600;cursor:pointer">立即加入片库</button>
+      <!-- 已在库时按钮文案由 refreshPanel 切换为「更新播放地址」 -->
+
       <div id="avm-current" style="opacity:.6;font-size:11px;word-break:break-all;margin-top:6px"></div>
       <div id="avm-tip" style="margin-top:6px;opacity:.85;word-break:break-all"></div>
       <details style="margin-top:10px">
@@ -525,8 +565,9 @@
         <input id="avm-url" placeholder="AVM 地址" style="width:100%;margin-bottom:6px;box-sizing:border-box">
         <input id="avm-token" type="password" placeholder="访问令牌 / avm_ 专用令牌" style="width:100%;margin-bottom:6px;box-sizing:border-box">
         <label style="display:block;opacity:.8"><input id="avm-auto" type="checkbox"> 加入后自动记录观看时长</label>
+        <label style="display:block;opacity:.8;margin-top:6px"><input id="avm-autosync" type="checkbox"> 已在库的页面自动更新播放地址（签名过期时）</label>
         <button id="avm-match" style="width:100%;margin-top:8px;cursor:pointer">查询状态</button>
-        <div style="margin-top:8px;opacity:.5;font-size:11px">仅主动点击时上报；不上传正文。断网心跳会排队补报</div>
+        <div style="margin-top:8px;opacity:.5;font-size:11px">主动点击后上报；已在库页面仅自动同步播放地址（只更新、不建片、不传正文）。断网心跳会排队补报</div>
       </details>`;
     document.body.appendChild(panel);
     // 点击面板外任意位置关闭：pointerdown 比 click 早，不会与浮标/面板内部
@@ -545,10 +586,12 @@
     $('avm-url').value = cfg.baseUrl;
     $('avm-token').value = cfg.token;
     $('avm-auto').checked = cfg.autoWatch;
+    $('avm-autosync').checked = cfg.autoSync;
     $('avm-play').value = cfg.manualPlayUrl || '';
     $('avm-url').addEventListener('change', (e) => { cfg.baseUrl = e.target.value.trim(); save(); });
     $('avm-token').addEventListener('change', (e) => { cfg.token = e.target.value.trim(); save(); });
     $('avm-auto').addEventListener('change', (e) => { cfg.autoWatch = e.target.checked; save(); });
+    $('avm-autosync').addEventListener('change', (e) => { cfg.autoSync = e.target.checked; save(); });
     $('avm-cands').addEventListener('change', (e) => {
       cfg.manualPlayUrl = e.target.value || ''; save(); refreshPanel();
     });
@@ -590,13 +633,14 @@
 
   let dotEl = null;
   let hostEl = null;         // shadow 宿主（fixed 定位与层叠的载体）
-  let existing = null;       // { movie_id } —— 当前页面已在库
+  // existing / 同步状态已提前到 IIFE 顶部（见上）
   let pendingNoCode = false; // 未识别到番号：等用户在面板里确认是否加入
   let suppressClick = false; // 拖动结束后抑制这一次 click
 
   /** 查一下当前页面是否已在库（有结果就把浮标改成「✓」并可直接跳 AVM） */
   async function checkExisting() {
-    if (!cfg.token || !dotEl) return;
+    // 不依赖浮标：即使站点样式让浮标没挂上，自动续期仍要照常工作
+    if (!cfg.token) return;
     const ev = movieEvidence();
     if (!ev.code && !ev.page_url) return;
     try {
@@ -607,6 +651,38 @@
         ? { movie_id: r.data.movie_id } : null;
     } catch (e) { existing = null; }
     applyFabState();
+    maybeAutoSync();   // 页面加载时若已捕获到地址（或库中地址已过期）也同步一次
+  }
+
+  // ---------------------------------------------------------------- 自动续期
+  // 带时间戳签名的站点（jable 等）几小时就换一次 m3u8。页面已在库时，把新
+  // 捕获到的地址交给 /ingest/sync 更新来源：只更新、不新建，不传页面正文。
+  async function maybeAutoSync() {
+    try {
+      if (!cfg.autoSync || syncing || !cfg.token || !existing || !existing.movie_id) return;
+      const u = guessPlayUrl();
+      if (!u) return;
+      const key = pageUrl() + '|' + u;
+      const now = Date.now();
+      if (key === lastSyncKey || now - lastSyncAt < 15000) return;  // 同地址只发一次 / 15s 节流
+      lastSyncKey = key;
+      lastSyncAt = now;
+      syncing = true;
+      const r = await api('ingest/sync', 'POST', {
+        page_url: pageUrl(),
+        play_url: u,
+        code: guessCode(),
+        title: document.title || '',
+        site: location.hostname,
+        confidence: 0.7,
+      });
+      if (!r.ok || !r.data || r.data.status !== 'updated') return;
+      // 轻反馈：不弹窗、不打断播放；同时把状态标回可播（浮标本来就是绿色 ✓）
+      toast('播放地址已自动更新');
+      existing = { movie_id: r.data.movie_id || existing.movie_id };
+      applyFabState();
+    } catch (e) { /* 网络失败静默：下次捕获到地址会再试 */ }
+    finally { syncing = false; }
   }
 
   function openInAvm(movieId) {
@@ -742,7 +818,7 @@
       const r = dotEl.getBoundingClientRect();
       if (!r.width && !r.height) { coverInfo = '浮标尺寸为 0'; return; }
       const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
-      if (hit && hit !== dotEl && !dotEl.contains(hit)) {
+      if (hit && !hitIsOurs(hit)) {
         coverInfo = ((hit.tagName || '') + ' ' + (hit.className || hit.id || '')).slice(0, 80);
         console.warn('[AVM] 浮标被遮挡：', coverInfo);
         // 用户手动拖过位置就尊重它——自动换位曾与手动拖动打架：
@@ -750,12 +826,13 @@
         let dragged = false;
         try { dragged = !!GM_getValue('fab_pos', null); } catch (e) { /* 忽略 */ }
         if (dragged) return;
-        if (hostEl && hostEl.style.right !== 'auto') {
-          hostEl.style.right = 'auto';
-          hostEl.style.left = '16px';
-          const r2 = hostEl.getBoundingClientRect();
+        const anchor = fabMode === 'plain' ? dotEl : hostEl;
+        if (anchor && anchor.style.right !== 'auto') {
+          anchor.style.right = 'auto';
+          anchor.style.left = '16px';
+          const r2 = anchor.getBoundingClientRect();
           const hit2 = document.elementFromPoint(r2.left + r2.width / 2, r2.top + r2.height / 2);
-          if (hit2 && hit2 !== dotEl && hit2.getRootNode() === hostEl.shadowRoot) {
+          if (hit2 && !hitIsOurs(hit2)) {
             hostEl.style.left = 'auto';
             hostEl.style.right = '16px';
             console.warn('[AVM] 左下角也被遮挡，浮标保留在右下');
@@ -862,13 +939,71 @@
   }
 
   /**
-   * 创建（或重新挂载）浮标：Shadow DOM 隔离。
-   *
-   * 普通 div 会被站点 CSS 渗透（jable 的全局 div 规则 / 遮挡层让浮标
-   * 不可拖动甚至不可见）；shadow 边界 + `all:initial` 让站点样式完全
-   * 无法渗入。宿主常驻 body 末尾——同 z-index 时后插入者在上。
+   * 创建（或重新挂载）浮标：默认 Shadow DOM 隔离；若 shadow 挂载后自检
+   * 发现不可见（站点脚本 / CSP 干扰），自动降级为普通 div（v0.4 方式）。
    */
+  let fabMode = 'shadow';      // 'shadow' | 'plain'
+  let fabCheckTimer = 0;
+
+  function clampPos(pos) {
+    const w = window.innerWidth || 1920;
+    const h = window.innerHeight || 1080;
+    return {
+      x: Math.min(Math.max(4, pos.x), w - 42),
+      y: Math.min(Math.max(4, pos.y), h - 42),
+    };
+  }
+
+  function applyFabSkin(el) {
+    el.style.cssText =
+      'pointer-events:auto;all:initial;position:fixed;right:16px;bottom:16px;' +
+      'z-index:2147483647;width:34px;height:34px;border-radius:50%;background:#6c5ce7;' +
+      'border:2px solid #fff;box-shadow:0 2px 10px rgba(0,0,0,.55);color:#fff;' +
+      'text-align:center;line-height:30px;cursor:pointer;font-size:15px;font-weight:700;' +
+      'user-select:none;touch-action:none;';
+    try {
+      const pos = GM_getValue('fab_pos', null);
+      if (pos && typeof pos.x === 'number' && typeof pos.y === 'number') {
+        const c = clampPos(pos);
+        el.style.right = 'auto';
+        el.style.bottom = 'auto';
+        el.style.left = c.x + 'px';
+        el.style.top = c.y + 'px';
+      }
+    } catch (e) { /* 存储不可用 */ }
+  }
+
+  function bindFab() {
+    loadLastAdded();
+    applyFabState();
+    refreshVis();
+    if (dotEl.dataset.avmBound === '1') return;
+    dotEl.dataset.avmBound = '1';
+    makeDraggable(dotEl, hostEl || dotEl);
+    // 单击立即执行（图标已说明结果）；右键 / 长按 = 面板
+    dotEl.addEventListener('click', () => { if (!suppressClick) quickAdd(); });
+    dotEl.addEventListener('contextmenu', (e) => { e.preventDefault(); togglePanel(); });
+    // 弱信号页面浮标偏淡，鼠标移上去时恢复不透明（避免被误认为「没启用」）
+    dotEl.addEventListener('mouseenter', () => { if (dotEl) dotEl.style.opacity = '1'; });
+    dotEl.addEventListener('mouseleave', () => refreshVis());
+  }
+
+  function mountFabPlain() {
+    let f = document.getElementById('avm-fab');
+    if (!f) {
+      f = document.createElement('div');
+      f.id = 'avm-fab';
+      f.textContent = 'A';
+      document.body.appendChild(f);
+    }
+    dotEl = f;
+    hostEl = null;
+    applyFabSkin(f);
+    bindFab();
+  }
+
   function mountFab() {
+    if (fabMode === 'plain') return mountFabPlain();
     let host = document.getElementById('avm-fab-host');
     if (!host || !host.shadowRoot) {
       if (!host) {
@@ -881,16 +1016,20 @@
     }
     // 常驻 body 末尾：同 z-index 时 DOM 顺序靠后者在上，防被后插入元素盖住
     document.body.appendChild(host);
+    hostEl = host;   // 命中测试 / 外部点击判断都依赖它（重构时曾丢失导致误降级）
     host.style.cssText =
       'all:initial;position:fixed;right:16px;bottom:16px;z-index:2147483647;' +
       'width:34px;height:34px;pointer-events:none;background:transparent;';
     try {
       const pos = GM_getValue('fab_pos', null);
       if (pos && typeof pos.x === 'number' && typeof pos.y === 'number') {
+        // 记忆的位置必须钳回当前视口：换显示器 / 缩放 / 改窗口大小后，
+        // 旧坐标可能已在屏幕外——这就是「脚本正常但浮标看不见」的常见原因
+        const c = clampPos(pos);
         host.style.right = 'auto';
         host.style.bottom = 'auto';
-        host.style.left = pos.x + 'px';
-        host.style.top = pos.y + 'px';
+        host.style.left = c.x + 'px';
+        host.style.top = c.y + 'px';
       }
     } catch (e) { /* 存储不可用 */ }
     dotEl = host.shadowRoot.getElementById('avm-fab');
@@ -915,6 +1054,68 @@
       dotEl.addEventListener('mouseenter', () => { if (dotEl) dotEl.style.opacity = '1'; });
       dotEl.addEventListener('mouseleave', () => refreshVis());
     }
+    // 挂上 1.5 秒后自检「是否真的看得见」：站点脚本清理 / CSP / 样式破坏
+    // 都会让 shadow 方案失效，此时自动降级为普通挂载，并留下诊断记录。
+    clearTimeout(fabCheckTimer);
+    fabCheckTimer = setTimeout(checkFabVisible, 1500);
+  }
+
+  /** 命中测试结果是否属于浮标自身（含 shadow 宿主——宿主区域就是浮标区域） */
+  function hitIsOurs(hit) {
+    if (!hit) return false;
+    if (dotEl && (hit === dotEl || dotEl.contains(hit))) return true;
+    if (hostEl && hit === hostEl) return true;
+    try {
+      if (dotEl && hit.getRootNode && hit.getRootNode() === dotEl.getRootNode()) return true;
+    } catch (e) { /* 忽略 */ }
+    return false;
+  }
+
+  function fabVisibleNow() {
+    const el = dotEl && dotEl.isConnected ? dotEl : null;
+    if (!el) return false;
+    const r = el.getBoundingClientRect();
+    if (r.width < 5 || r.height < 5) return false;
+    if (r.left > innerWidth || r.top > innerHeight || r.right < 0 || r.bottom < 0) return false;
+    const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+    return hitIsOurs(hit);
+  }
+
+  function checkFabVisible() {
+    if (!isTop || !dotEl) return;
+    if (fabVisibleNow()) { coverInfo = ''; return; }
+    // ① 位置出界（换显示器 / 缩放 / 改窗口大小）是最常见原因：先钳回视口再测
+    try {
+      const r = dotEl.getBoundingClientRect();
+      const c = clampPos({ x: Math.round(r.left), y: Math.round(r.top) });
+      const anchor = fabMode === 'plain' ? dotEl : hostEl;
+      if (anchor) {
+        anchor.style.right = 'auto';
+        anchor.style.bottom = 'auto';
+        anchor.style.left = c.x + 'px';
+        anchor.style.top = c.y + 'px';
+      }
+      try { GM_setValue('fab_pos', c); } catch (e) { /* 忽略 */ }
+    } catch (e) { /* 忽略 */ }
+    if (fabVisibleNow()) {
+      console.warn('[AVM] 浮标原位置在屏幕外，已自动拉回视口内');
+      recordError('浮标位置出界，已钳回视口');
+      return;
+    }
+    // ② 位置没问题还看不见 → 才是样式 / CSP / 站点脚本干扰，降级普通挂载
+    if (fabMode !== 'shadow') {
+      recordError('浮标仍不可见（普通挂载），详见诊断菜单');
+      return;
+    }
+    recordError('shadow浮标不可见，已降级普通挂载');
+    fabMode = 'plain';
+    try {
+      const h = document.getElementById('avm-fab-host');
+      if (h) h.remove();
+    } catch (e) { /* 忽略 */ }
+    dotEl = null;
+    hostEl = null;
+    try { mountFabPlain(); } catch (e) { recordError('普通挂载也失败:' + e); }
   }
 
   function initUi() {
@@ -924,20 +1125,11 @@
       mountFab();
       dlog('4 mountFab 完成（浮标已 append 到 body）');
     } catch (e) {
-      // 任何站点上的初始化异常都不该静默失败——否则表现为「浮标不出现」且无线索
+      // 任何站点上的初始化异常都留一条线索，但**不再 return**：
+      // 浮标挂不上时菜单命令、自动续期、看门狗仍要继续工作。
       console.error('[AVM] 浮标初始化失败：', e);
-      return;
     }
     setTimeout(() => popFab(), 300);   // 首次出现弹一下，避免被当成没加载
-    GM_registerMenuCommand('AVM：打开 AVM 详情 / 加入片库', () => quickAdd());
-    GM_registerMenuCommand('AVM：打开设置面板', () => togglePanel());
-
-    // 首屏与前端路由变化时检查是否已在库（SPA 切页也能跟上）
-    checkExisting();
-    let lastUrl = pageUrl();
-    setInterval(() => {
-      if (pageUrl() !== lastUrl) { lastUrl = pageUrl(); checkExisting(); }
-    }, 5000);
     // 撤销窗口过期后把图标从 ↩ 收回 A / ✓
     setInterval(() => {
       if (lastAdded && Date.now() - lastAdded.at >= UNDO_MS) {
@@ -955,7 +1147,8 @@
     [3, 6, 9].forEach((t) => setTimeout(() => dlog('alive+' + t + 's'), t * 1000));
     // 看门狗：站点脚本或扩展把浮标从 DOM 里删掉时，自动重新挂载
     setInterval(() => {
-      if (isTop && !document.getElementById('avm-fab-host')) {
+      if (isTop && !document.getElementById('avm-fab-host') &&
+          !document.getElementById('avm-fab')) {
         console.warn('[AVM] 浮标被页面移除，已重新挂载');
         try { mountFab(); popFab(); } catch (e) { /* 忽略 */ }
       }
@@ -970,6 +1163,59 @@
   // 不用再猜是油猴没启用还是浮标太淡。
   console.info('[AVM] v' + AVM_VER + ' 已注入 ' + location.host +
     (isTop ? '' : '（子帧）') + '；控制台输入 __avm 查看状态');
+
+  // 诊断菜单：不需要打开控制台就能拿到「为什么浮标不显示」的证据。
+  // 结果会弹通知并复制到剪贴板，反馈时直接粘贴即可。
+  GM_registerMenuCommand('AVM：诊断信息（复制到剪贴板）', () => {
+    const fabKind = document.getElementById('avm-fab-host')
+      ? 'shadow' : (document.getElementById('avm-fab') ? 'plain' : '未挂载');
+    const info = [
+      'AVM v' + AVM_VER,
+      '站点: ' + location.host,
+      '顶层: ' + isTop + ' | readyState: ' + document.readyState,
+      '浮标: ' + fabKind + (fabVisibleNow() ? '（可见）' : '（不可见）'),
+      '挂载模式: ' + fabMode,
+      '已在库: ' + (existing && existing.movie_id ? existing.movie_id : '否/未知'),
+      '捕获地址: ' + allCandidates().length,
+      '最近API: ' + JSON.stringify(lastApi),
+      '错误/拦截: ' + (avmErrors.length ? avmErrors.join(' | ') : '无'),
+    ].join('\n');
+    try { GM_setClipboard(info, 'text'); } catch (e) { /* 剪贴板不可用时忽略 */ }
+    try {
+      GM_notification({ text: info, title: 'AVM 诊断（已复制到剪贴板）', timeout: 10 });
+    } catch (e) { /* 忽略 */ }
+    console.info('[AVM 诊断]\n' + info);
+  });
+
+  // 菜单命令与状态检查放在顶层：即使浮标因站点样式挂不上，也仍能手动同步 /
+  // 加入 / 打开面板，自动续期同样不依赖浮标。
+  GM_registerMenuCommand('AVM：重置浮标位置', () => {
+    try { GM_setValue('fab_pos', null); } catch (e) { /* 忽略 */ }
+    try {
+      const h = document.getElementById('avm-fab-host');
+      if (h) h.remove();
+      const f = document.getElementById('avm-fab');
+      if (f) f.remove();
+    } catch (e) { /* 忽略 */ }
+    dotEl = null;
+    hostEl = null;
+    mountFab();
+    toast('浮标位置已重置（右下角）');
+  });
+  GM_registerMenuCommand('AVM：立即同步播放地址', () => {
+    lastSyncKey = ''; lastSyncAt = 0;
+    checkExisting();   // 重新确认已在库后由 checkExisting 触发一次同步
+  });
+  GM_registerMenuCommand('AVM：打开 AVM 详情 / 加入片库', () => quickAdd());
+  GM_registerMenuCommand('AVM：打开设置面板', () => togglePanel());
+
+  if (isTop) {
+    checkExisting();   // 首屏查一次是否已在库（同时触发自动续期）
+    let lastUrl = pageUrl();
+    setInterval(() => {
+      if (pageUrl() !== lastUrl) { lastUrl = pageUrl(); checkExisting(); }
+    }, 5000);   // SPA 切页也能跟上
+  }
 
   // 顶层 / 子帧通用：认领采集任务；播放器是动态插入时每秒重试绑定
   setInterval(() => {

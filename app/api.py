@@ -3544,7 +3544,19 @@ def stream_info(movie_id: int) -> Dict[str, Any]:
             primary = query_one(conn, "SELECT kind FROM movie_sources WHERE id = ?",
                                 (fresh["source_id"],))
     if fresh.get("need_refresh"):
-        stream_verify.schedule_refresh(fresh["source_id"])
+        from .config import load_config
+        if (load_config().get("stream") or {}).get("auto_renew", True):
+            # 旧地址已过期：有限等待后端重新取到新地址，成功就直接用新地址播；
+            # 超时不阻塞（后台任务继续），前端仍按既有逻辑切源 / 提示。
+            if stream_verify.refresh_now(fresh["source_id"], wait=6):
+                with db() as conn:
+                    row = query_one(
+                        conn, "SELECT play_url FROM movie_sources WHERE id = ?",
+                        (fresh["source_id"],))
+                    if row and row["play_url"]:
+                        fresh["url"] = str(row["play_url"])
+        else:
+            stream_verify.schedule_refresh(fresh["source_id"])
     target = fresh["url"] or str((src or {}).get("strm_url") or "")
     if not src and not target:
         raise HTTPException(404, "影片不存在或未入库")

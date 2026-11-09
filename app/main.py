@@ -501,6 +501,7 @@ def _startup() -> None:
             print("  已加载 %d 个 API Key（设置 → 访问 可管理）" % keys)
         print("=" * 60)
     _start_auto_scan()
+    _start_auto_renew()
     # MetaTube 托管进程：仅在「已启用 + managed + 自动启动」时拉起，
     # 失败不影响主服务（它只是一个可选数据源）。
     try:
@@ -569,6 +570,37 @@ def _start_auto_scan() -> None:
     t.start()
 
 
+def _start_auto_renew() -> None:
+    """后台在线来源自动续期：定期扫描过期 / 410 的来源，重新获取播放地址。
+
+    与 auto-scan 一样是 daemon 线程，完全在后端完成，不需要打开任何页面，
+    也不依赖浏览器插件。只做常规 HTTP 请求；CF 拦截等失败会留下原因并由
+    renew_due 的冷却机制控制重试频率。
+    """
+    import threading
+
+    from . import stream_verify
+
+    def _loop() -> None:
+        time.sleep(60)          # 启动后先让服务完全就绪
+        while True:
+            st = load_config().get("stream") or {}
+            try:
+                interval = int(st.get("auto_renew_interval", 10) or 10)
+            except (TypeError, ValueError):
+                interval = 10
+            if not st.get("auto_renew", True) or interval <= 0:
+                time.sleep(120)
+                continue
+            try:
+                stream_verify.renew_due()
+            except Exception:  # noqa: BLE001 后台任务不因单轮失败退出
+                pass
+            time.sleep(max(2, interval) * 60)
+
+    threading.Thread(target=_loop, name="auto-renew", daemon=True).start()
+
+
 @app.exception_handler(Exception)
 async def _unhandled(request, exc):  # pragma: no cover
     """未捕获异常：对外只返回 request_id，细节写服务端日志（不回显内部信息）。"""
@@ -595,6 +627,26 @@ def index() -> FileResponse:
 # ------------------------------------------------------------------ API 文档（自托管）
 # 不引用任何 CDN：脚本与样式都在本地，纯 http、国内网络、离线环境都能打开。
 # 页面受访问保护约束（未登录 401）；server.expose_docs = true 时允许匿名查看。
+@app.get("/sw.js", include_in_schema=False)
+def _sw_js() -> FileResponse:
+    # Service Worker 脚本本身必须每次校验：否则浏览器一直拿旧 SW，
+    # 旧 SW 的缓存策略会让前端改动「刷新也看不到」。
+    p = WEB_DIR / "sw.js"
+    if not p.exists():
+        raise HTTPException(404, "Service Worker 缺失（web_dist/sw.js）")
+    return FileResponse(p, media_type="application/javascript; charset=utf-8",
+                        headers={"Cache-Control": "no-cache"})
+
+
+@app.get("/manifest.webmanifest", include_in_schema=False)
+def _webmanifest() -> FileResponse:
+    p = WEB_DIR / "manifest.webmanifest"
+    if not p.exists():
+        raise HTTPException(404, "manifest 缺失（web_dist/manifest.webmanifest）")
+    return FileResponse(p, media_type="application/manifest+json",
+                        headers={"Cache-Control": "no-cache"})
+
+
 @app.get("/api/docs", include_in_schema=False)
 def api_docs_page() -> FileResponse:
     p = WEB_DIR / "api-docs.html"

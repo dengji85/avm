@@ -383,10 +383,34 @@ export const aiAsrStatus = () => get('/ai/asr/status')
 /* 可选扩展组件（ffmpeg / 语音识别依赖 / 模型） */
 export const extStatus = () => get('/ext/status')
 export const extTask = () => get('/ext/task')
+/* 服务端可访问的离线包（同机选择免上传；NAS 共享目录同样适用） */
+export const extPackages = (dir = '') => get('/ext/packages' + (dir ? `?dir=${encodeURIComponent(dir)}` : ''))
 export const extInstall = (cid, source = 'auto') => post(`/ext/${cid}/install`, { source })
 export const extCancel = () => post('/ext/task/cancel', {})
 export const extImport = (cid, dir) => post(`/ext/${cid}/import`, { dir })
 export const extBundleImport = (dir) => post('/ext/bundle/import', { dir })
+/* 离线包文件上传：浏览器直传，服务器与浏览器不必在同一台机器 */
+export const extUpload = (cid, fd) => post(`/ext/${cid}/upload`, fd)
+export const extBundleUpload = (fd) => post('/ext/bundle/upload', fd)
+/* 带进度的上传：ffmpeg / 模型包可达数百 MB，NAS 或远程部署时必须有可见进度 */
+export function extUploadWithProgress(path, fd, onProgress) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest()
+    xhr.open('POST', API + path)
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable && onProgress) onProgress(Math.round(e.loaded / e.total * 100))
+    }
+    xhr.onload = () => {
+      let data = null
+      try { data = JSON.parse(xhr.responseText) } catch (e) { /* 非 JSON 响应 */ }
+      if (xhr.status >= 200 && xhr.status < 300) return resolve(data)
+      const detail = data && (data.detail || data.message)
+      reject(new Error(typeof detail === 'string' ? detail : 'HTTP ' + xhr.status))
+    }
+    xhr.onerror = () => reject(new Error('上传失败：网络错误'))
+    xhr.send(fd)   // 同源请求自动携带会话 Cookie
+  })
+}
 export const extUninstall = (cid) => post(`/ext/${cid}/uninstall`, {})
 /* MetaTube 刮削引擎（可选数据源）：状态 / 安装 / 启停 / 连接测试 */
 export const mtStart = () => post('/metatube/start', {})

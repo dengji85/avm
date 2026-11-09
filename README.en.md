@@ -4,9 +4,11 @@
   <b>Local-first · Privacy-safe · Self-hostable</b><br/>
   Turn a messy, scattered AV collection on your drives into a private library you can <b>search, curate, and revisit</b>.
 </p>
+<p align="center"><sub>This translation may lag behind <a href="README.md">the Simplified Chinese README</a>, which is authoritative.</sub></p>
+
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-1.11.0-1f6feb.svg"/>
+  <img src="https://img.shields.io/badge/version-1.17.0-1f6feb.svg"/>
   <img src="https://img.shields.io/badge/backend-FastAPI-009688.svg"/>
   <img src="https://img.shields.io/badge/frontend-Vue%203%20%2F%20Vite-42b883.svg"/>
   <img src="https://img.shields.io/badge/database-SQLite-003b57.svg"/>

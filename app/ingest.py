@@ -352,6 +352,77 @@ def link(conn: sqlite3.Connection, payload: Dict[str, Any]) -> Dict[str, Any]:
 
 # ----------------------------------------------------------------- 观看事件
 
+def sync(conn: sqlite3.Connection, payload: Dict[str, Any]) -> Dict[str, Any]:
+    """浏览器插件自动续期：只更新**已存在**来源的播放地址，绝不新建影片/来源。
+
+    与 link 的区别：link 找不到会建片/建来源（用户主动加入时才合适）；
+    sync 找不到来源直接返回 not_found，保证自动流程零副作用。带时间戳签名的
+    站点（jable 等）地址几小时就过期，插件在页面里捕获到新签名后调这个端点。
+    """
+    if not enabled():
+        return {"ok": False, "message": "浏览器接入已关闭"}
+    ev = ident.build_evidence(payload or {})
+    canonical = str(ev["url_canonical"] or "")
+    page = str(ev["page_url"] or "")
+    new_play = str(ev["play_url"] or "")
+    if not canonical and not page:
+        return {"ok": False, "message": "缺少页面地址"}
+    if not new_play:
+        return {"ok": False, "message": "缺少播放地址"}
+
+    # 优先按规范 URL 精确命中；页面地址可能带/不带尾斜杠，逐个变体兜底
+    src = None
+    if canonical:
+        src = query_one(conn, "SELECT id, movie_id, play_url FROM movie_sources "
+                        "WHERE url_canonical = ? LIMIT 1", (canonical,))
+    if not src:
+        keys = []
+        for k in (page, canonical, page.rstrip("/"), canonical.rstrip("/")):
+            if k and k not in keys:
+                keys.append(k)
+        for k in keys:
+            src = query_one(
+                conn, "SELECT id, movie_id, play_url FROM movie_sources "
+                      "WHERE page_url = ? OR refresh_from = ? "
+                      "ORDER BY is_primary DESC, id ASC LIMIT 1", (k, k))
+            if src:
+                break
+    if not src:
+        return {"ok": True, "status": "not_found", "source_id": 0}
+
+    sid = int(src["id"])
+    movie_id = int(src["movie_id"])
+    if new_play == str(src["play_url"] or ""):
+        return {"ok": True, "status": "unchanged", "source_id": sid, "movie_id": movie_id}
+
+    # 自动同步的护栏：当前地址仍有效且未过期时不覆盖。
+    # 页面上可能有预览位 / 推荐位在播放，插件捕获到的「不同地址」未必是主片——
+    # 自动流程只做续期（旧地址失效才覆盖）；内容对不对由用户在面板里人工确认
+    # （手动更新走 link / 带 force 的 sync）。
+    row = query_one(conn, "SELECT status, expires_at, available FROM movie_sources WHERE id = ?",
+                    (sid,))
+    from . import stream_verify   # 延迟导入：避免 ingest → stream_verify 循环
+    force = bool((payload or {}).get("force"))
+    # 只有「明确失效 / 已过期」才允许自动覆盖；valid 与 checking（正在验证）
+    # 都不动 —— 自动流程只做续期，防串台把错误地址写进仍可用的来源。
+    bad = str(row["status"] or "") in ("stale", "invalid", "unsupported", "disabled")
+    if not force and not bad and not stream_verify.expired(row["expires_at"]):
+        return {"ok": True, "status": "skipped", "source_id": sid, "movie_id": movie_id,
+                "reason": "当前地址仍有效（未过期），自动同步不覆盖；如内容不对请在插件面板手动更新"}
+
+    expires_at = str((payload or {}).get("expires_at") or "").strip()
+    refresh_from = page or canonical
+    conn.execute(
+        "UPDATE movie_sources SET play_url = ?, kind = ?, page_url = ?, "
+        "available = 1, status = 'valid', check_note = '', last_checked = '', "
+        "fetched_at = ?, expires_at = ?, refresh_from = ?, "
+        "updated_at = datetime('now','localtime') WHERE id = ?",
+        (new_play, ev["kind"], page or canonical, _now(), expires_at, refresh_from, sid),
+    )
+    return {"ok": True, "status": "updated", "source_id": sid,
+            "movie_id": movie_id, "play_url_updated": True}
+
+
 def _reuse_or_start_session(conn, movie_id, position, method,
                             source_ref, device_id, dedupe_key):
     """按 dedupe_key 复用场次；没有才新建，返回 (session_id, reused)。
