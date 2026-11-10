@@ -197,6 +197,15 @@ export function setSiteTitle(subtitle) {
   try { localStorage.setItem(SITE_SUB_KEY, sub) } catch (e) { /* 隐私模式忽略 */ }
 }
 
+/** 是否用本机回环地址访问：本地环境不展示浏览器插件相关入口与引导 */
+export function isLocalHost() {
+  try {
+    return ['localhost', '127.0.0.1', '::1', '[::1]'].includes(location.hostname)
+  } catch (e) {
+    return false
+  }
+}
+
 /**
  * 用缓存的后缀立即定标题。在 main.js 里、Vue 挂载前同步调用，
  * 这样刷新后标签页标题第一帧就是配置值，不再闪过 index.html 的默认标题。

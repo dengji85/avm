@@ -526,6 +526,12 @@ def _migrate(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_ms_site ON movie_sources(site, site_id) "
                  "WHERE site <> '' AND site_id <> ''")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_ms_movie ON movie_sources(movie_id)")
+    # 智能出站：按主机记住「直连 / 走代理」，能直连的站点不必白绕一圈代理
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS host_egress ("
+        "host TEXT PRIMARY KEY, mode TEXT NOT NULL DEFAULT '', "
+        "latency_ms INTEGER NOT NULL DEFAULT 0, note TEXT NOT NULL DEFAULT '', "
+        "checked_ts INTEGER NOT NULL DEFAULT 0)")
     conn.execute(
         "CREATE TABLE IF NOT EXISTS movie_external_ids ("
         "id INTEGER PRIMARY KEY AUTOINCREMENT, "
@@ -544,7 +550,24 @@ def _migrate(conn: sqlite3.Connection) -> None:
     # 二期来源治理：用户固定主源标记 + 验证结果说明（老库幂等补列）
     ms_cols = {r[1] for r in conn.execute("PRAGMA table_info(movie_sources)").fetchall()}
     for col, ddl in (("pinned", "INTEGER NOT NULL DEFAULT 0"),
-                     ("check_note", "TEXT NOT NULL DEFAULT ''")):
+                     ("check_note", "TEXT NOT NULL DEFAULT ''"),
+                     # 播放时实际生效的请求头（JSON：Referer / Origin）。
+                     # 有的 CDN 校验的是「播放器所在跳板域」而不是影片页，
+                     # 靠全局设置填不出来，只能随来源一起记住。
+                     ("play_headers", "TEXT NOT NULL DEFAULT ''"),
+                     # 清晰度与字幕判定（来源选择排序用）。清晰度 0 = 未知；
+                     # 字幕是「判定结果 + 依据」两列，不做单布尔，便于解释：
+                     #   sub_zh: zh / none / unknown
+                     #   sub_evidence: hls_track / site_label / none / ''
+                     ("media_width", "INTEGER NOT NULL DEFAULT 0"),
+                     ("media_height", "INTEGER NOT NULL DEFAULT 0"),
+                     ("media_bandwidth", "INTEGER NOT NULL DEFAULT 0"),
+                     ("media_source", "TEXT NOT NULL DEFAULT ''"),
+                     ("media_probe_note", "TEXT NOT NULL DEFAULT ''"),
+                     ("media_probe_at", "TEXT NOT NULL DEFAULT ''"),
+                     ("sub_zh", "TEXT NOT NULL DEFAULT 'unknown'"),
+                     ("sub_evidence", "TEXT NOT NULL DEFAULT ''"),
+                     ("sub_langs", "TEXT NOT NULL DEFAULT ''")):
         if col not in ms_cols:
             conn.execute("ALTER TABLE movie_sources ADD COLUMN %s %s" % (col, ddl))
     # 老库补列：虚拟在线文件标记、观看会话的来源 / 设备 / 去重键

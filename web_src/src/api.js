@@ -113,6 +113,12 @@ export const previewUrl = (movieId, fname) => `${API}/covers/preview/${movieId}/
 export const streamUrl = (id) => `${API}/stream/${id}`
 /* .strm 的 HLS 播放列表（服务端已把分片改写成同源地址，供 video.js / VHS 直接播） */
 export const strmHlsUrl = (id) => `${API}/strm/hls/${id}`
+/* 分片缓存进度：已缓存的片内时间区间（秒），播放器画「已缓存」用 */
+export const strmCacheProgress = (id) => get(`/strm/cache/${id}`)
+/* 分片缓存规模：内存条数 / 磁盘占用 / 上限（设置页展示已用多少） */
+export const strmCacheStats = () => get('/strm/cache-stats')
+/* 清空分片缓存（内存 + 磁盘）：返回删掉的文件数 */
+export const clearStrmCache = () => post('/strm/cache-clear', {})
 
 /* ---------------- 播放兼容：浏览器不认的容器/音轨 → 重封装为 MP4 后再播 ---------------- */
 export const playbackInfo = (id) => get(`/movies/${id}/playback-info`)
@@ -543,3 +549,12 @@ export const reportSourceFailure = (movieId, reason = '') =>
 /* 维护 → 来源体检：全库来源列表与批量操作 */
 export const listAllSources = (params = {}) => get('/sources', params)
 export const batchSources = (action, ids) => post('/sources/batch', { action, ids })
+/* 在线来源巡检：后台批量重新解析过期 / 失效的播放地址（长任务，轮询进度） */
+export const patrolStart = () => post('/sources/patrol/start', {})
+export const patrolState = () => get('/sources/patrol/state')
+export const patrolCancel = () => post('/sources/patrol/cancel', {})
+/* 清晰度 / 中文字幕探测：单条同步探测 + 全库后台批量（长任务，轮询进度） */
+export const probeSource = (id) => post(`/sources/${id}/probe`, {})
+export const probeStart = (body = {}) => post('/sources/probe/start', body)
+export const probeState = () => get('/sources/probe/state')
+export const probeCancel = () => post('/sources/probe/cancel', {})

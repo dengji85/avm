@@ -130,31 +130,109 @@ def _site_origin(u: str) -> str:
     return ""
 
 
-def source_page(movie_id: int = 0, source_id: int = 0) -> str:
-    """来源对应的影片页面完整地址（用于构造 Referer / Origin）。
+def _source_meta(movie_id: int = 0, source_id: int = 0,
+                 url: str = "") -> Dict[str, Any]:
+    """来源的回源元信息：页面地址 + 播放时实际生效的请求头。
 
     HLS 每个分片都要构造请求头，这里做 60 秒内存缓存，避免逐片查库。
+    ``play_headers`` 由无头浏览器刷新时截获（有的 CDN 校验的是播放器所在
+    跳板域，而不是影片页），随来源保存后播放代理也跟着带。
+
+    ``url`` 用于播放代理：同一部片常有 en / cn 两个页面重复上报的两条来源，
+    而真正在播的是其中某一条。按播放地址精确定位到那条来源，才不会「头记在
+    另一条来源上、播放还在用影片页 Referer」。本来源还没抓到头的，借用同一
+    站点兄弟来源的头（同站点的防盗链策略一致）。
     """
-    key = (int(movie_id or 0), int(source_id or 0))
+    mid, sid, url = int(movie_id or 0), int(source_id or 0), str(url or "")
+    key = (mid, sid, url if not sid else "")
     now = time.time()
     with _PAGE_LOCK:
         hit = _PAGE_CACHE.get(key)
         if hit and now - hit[0] < 60:
             return hit[1]
+    row = None
     with db() as conn:
-        if key[1]:
-            row = query_one(conn, "SELECT page_url FROM movie_sources WHERE id = ?",
-                            (key[1],))
-        else:
+        if sid:
             row = query_one(
-                conn,
-                "SELECT page_url FROM movie_sources WHERE movie_id = ? "
-                "AND page_url <> '' ORDER BY is_primary DESC, id ASC LIMIT 1",
-                (key[0],))
-    value = str((row or {}).get("page_url") or "")
+                conn, "SELECT movie_id, page_url, play_headers FROM movie_sources "
+                "WHERE id = ?", (sid,))
+            if row:
+                mid = mid or int(row["movie_id"] or 0)   # 只给了来源 id 时补齐影片 id
+        else:
+            if url:
+                row = query_one(
+                    conn,
+                    "SELECT page_url, play_headers FROM movie_sources "
+                    "WHERE movie_id = ? AND play_url = ? ORDER BY id DESC LIMIT 1",
+                    (mid, url))
+            if not row and mid:
+                row = query_one(
+                    conn,
+                    "SELECT page_url, play_headers FROM movie_sources WHERE movie_id = ? "
+                    "AND page_url <> '' ORDER BY is_primary DESC, id ASC LIMIT 1",
+                    (mid,))
+        meta = {"page_url": str((row or {}).get("page_url") or ""),
+                "play_headers": _parse_headers((row or {}).get("play_headers"))}
+        if mid and not meta["play_headers"]:
+            meta["play_headers"] = _sibling_headers(conn, mid, sid, meta["page_url"])
     with _PAGE_LOCK:
-        _PAGE_CACHE[key] = (now, value)
-    return value
+        _PAGE_CACHE[key] = (now, meta)
+    return meta
+
+
+def _sibling_headers(conn, movie_id: int, source_id: int, page_url: str) -> Dict[str, str]:
+    """借用同一站点兄弟来源的播放头（en / cn 等重复上报的同片来源）。"""
+    site = _site_origin(page_url)
+    if not site:
+        return {}
+    rows = conn.execute(
+        "SELECT id, page_url, play_headers FROM movie_sources "
+        "WHERE movie_id = ? AND id <> ? AND play_headers <> ''",
+        (int(movie_id), int(source_id))).fetchall()
+    for r in rows:
+        if _site_origin(r["page_url"]) == site:
+            got = _parse_headers(r["play_headers"])
+            if got:
+                return got
+    return {}
+
+
+def source_page(movie_id: int = 0, source_id: int = 0) -> str:
+    """来源对应的影片页面完整地址（用于构造 Referer / Origin）。"""
+    return _source_meta(movie_id, source_id)["page_url"]
+
+
+def _parse_headers(raw: Any) -> Dict[str, str]:
+    """解析来源上保存的播放请求头（只认 Referer / Origin，其余一律丢弃）。"""
+    if isinstance(raw, dict):
+        data = raw
+    else:
+        try:
+            import json
+            data = json.loads(str(raw or "") or "{}")
+        except (ValueError, TypeError):
+            return {}
+    if not isinstance(data, dict):
+        return {}
+    out: Dict[str, str] = {}
+    for name in ("Referer", "Origin"):
+        val = str(data.get(name) or "").strip()
+        if val.startswith(("http://", "https://")):
+            out[name] = val
+    return out
+
+
+def _cache_headers(movie_id: int, source_id: int, headers: Dict[str, str]) -> None:
+    """刷新成功后立刻让内存缓存生效，避免播放请求还读到旧 Referer。
+
+    缓存按「影片 + 来源 + 播放地址」多键存放，这里直接丢掉该影片的所有条目，
+    下次读取自然回到数据库（此时新头已写入）。
+    """
+    with _PAGE_LOCK:
+        sid = int(source_id or 0)
+        for key in [k for k in _PAGE_CACHE
+                    if k[0] == int(movie_id or 0) or (sid and k[1] == sid)]:
+            _PAGE_CACHE.pop(key, None)
 
 
 def source_referer(movie_id: int = 0, source_id: int = 0) -> str:
@@ -166,29 +244,38 @@ def upstream_proxies(url: str = "") -> Optional[Dict[str, str]]:
     """上游请求代理：``stream.upstream_proxy`` 覆盖 > 全局 ``network.proxy``。
 
     播放列表、分片与来源验证共用同一套解析，保证「验证能过、播不了」不再发生；
-    本机 / 内网地址由 ``proxy.proxies_for`` 强制直连。
+    本机 / 内网地址由 ``proxy.proxies_for`` 强制直连。能直连的主机由
+    ``egress`` 判出来后会直接返回 None，不再白绕一圈代理。
     """
-    from .proxy import proxies_for
+    from . import egress
     override = str((load_config().get("stream") or {}).get("upstream_proxy") or "").strip()
-    return proxies_for(url, override=override)
+    return egress.proxies_for(url, override=override)
 
 
-def upstream_headers(target: str, movie_id: int = 0,
-                     source_id: int = 0) -> Dict[str, str]:
+def upstream_headers(target: str, movie_id: int = 0, source_id: int = 0,
+                     extra: Optional[Dict[str, str]] = None) -> Dict[str, str]:
     """服务端代拉上游时的统一请求头：验证、播放列表、分片共用一套。
 
     尽量贴近浏览器播放时实际会带的头：Referer（默认完整页面地址，可切
     origin）、Origin、UA、Accept、Accept-Language、Sec-Fetch-*，以及设置页
     里用户自填的自定义头。凭据类头（Cookie / Authorization 等）不自动携带，
     也不允许通过自定义头注入 —— 不代抓、不带登录态、不绕过付费或 DRM。
+
+    优先级：用户显式 ``stream.strm_referer`` > 来源上保存的播放头（无头浏览器
+    截获，CDN 认的是播放器跳板域）> 影片页面地址 > CDN 自身 origin。
+    ``extra`` 用于「刚截获、还没写库」的候选地址先探一次。
     """
     stream = dict(load_config().get("stream") or {})
-    page = source_page(movie_id, source_id)
+    meta = _source_meta(movie_id, source_id, target)
+    page = meta["page_url"]
     origin = _site_origin(page)
+    stored = _parse_headers(extra) if extra else meta["play_headers"]
     explicit = str(stream.get("strm_referer") or "").strip()
     mode = str(stream.get("strm_referer_mode") or "full").lower()
     if explicit:
         referer = explicit
+    elif stored.get("Referer"):
+        referer = stored["Referer"]
     elif mode == "origin":
         referer = origin
     else:
@@ -203,15 +290,16 @@ def upstream_headers(target: str, movie_id: int = 0,
     }
     if referer:
         h["Referer"] = referer
-    if origin:
-        h["Origin"] = origin.rstrip("/")
+    stored_origin = stored.get("Origin") or origin
+    if stored_origin:
+        h["Origin"] = stored_origin.rstrip("/")
         h["Sec-Fetch-Dest"] = "empty"
         h["Sec-Fetch-Mode"] = "cors"
         h["Sec-Fetch-Site"] = "cross-site"
 
-    extra = stream.get("strm_extra_headers")
-    if isinstance(extra, dict):
-        for k, v in extra.items():
+    extra_cfg = stream.get("strm_extra_headers")
+    if isinstance(extra_cfg, dict):
+        for k, v in extra_cfg.items():
             key = str(k).strip()
             low = key.lower()
             if (not key or v is None or low in _HEADER_BLOCKLIST
@@ -364,8 +452,13 @@ def probe(url: str, headers: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
 
 def _apply(conn, source_id: int, status: str, note: str, *, play_url: str = "",
            expires_at: str = "", hls: Optional[bool] = None, refetched: bool = False,
-           available: Optional[int] = None) -> Optional[Dict[str, Any]]:
-    """把验证结果写回来源，并让虚拟文件记录跟随当前主源。"""
+           available: Optional[int] = None,
+           play_headers: Optional[Dict[str, str]] = None) -> Optional[Dict[str, Any]]:
+    """把验证结果写回来源，并让虚拟文件记录跟随当前主源。
+
+    ``play_headers`` 传 ``None`` 表示不动已有头；传 ``{}`` 表示清空（换了
+    CDN / 换站时旧的 Referer 会让新地址 403）。只保存 Referer / Origin。
+    """
     row = query_one(conn, "SELECT * FROM movie_sources WHERE id = ?", (int(source_id),))
     if not row:
         return None
@@ -380,6 +473,12 @@ def _apply(conn, source_id: int, status: str, note: str, *, play_url: str = "",
         "updated_at = datetime('now','localtime') WHERE id = ?",
         (status, int(avail), str(note or ""), _now(), url, exp, fetched, kind, int(source_id)),
     )
+    if play_headers is not None:
+        import json
+        clean = _parse_headers(play_headers)
+        conn.execute("UPDATE movie_sources SET play_headers = ? WHERE id = ?",
+                     (json.dumps(clean, ensure_ascii=False) if clean else "", int(source_id)))
+        _cache_headers(int(row["movie_id"]), int(source_id), clean)
     from . import ingest       # 延迟导入，避免 ingest → stream_verify 循环
     ingest.sync_virtual_file(conn, int(row["movie_id"]))
     return {"id": int(source_id), "movie_id": int(row["movie_id"]),
@@ -398,10 +497,68 @@ def check_source(source_id: int) -> Dict[str, Any]:
             _apply(conn, source_id, "stale", "没有播放地址，请重新获取")
         return {"ok": True, "status": "stale", "note": "没有播放地址，请重新获取"}
     res = probe(url, upstream_headers(url, source_id=source_id))
+    note = res["note"]
+    # 403 且本源还没有保存播放头：多半是防盗链 Referer 不对，而不是真的被墙。
+    # 别把「Cloudflare 阻断该出口 IP」这种误导文案丢给用户，入库后立刻就排一次
+    # 浏览器续期——等用户点播放时地址和头基本已经补齐，不必手动重试。
+    repair = bool(res["status"] == "stale" and not _own_headers(source_id)
+                  and can_renew(source_id) and _browser_enabled())
+    if repair:
+        note = "上游要求防盗链 Referer，正在后台重新获取播放地址"
     with db() as conn:
-        out = _apply(conn, source_id, res["status"], res["note"],
+        out = _apply(conn, source_id, res["status"], note,
                      expires_at=res.get("expires_at", ""), hls=res.get("hls"))
-    return {"ok": True, "status": res["status"], "note": res["note"], **(out or {})}
+    if repair:
+        _refresh_future(source_id)
+    if res["status"] == "valid":
+        _kick_probe(source_id)
+        _kick_egress(source_id)
+    return {"ok": True, "status": res["status"], "note": note, **(out or {})}
+
+
+def _kick_egress(source_id: int) -> None:
+    """验证通过后顺手试一次直连（同一主机 6 小时内只试一次）。
+
+    放在验证阶段而不是播放中：此时没有正在进行的播放，换出口不会打断画面；
+    等真正开播时该主机多半已经有「直连 / 走代理」的结论，不用再试探。
+    """
+    try:
+        from . import egress
+        with db() as conn:
+            row = query_one(conn, "SELECT play_url, page_url FROM movie_sources WHERE id = ?",
+                            (int(source_id),))
+        if not row:
+            return
+        url = str(row.get("play_url") or row.get("page_url") or "")
+        if url:
+            egress.probe_async(url, upstream_headers(url))
+    except Exception:
+        pass
+
+
+def _kick_probe(source_id: int) -> None:
+    """验证通过后排一次清晰度 / 字幕探测（只探从没探过的，幂等）。"""
+    try:
+        from . import media_probe
+        media_probe.submit_probe(int(source_id))
+    except Exception:
+        pass
+
+
+def source_order() -> str:
+    """选源排序：中文字幕 > 清晰度 > 现有 priority / 主源 / id。
+
+    两个开关分别对应设置页的「优先有字幕」「优先高清晰度」。字幕只认
+    ``sub_zh = 'zh'``（判定依据见 media_probe）；unknown 不会被当成有字幕。
+    """
+    stream = load_config().get("stream") or {}
+    parts: List[str] = []
+    if bool(stream.get("prefer_subtitle", True)):
+        parts.append("CASE WHEN sub_zh = 'zh' THEN 0 ELSE 1 END")
+    if bool(stream.get("prefer_quality", True)):
+        parts.append("media_height DESC")
+    parts.extend(["priority DESC", "is_primary DESC", "id ASC"])
+    return ", ".join(parts)
 
 
 def _page_candidates(page_url: str) -> List[str]:
@@ -423,6 +580,37 @@ def _page_candidates(page_url: str) -> List[str]:
             break
     found.sort(key=lambda u: 0 if ".m3u8" in u.lower() else 1)
     return found
+
+
+def _browser_enabled() -> bool:
+    """无头浏览器兜底是否可用（开关 + 依赖都在）。"""
+    stream = load_config().get("stream") or {}
+    if not bool(stream.get("browser_refresh", True)):
+        return False
+    from . import online_refresh
+    return online_refresh.available()
+
+
+def _browser_candidates(page: str) -> tuple:
+    """无头浏览器兜底：返回 (候选地址, 说明, 地址 → 实际请求头, 兜底 Referer)。
+
+    服务端静态抓取被 Cloudflare 人机校验挡住、或播放地址要等页面脚本
+    拉起播放器才请求时（jable / 123av），只有本机浏览器内核能拿到新签名
+    地址。开关关闭、Playwright 缺失时返回空列表 + 可读原因。
+
+    有的 CDN 校验的是「播放器所在跳板域」的 Referer / Origin（不是影片页），
+    所以这里连请求头一起带回来，验证与播放都用同一套，避免「抽得到播不了」。
+    ``referers`` 是页面上跨站 iframe 的 origin，用作 Referer 头拿不到时的兜底。
+    """
+    stream = load_config().get("stream") or {}
+    if not bool(stream.get("browser_refresh", True)):
+        return [], "", {}, []
+    from . import online_refresh
+    if not online_refresh.available():
+        return [], "无头浏览器组件未安装（pip install playwright），已跳过", {}, []
+    got = online_refresh.extract(page)
+    return (list(got.get("urls") or []), str(got.get("note") or ""),
+            dict(got.get("headers") or {}), list(got.get("referers") or []))
 
 
 def refresh_source(source_id: int, play_url: str = "", page_url: str = "") -> Dict[str, Any]:
@@ -452,29 +640,90 @@ def refresh_source(source_id: int, play_url: str = "", page_url: str = "") -> Di
             # 别把播放器还能用的来源判成失效。
             soft = res["status"] == "stale"
             msg = "上游需要防盗链头，播放时重试" if soft else "地址仍可用，有效期已续"
-            with db() as conn:
-                out = _apply(conn, source_id, res["status"], msg,
-                             expires_at=res.get("expires_at", ""), hls=res.get("hls"),
-                             refetched=True, available=1)
-            return {"ok": True, "refreshed": True, "note": msg, **(out or {})}
+            stored = _parse_headers(row["play_headers"])   # 只看本源自己保存的头
+            # 已经有能用的请求头就没什么可补的；还没头且浏览器可用时，
+            # 先让浏览器把「实际生效的 Referer」抓回来，否则播放时必然 403。
+            if not soft or stored or not _browser_enabled():
+                with db() as conn:
+                    out = _apply(conn, source_id, res["status"], msg,
+                                 expires_at=res.get("expires_at", ""), hls=res.get("hls"),
+                                 refetched=True, available=1)
+                return {"ok": True, "refreshed": True, "note": msg, **(out or {})}
         note = res["note"] or ""
 
-    candidates = [new_url] if new_url else _page_candidates(page)
-    for cand in candidates:
-        res = probe(cand, upstream_headers(cand, source_id=source_id))
-        if res["status"] not in ("valid", "stale"):
-            note = res["note"] or note
-            continue
+    def _try(list_: List[str], base_note: str, success_note: str,
+             headers_by_url: Optional[Dict[str, Dict[str, str]]] = None,
+             referers: Optional[List[str]] = None) -> tuple:
+        """逐条探测候选地址，第一个「真能播」的写库；返回 (结果 or None, 说明)。
+
+        ``headers_by_url`` 是浏览器截获到的候选地址 → 实际请求头（Referer /
+        Origin），``referers`` 是兜底跳板域 origin。CDN 认这个头时必须带上，
+        否则明明能播的地址会被判成失效（旧版本就是因为只按影片页 Referer 探，
+        才出现「抽得到播不了」）。优先取真正可用的地址；全都不行才退到
+        「403/410 待验证」——保留旧行为，不把软错误判死。
+        """
+        cand_sets: List[tuple] = []
+        for cand in list_:
+            sets: List[Optional[Dict[str, str]]] = []
+            cap = (headers_by_url or {}).get(cand)
+            if cap:
+                sets.append(cap)
+            for ref in (referers or [])[:3]:
+                sets.append({"Referer": ref.rstrip("/") + "/", "Origin": ref.rstrip("/")})
+            sets.append(None)             # 完全按配置 / 已保存头的默认组合
+            cand_sets.append((cand, sets))
+        soft: Optional[tuple] = None
+        for cand, sets in cand_sets:
+            for hdrs in sets:
+                res = probe(cand, upstream_headers(cand, source_id=source_id, extra=hdrs))
+                if res["status"] == "valid":
+                    with db() as conn:
+                        out = _apply(conn, source_id, "valid", success_note,
+                                     play_url=cand, expires_at=res.get("expires_at", ""),
+                                     hls=res.get("hls"), refetched=True, available=1,
+                                     play_headers=hdrs)
+                    _kick_probe(source_id)
+                    return {"ok": True, "refreshed": True, "note": success_note,
+                            **(out or {})}, base_note
+                base_note = res["note"] or base_note
+                if res["status"] == "stale" and soft is None:
+                    soft = (cand, hdrs)
+        if soft:
+            cand, hdrs = soft
+            with db() as conn:
+                out = _apply(conn, source_id, "valid", base_note,
+                             play_url=cand, refetched=True, available=1,
+                             play_headers=hdrs)
+            _kick_probe(source_id)
+            return {"ok": True, "refreshed": True, "note": base_note, **(out or {})}, base_note
+        return None, base_note
+
+    # 显式新地址换站时旧 Referer 只会帮倒忙，先清空；同站续期保留已保存的头
+    if new_url and _site_origin(new_url) != _site_origin(old):
         with db() as conn:
-            out = _apply(conn, source_id, "valid", note or "已从源站页面重新获取播放地址",
-                         play_url=cand, expires_at=res.get("expires_at", ""),
-                         hls=res.get("hls"), refetched=True, available=1)
-        return {"ok": True, "refreshed": True, "note": note or "已重新获取播放地址", **(out or {})}
+            _apply(conn, source_id, "checking", "已换新地址，等待验证", play_headers={})
+
+    hit, note = _try([new_url] if new_url else _page_candidates(page), note,
+                     note or "已从源站页面重新获取播放地址")
+    if hit:
+        return hit
+    # 静态 HTML 里没有可用地址（被 CF 人机校验挡住 / 播放器由脚本拉流）时，
+    # 交给本机无头浏览器打开来源页面，从网络层截获 m3u8 与它实际带的 Referer。
+    if not new_url:
+        cands, browser_note, browser_headers, browser_referers = _browser_candidates(page)
+        if browser_note:
+            note = browser_note
+        if cands:
+            hit, note = _try(cands, note, "已用无头浏览器重新获取播放地址",
+                             headers_by_url=browser_headers, referers=browser_referers)
+            if hit:
+                return hit
 
     msg = note or "未能重新获取播放地址，请手动填写新地址或配置 Referer"
     # 源站页面要浏览器会话 / 被 CF 挡时服务端拿不到新签名地址：给出能走通的路径，
     # 而不是让用户反复点「续期」。浏览器插件重新捕获后点「立即加入片库」会更新来源。
-    if not new_url and ("410" in msg or "403" in msg or "Cloudflare" in msg or not msg):
+    if not new_url and ("410" in msg or "403" in msg or "Cloudflare" in msg
+                        or "人机校验" in msg or "浏览器" in msg or not msg):
         msg += ("；源站页面可能需要浏览器会话，请用浏览器插件重新打开该片播放几秒，"
                 "在插件面板点「立即加入片库」更新播放地址，或手动填写新地址")
     with db() as conn:
@@ -561,7 +810,7 @@ def ensure_fresh(conn, movie_id: int) -> Dict[str, Any]:
                 conn,
                 "SELECT * FROM movie_sources WHERE movie_id = ? AND available = 1 "
                 "AND play_url <> '' AND status NOT IN ('invalid','unsupported') "
-                "ORDER BY priority DESC, id ASC LIMIT 1", (int(movie_id),))
+                "ORDER BY " + source_order() + " LIMIT 1", (int(movie_id),))
             if alt:
                 conn.execute("UPDATE movie_sources SET is_primary = 0 WHERE movie_id = ?",
                              (int(movie_id),))
@@ -600,8 +849,12 @@ _RENEW_POOL = ThreadPoolExecutor(max_workers=2, thread_name_prefix="avm-renew")
 
 
 def refresh_now(source_id: int, wait: float = 6.0) -> bool:
-    """播放前有限等待续期完成；返回是否在等待窗口内完成。"""
-    fut = _RENEW_POOL.submit(refresh_source, int(source_id))
+    """播放前有限等待续期完成；返回是否在等待窗口内完成。
+
+    同一来源复用同一个在跑的任务：入库时已经排上的浏览器续期不会因为播放
+    请求再开一个浏览器（既慢又容易被站点判定成爬虫）。
+    """
+    fut = _refresh_future(source_id)
     try:
         fut.result(timeout=max(0.5, float(wait)))
         return True
@@ -609,22 +862,73 @@ def refresh_now(source_id: int, wait: float = 6.0) -> bool:
         return False
 
 
-def renew_due(limit: int = 20, cooldown_minutes: int = 30) -> Dict[str, Any]:
-    """后台自动续期：扫描已过期 / 明确 410 的在线来源并重新获取播放地址。
+_REFRESH_LOCK = threading.Lock()
+#: 来源 → 正在跑的续期任务（幂等关键：同源同时只跑一个浏览器）
+_REFRESH_JOBS: Dict[int, Any] = {}
 
-    完全在后端完成，不依赖浏览器插件；同一来源冷却期内不重复请求源站
-    （成功/失败都会由 _apply 更新 updated_at）。源站要求浏览器会话时会
-    留下可读原因，换出口或站点恢复访问后下一轮自动生效。
+
+def _refresh_future(source_id: int) -> Any:
+    """取该来源正在跑的续期任务；没有就排一个。"""
+    sid = int(source_id or 0)
+    with _REFRESH_LOCK:
+        fut = _REFRESH_JOBS.get(sid)
+        if fut is not None and not fut.done():
+            return fut
+        fut = _RENEW_POOL.submit(refresh_source, sid)
+        _REFRESH_JOBS[sid] = fut
+        return fut
+
+
+def is_refreshing(source_id: int) -> bool:
+    """该来源此刻是否正在续期（前端据此显示「正在获取播放地址」）。"""
+    with _REFRESH_LOCK:
+        fut = _REFRESH_JOBS.get(int(source_id or 0))
+    return bool(fut is not None and not fut.done())
+
+
+def can_renew(source_id: int) -> bool:
+    """来源是否带回源线索（有页面地址才谈得上重新取播放地址）。"""
+    with db() as conn:
+        row = query_one(
+            conn, "SELECT page_url, refresh_from FROM movie_sources WHERE id = ?",
+            (int(source_id or 0),))
+    if not row:
+        return False
+    return bool(str(row["page_url"] or row["refresh_from"] or "").strip())
+
+
+def primary_source_id(movie_id: int) -> int:
+    """播放实际使用的来源 id（与 movie_play_source 的取舍保持一致）。"""
+    with db() as conn:
+        row = query_one(
+            conn, "SELECT id FROM movie_sources WHERE movie_id = ? AND available = 1 "
+            "AND play_url <> '' ORDER BY is_primary DESC, id ASC LIMIT 1",
+            (int(movie_id or 0),))
+    return int((row or {}).get("id") or 0)
+
+
+def _own_headers(source_id: int) -> Dict[str, str]:
+    """只读本源自己保存的播放头（不含借用兄弟来源的那部分）。"""
+    with db() as conn:
+        row = query_one(conn, "SELECT play_headers FROM movie_sources WHERE id = ?",
+                        (int(source_id or 0),))
+    return _parse_headers((row or {}).get("play_headers"))
+
+
+def due_sources(limit: int = 20, cooldown_minutes: int = 30) -> List[Dict[str, Any]]:
+    """巡检候选：已过期 / 明确 410、且带回源页面地址的在线来源。
+
+    冷却判断在 Python 里做：``updated_at`` 可能是 SQLite 的「空格分隔」或
+    旧数据里的 ISO「T 分隔」，直接按字符串比较会因格式不同误判。成功/失败
+    都会由 ``_apply`` 更新 ``updated_at``，所以冷却对两者同样生效。
     """
-    from datetime import timedelta
-    # 冷却判断在 Python 里做：updated_at 可能是 SQLite 的「空格分隔」或
-    # 旧数据里的 ISO「T 分隔」，直接按字符串比较会因格式不同误判。
     cutoff_dt = datetime.now() - timedelta(minutes=max(1, int(cooldown_minutes)))
     with db() as conn:
         rows = conn.execute(
-            "SELECT id, expires_at, check_note, updated_at FROM movie_sources "
-            "WHERE available = 1 AND play_url <> '' AND refresh_from <> '' "
-            "ORDER BY updated_at ASC LIMIT ?",
+            "SELECT s.id, s.movie_id, s.site, s.expires_at, s.check_note, s.updated_at, "
+            "m.code FROM movie_sources s LEFT JOIN movies m ON m.id = s.movie_id "
+            "WHERE s.available = 1 AND s.play_url <> '' AND s.refresh_from <> '' "
+            "ORDER BY s.updated_at ASC LIMIT ?",
             (max(1, int(limit)) * 8,)).fetchall()
 
     def _due(row) -> bool:
@@ -638,16 +942,7 @@ def renew_due(limit: int = 20, cooldown_minutes: int = 30) -> Dict[str, Any]:
         except ValueError:
             return True
 
-    due = [r for r in rows if _due(r)]
-    checked = renewed = 0
-    for r in due[:max(1, int(limit))]:
-        checked += 1
-        try:
-            if refresh_source(int(r["id"])).get("ok"):
-                renewed += 1
-        except Exception:  # noqa: BLE001 后台任务不因单条失败中断
-            pass
-    return {"ok": True, "checked": checked, "renewed": renewed}
+    return [dict(r) for r in rows if _due(r)][:max(1, int(limit))]
 
 
 def _failover(conn, failed_id: int, reason: str) -> str:
@@ -661,7 +956,7 @@ def _failover(conn, failed_id: int, reason: str) -> str:
         conn,
         "SELECT id, play_url FROM movie_sources WHERE movie_id = ? AND id <> ? "
         "AND available = 1 AND play_url <> '' AND status NOT IN ('invalid','unsupported') "
-        "ORDER BY priority DESC, id ASC LIMIT 1", (movie_id, int(failed_id)))
+        "ORDER BY " + source_order() + " LIMIT 1", (movie_id, int(failed_id)))
     if not nxt:
         # 没有备用来源时不能把主源判死、更不能清掉 is_primary：
         # 否则整部片会变成「无主源」，连重试和重新获取都找不到对象。

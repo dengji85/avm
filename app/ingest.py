@@ -94,7 +94,8 @@ def list_sources(conn: sqlite3.Connection, movie_id: int) -> List[Dict[str, Any]
         conn,
         "SELECT id, movie_id, kind, site, site_id, is_primary, pinned, priority, available, "
         "status, check_note, title, fetched_at, expires_at, last_checked, created_at, "
-        "page_url, play_url, refresh_from "
+        "page_url, play_url, refresh_from, media_width, media_height, media_bandwidth, "
+        "media_source, media_probe_note, media_probe_at, sub_zh, sub_evidence, sub_langs "
         "FROM movie_sources WHERE movie_id = ? "
         "ORDER BY is_primary DESC, priority DESC, id ASC",
         (int(movie_id),),
@@ -243,6 +244,7 @@ def link(conn: sqlite3.Connection, payload: Dict[str, Any]) -> Dict[str, Any]:
 
     movie_id = found["movie_id"]
     created = False
+    status = ""
     if not movie_id:
         if not bool(cfg().get("allow_create", True)):
             return {"ok": False, "message": "已关闭自动建片，请先在库中创建影片"}
@@ -290,15 +292,27 @@ def link(conn: sqlite3.Connection, payload: Dict[str, Any]) -> Dict[str, Any]:
         str(ev["page_url"] or "").encode("utf-8")).hexdigest()[:12])
     expires_at = str((payload or {}).get("expires_at") or "").strip()
     refresh_from = ev["page_url"] or ev["url_canonical"]
-    src = query_one(conn, "SELECT id FROM movie_sources WHERE url_canonical = ?",
-                    (ev["url_canonical"],)) if ev["url_canonical"] else None
+
+    def _find_source():
+        """按「规范 URL → 站内 ID」找已有来源；两步都命中同一条才算重复。"""
+        if ev["url_canonical"]:
+            row = query_one(conn, "SELECT id, play_url FROM movie_sources "
+                                  "WHERE url_canonical = ?", (ev["url_canonical"],))
+            if row:
+                return row
+        if ev["site"] and ev["site_id"]:
+            return query_one(conn, "SELECT id, play_url FROM movie_sources "
+                                   "WHERE site = ? AND site_id = ?",
+                             (ev["site"], ev["site_id"]))
+        return None
+
     play_url_updated = False
+    src = _find_source()
     if src:
         source_id = int(src["id"])
-        old = query_one(conn, "SELECT play_url FROM movie_sources WHERE id = ?",
-                        (source_id,)) or {}
+        status = "duplicate"
         new_play = str(ev["play_url"] or "")
-        if new_play and new_play != str(old.get("play_url") or ""):
+        if new_play and new_play != str(src["play_url"] or ""):
             # 抓到新播放地址：更新并重新验证，有效期由验证任务回填
             play_url_updated = True
             conn.execute(
@@ -323,30 +337,52 @@ def link(conn: sqlite3.Connection, payload: Dict[str, Any]) -> Dict[str, Any]:
                  ev["title"], ev["title"], refresh_from, source_id),
             )
     else:
+        # 已有影片、但不是同一条来源：作为新来源挂上去。唯一索引
+        # （idx_ms_url / idx_ms_site）仍可能因并发或规范化差异先命中，
+        # 这时落回「重复」分支，绝不把 IntegrityError 抛成 500。
         play_url_updated = bool(ev["play_url"])
-        cur = conn.execute(
-            "INSERT INTO movie_sources(movie_id, kind, site, site_id, page_url, "
-            "url_canonical, play_url, title, is_primary, priority, available, status, "
-            "confidence, evidence, fetched_at, expires_at, refresh_from) "
-            "VALUES(?,?,?,?,?,?,?,?,?,?,1,'valid',?,?,?,?,?)",
-            (int(movie_id), ev["kind"], ev["site"], sid, ev["page_url"],
-             ev["url_canonical"], ev["play_url"], ev["title"],
-             0 if has_primary else 1, 0, ev["confidence"],
-             "ingest", _now(), expires_at, refresh_from),
-        )
-        source_id = int(cur.lastrowid)
+        status = "source_added"
+        try:
+            cur = conn.execute(
+                "INSERT INTO movie_sources(movie_id, kind, site, site_id, page_url, "
+                "url_canonical, play_url, title, is_primary, priority, available, status, "
+                "confidence, evidence, fetched_at, expires_at, refresh_from) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,1,'valid',?,?,?,?,?)",
+                (int(movie_id), ev["kind"], ev["site"], sid, ev["page_url"],
+                 ev["url_canonical"], ev["play_url"], ev["title"],
+                 0 if has_primary else 1, 0, ev["confidence"],
+                 "ingest", _now(), expires_at, refresh_from),
+            )
+            source_id = int(cur.lastrowid)
+        except sqlite3.IntegrityError:
+            dup = _find_source()
+            if not dup:
+                return {"ok": False, "message": "来源写入冲突，请刷新后重试"}
+            source_id = int(dup["id"])
+            status = "duplicate"
+            play_url_updated = False
+            conn.execute(
+                "UPDATE movie_sources SET page_url = ?, title = CASE WHEN ? <> '' "
+                "THEN ? ELSE title END, refresh_from = ?, "
+                "updated_at = datetime('now','localtime') WHERE id = ?",
+                (ev["page_url"], ev["title"], ev["title"], refresh_from, source_id),
+            )
 
     _ensure_virtual_file(conn, movie_id, ev)
     store.refresh_aggregate(conn, movie_id)
+    if created:
+        status = "created"
+    sources = list_sources(conn, movie_id)
     return {
         "ok": True,
-        "status": "created" if created else "linked",
+        "status": status,
         "movie_id": int(movie_id),
         "source_id": source_id,
+        "source_count": len(sources),
         "primary": bool(not has_primary),
         "play_url_updated": play_url_updated,
         "evidence": _public(ev),
-        "sources": list_sources(conn, movie_id),
+        "sources": sources,
     }
 
 
@@ -585,6 +621,7 @@ def set_primary(conn: sqlite3.Connection, source_id: int) -> Dict[str, Any]:
 def set_source_enabled(conn: sqlite3.Connection, source_id: int,
                        enabled: bool) -> Dict[str, Any]:
     """停用 / 启用来源；停用主源时自动把播放切到下一个可用来源。"""
+    from . import stream_verify
     row = query_one(conn, "SELECT * FROM movie_sources WHERE id = ?", (int(source_id),))
     if not row:
         return {"ok": False, "message": "来源不存在"}
@@ -609,7 +646,7 @@ def set_source_enabled(conn: sqlite3.Connection, source_id: int,
             nxt = query_one(
                 conn, "SELECT id FROM movie_sources WHERE movie_id = ? AND available = 1 "
                       "AND play_url <> '' AND status NOT IN ('invalid','unsupported') "
-                      "ORDER BY priority DESC, id ASC LIMIT 1", (movie_id,))
+                      "ORDER BY " + stream_verify.source_order() + " LIMIT 1", (movie_id,))
             if nxt:
                 conn.execute("UPDATE movie_sources SET is_primary = 1 WHERE id = ?",
                              (int(nxt["id"]),))
@@ -630,10 +667,12 @@ def delete_source(conn: sqlite3.Connection, source_id: int) -> Dict[str, Any]:
     movie_id = int(row["movie_id"])
     conn.execute("DELETE FROM movie_sources WHERE id = ?", (int(source_id),))
     if row["is_primary"]:
+        from . import stream_verify
         nxt = query_one(conn, "SELECT id FROM movie_sources WHERE movie_id = ? "
                         "AND available = 1 AND play_url <> '' "
                         "AND status NOT IN ('invalid','unsupported') "
-                        "ORDER BY pinned DESC, priority DESC, id ASC LIMIT 1", (movie_id,))
+                        "ORDER BY pinned DESC, " + stream_verify.source_order()
+                        + " LIMIT 1", (movie_id,))
         if nxt:
             conn.execute("UPDATE movie_sources SET is_primary = 1 WHERE id = ?",
                          (int(nxt["id"]),))
@@ -685,6 +724,8 @@ def list_all_sources(conn: sqlite3.Connection, *, status: str = "", q: str = "",
         SELECT ms.id, ms.movie_id, ms.kind, ms.site, ms.site_id, ms.status,
                ms.available, ms.is_primary, ms.check_note, ms.last_checked,
                ms.expires_at, ms.page_url, ms.play_url,
+               ms.media_width, ms.media_height, ms.media_source,
+               ms.media_probe_note, ms.sub_zh, ms.sub_evidence, ms.sub_langs,
                m.code, m.title AS movie_title
         FROM movie_sources ms JOIN movies m ON m.id = ms.movie_id
         {wsql}

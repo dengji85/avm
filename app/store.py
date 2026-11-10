@@ -567,7 +567,7 @@ def _build_where(params: Dict[str, Any]) -> Tuple[str, List[Any]]:
             "           WHERE ma.movie_id = m.id AND a.name LIKE ?)"
             " OR EXISTS(SELECT 1 FROM movie_files f WHERE f.movie_id = m.id AND f.filename LIKE ?)"
             " OR EXISTS(SELECT 1 FROM movie_sources ms WHERE ms.movie_id = m.id"
-            "           AND (ms.site LIKE ? OR ms.title LIKE ?))"
+            "           AND (ms.site LIKE ? OR ms.title LIKE ?)))"
         )
         args.append(code_like)
         args.extend([like] * 9)
@@ -917,12 +917,13 @@ def movie_play_source(conn: sqlite3.Connection, movie_id: int):
     # 纯在线影片可能还没有虚拟 movie_files 记录（例如先收藏页面、播放地址是
     # 后来才补进来源表的）。直接从可用主源取地址，让 stream-info / HLS / 直链
     # 播放都不必依赖那条虚拟记录，避免出现「列表里看得到、点开播不了」。
+    from .stream_verify import source_order   # 延迟导入，避免与来源模块循环引用
     online = query_one(
         conn,
         "SELECT play_url FROM movie_sources WHERE movie_id = ? "
         "AND available = 1 AND play_url <> '' "
         "AND status NOT IN ('invalid','unsupported') "
-        "ORDER BY is_primary DESC, priority DESC, id ASC LIMIT 1",
+        "ORDER BY is_primary DESC, " + source_order() + " LIMIT 1",
         (int(movie_id),))
     if not online:
         return None

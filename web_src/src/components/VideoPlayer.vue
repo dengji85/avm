@@ -2,7 +2,7 @@
 import { ref, reactive, computed, onMounted, onBeforeUnmount, watch, nextTick } from 'vue'
 import videojs from 'video.js'
 import 'video.js/dist/video-js.css'
-import { streamUrl, strmHlsUrl, streamInfo, setProgress, playMovie, markPlayed, startSession, updateSession, endSession, getPreviews, genPreviews, playbackInfo, prepareStream, prepareStreamStatus, subtitleTracks, setSkipPoints, saveSubtitleSync, anchorSubtitleSync, reportSourceFailure } from '../api.js'
+import { streamUrl, strmHlsUrl, strmCacheProgress, streamInfo, setProgress, playMovie, markPlayed, startSession, updateSession, endSession, getPreviews, genPreviews, playbackInfo, prepareStream, prepareStreamStatus, subtitleTracks, setSkipPoints, saveSubtitleSync, anchorSubtitleSync, reportSourceFailure, movieSources, setPrimarySource } from '../api.js'
 import { toast, fmtClock } from '../utils.js'
 import { t } from '../i18n/index.js'
 import SubtitleConsole from './player/SubtitleConsole.vue'
@@ -19,6 +19,15 @@ const emit = defineEmits(['close', 'progress', 'ended'])
 
 const containerEl = ref(null)
 const failed = ref(false)
+/* 在线来源（在线收藏）播放失败：与「本地文件浏览器不支持」区分开，给可读原因与出路 */
+const streamFailed = ref(false)
+/* 后端正在重新获取播放地址（补防盗链头 / 换新签名）：给用户可见状态并自动重试 */
+const renewing = ref(false)
+/* 已经自动重试了几次：浮层上要能看出「还在动」，否则每 2.5 秒重载一次源，
+   用户只会觉得提示闪了一下就没了，不知道后台在做什么 */
+const retryAttempt = ref(0)
+let autoRetryLeft = 0
+let autoRetryTimer = null
 const ready = ref(false)
 const cur = ref(0)
 const dur = ref(0)
@@ -28,6 +37,12 @@ let videoEl = null         // 底层 <video> 元素
 const uiReady = ref(false)
 const setMenuOpen = ref(false)
 const markOpen = ref(false)
+/* 在线来源的「清晰度 / 字幕」菜单：按来源列出画质与中文字幕判定，
+   选了就把该来源设为主源并立刻用新地址重播（不离开播放器）。 */
+const qualityOpen = ref(false)
+const srcList = ref([])
+/* 切换在线来源时记下的播放位置：新流 loadedmetadata 后 seek 回同一时间点 */
+let resumeAt = 0
 /* CC 按钮要挂进 video.js 控制条（原生按钮那一排），用 Teleport 渲染进去，
    这样它的位置、显示/隐藏（含自动隐藏）都跟着控制条走，不用自己维护 */
 const ccHost = ref(null)
@@ -74,6 +89,10 @@ function pickSub(id) {
   setMenuOpen.value = false
 }
 function onDocClick(e) {
+  if (qualityOpen.value) {
+    const q = e.target && e.target.closest ? e.target.closest('.vp-quality') : null
+    if (!q) qualityOpen.value = false
+  }
   if (!setMenuOpen.value) return
   const host = ccHost.value
   if (host && (host === e.target || host.contains(e.target))) return
@@ -93,9 +112,9 @@ function keepBarActive() {
   barActive.value = true
   if (player && typeof player.userActive === 'function') player.userActive(true)
 }
-watch([setMenuOpen, markOpen], ([settings, mark]) => {
+watch([setMenuOpen, markOpen, qualityOpen], ([settings, mark, quality]) => {
   clearInterval(barKeepTimer)
-  if (!settings && !mark) return
+  if (!settings && !mark && !quality) return
   keepBarActive()
   barKeepTimer = setInterval(keepBarActive, 1000)
 })
@@ -622,6 +641,7 @@ let failoverTried = false
 async function resolveSource() {
   streamMode.value = ''
   directSrc.value = ''
+  streamFailed.value = false
   proxyTried = false
   hlsProxyTried = false
   try {
@@ -629,8 +649,72 @@ async function resolveSource() {
     if (info && info.stream) streamMode.value = info.hls ? 'hls' : 'strm'
     // 开关开启时优先进浏览器直连（源站对人机校验敏感、服务端代理被拦的场景）
     if (info && info.hls && info.hls_direct && info.direct_url) directSrc.value = info.direct_url
+    // 刚入库的来源往往还没截到防盗链头，后端正在后台补：先给用户可见状态
+    renewing.value = !!(info && info.renewing)
+    if (info && (info.renewing || info.stale) && autoRetryLeft <= 0) autoRetryLeft = 6
   } catch (e) { /* 忽略：按普通文件处理 */ }
   sourceReady = true
+  if (streamMode.value) loadStreamSources()
+}
+
+/** 拉该片的在线来源（画质 / 字幕判定），给「清晰度」菜单用；失败静默 */
+async function loadStreamSources() {
+  try {
+    const r = await movieSources(props.movieId)
+    srcList.value = (r && r.items) || []
+  } catch (e) { srcList.value = [] }
+}
+
+function srcQuality(s) {
+  const h = Number((s && s.media_height) || 0)
+  if (!h) return t('player.qualityUnknown')
+  return h >= 2160 ? '4K' : h + 'p'
+}
+function srcSub(s) {
+  const v = s && s.sub_zh
+  if (v === 'zh') return t('player.subZh')
+  if (v === 'none') return t('player.subNone')
+  return t('player.subUnknown')
+}
+/** 这条来源现在能不能切过去播；不能的话给出可读原因 */
+function srcPlayable(s) {
+  return !!(s && s.available && s.play_url && s.status !== 'invalid' && s.status !== 'unsupported')
+}
+function srcReason(s) {
+  if (!s) return ''
+  if (s.status === 'invalid') return t('player.srcInvalid')
+  if (s.status === 'unsupported') return t('player.srcUnsupported')
+  if (s.status === 'disabled' || !s.available) return t('player.srcDisabled')
+  if (!s.play_url) return t('player.srcNoUrl')
+  return ''
+}
+/* 菜单按钮上只显示当前主源的画质，避免占太宽 */
+const qualityLabel = computed(() => {
+  const cur = srcList.value.find((s) => s.is_primary)
+  return cur && cur.media_height ? srcQuality(cur) : t('player.quality')
+})
+
+async function pickSource(s) {
+  qualityOpen.value = false
+  if (!s || s.is_primary) return
+  if (!srcPlayable(s)) {
+    toast(t('player.sourceUnavailable') + (srcReason(s) ? '：' + srcReason(s) : ''), 'err')
+    return
+  }
+  // 切换前记住当前位置，新流加载后 seek 回同一时间点；切换即写为主源
+  const at = videoEl && videoEl.currentTime > 1 ? videoEl.currentTime : 0
+  resumeAt = at
+  try {
+    await setPrimarySource(s.id)
+    autoRetryLeft = 6
+    retryAttempt.value = 0
+    renewing.value = true          // 新主源可能还要补头：给出可见状态并自动重试
+    await retryStream()
+    if (at > 0) toast(t('player.switchResumed', { time: fmtClock(at) }), 'ok', 2200)
+  } catch (e) {
+    resumeAt = 0
+    toast(e.message, 'err')
+  }
 }
 
 function currentSource() {
@@ -647,6 +731,12 @@ const isTouch = typeof window !== 'undefined' && ('ontouchstart' in window || (n
 
 function onLoaded() {
   ready.value = true
+  // 播放成功即收工：清掉自动重试与「正在获取播放地址」状态
+  clearTimeout(autoRetryTimer)
+  autoRetryLeft = 0
+  retryAttempt.value = 0
+  renewing.value = false
+  streamFailed.value = false
   const v = videoEl
   if (!v) return
   // 在元数据就绪后显式设置初始音量（video.js 的 volume 选项在 autoplay 下常被忽略，
@@ -658,17 +748,19 @@ function onLoaded() {
   outroJumped = false
   canMarkOutro.value = dur.value > 0 && v.currentTime > dur.value * 0.5
   setupMediaSession()
-  // AI 问答里点的时间戳：优先于「继续观看」的起始位置
+  // AI 问答里点的时间戳：优先于「继续观看」的起始位置；切换来源时 resumeAt 优先
   const jump = pendingSeek
   pendingSeek = 0
-  if (jump > 0 && jump < (v.duration || 0) - 2) v.currentTime = jump
+  const resume = jump > 0 ? jump : resumeAt
+  resumeAt = 0
+  if (resume > 0 && resume < (v.duration || 0) - 2) v.currentTime = resume
   // 重封装后重新加载：只恢复播放进度，不重复计数、不重复开会话
   if (reloading) {
     reloading = false
-    if (!jump && props.startAt > 0 && props.startAt < (v.duration || 0) - 5) v.currentTime = props.startAt
+    if (resume <= 0 && props.startAt > 0 && props.startAt < (v.duration || 0) - 5) v.currentTime = props.startAt
     return
   }
-  if (!jump && props.startAt > 0 && props.startAt < (v.duration || 0) - 5) {
+  if (resume <= 0 && props.startAt > 0 && props.startAt < (v.duration || 0) - 5) {
     v.currentTime = props.startAt
     toast(t('player.jumpedTo', { time: fmtClock(props.startAt) }), '', 2200)
   }
@@ -677,11 +769,13 @@ function onLoaded() {
   // 开启观看会话，让本次播放进入"观看明细/分析"
   watchedSec = 0
   lastTick = v.currentTime || 0
-  startSession(props.movieId, { start_pos: props.startAt || 0, method: 'web' })
+  startSession(props.movieId, { start_pos: resume > 0 ? resume : (props.startAt || 0), method: 'web' })
     .then((r) => { sessionId = r.session_id ?? null })
     .catch(() => { sessionId = null })
   // 进度条 hover 预览：读取已有预览图，没有则后台异步生成（不阻塞播放）
   setupPreviewHover()
+  // 进度条「已缓存」灰条：首次拉到播放列表后才会有数据
+  setupRanges()
 }
 
 function onTime() {
@@ -698,6 +792,7 @@ function onTime() {
   if (dur.value > 0) canMarkOutro.value = now > dur.value * 0.5
   checkSkip()
   updateCueRange()
+  paintRangesThrottled()
 }
 
 /** 每 10 秒回写一次进度与观看时长 */
@@ -779,6 +874,26 @@ async function onError() {
       }
     } catch (e) { /* 后端不可用时继续原有降级链 */ }
   }
+  // 在线来源没有备用源：不静默拉起系统播放器，给出可读原因与出路（重试 / 回写地址）
+  if (streamMode.value) {
+    // 刚入库 / 地址刚过期时，后端正在重新取地址（补防盗链头、换新签名），通常
+    // 十几秒内就好。这里自动等一等再试，别让用户手动点重试。
+    if (autoRetryLeft > 0) {
+      autoRetryLeft -= 1
+      retryAttempt.value += 1
+      // 关键：重试期间不要让 failed 立住。之前这里保持 failed=true，下一轮重载源
+      // 又要把它置回 false，整块提示被反复「出现 → 消失」，看起来就是闪一下。
+      // 现在改成画面保持可见 + 常驻浮层说明「正在重新获取（第 N 次）」。
+      failed.value = false
+      renewing.value = true
+      scheduleAutoRetry()
+      return
+    }
+    // 重试预算用完：收起浮层，改成明确的「已失效」面板 + 可执行的出路
+    streamFailed.value = true
+    renewing.value = false
+    return
+  }
   if (remuxTried) { fallbackExternal(); return }
   try {
     const info = await playbackInfo(props.movieId)
@@ -848,6 +963,33 @@ function fallbackExternal() {
     autoExternalDone = true
     openExternal()
   }
+}
+
+/** 在线来源重试：重新问后端（会触发一次续期 / 换源），拿到新地址再播一次。
+ *  manual=true 表示用户点了「重试」：给一轮新的自动重试预算并重置计数。 */
+async function retryStream(manual = false) {
+  if (manual) { autoRetryLeft = 6; retryAttempt.value = 0 }
+  streamFailed.value = false
+  failed.value = false
+  failoverTried = false
+  remuxTried = false
+  proxyTried = false
+  hlsProxyTried = false
+  await resolveSource()
+  // resolveSource 会按后端返回重新判定 renewing；自动重试窗口内强制保持，
+  // 免得「后端说还在续期」但这一次探测恰好没标记，浮层中途消失
+  if (streamMode.value && autoRetryLeft > 0) renewing.value = true
+  if (!player) return
+  const src = currentSource()
+  src.src += (src.src.includes('?') ? '&' : '?') + 'r=' + Date.now()
+  player.src(src)
+  player.play().catch(() => {})
+}
+
+/** 自动重试：后端还在续期时每 2.5s 重新问一次，正常十几秒内就能拿到可播地址 */
+function scheduleAutoRetry() {
+  clearTimeout(autoRetryTimer)
+  autoRetryTimer = setTimeout(() => { retryStream() }, 2500)
 }
 
 function onEnded() {
@@ -1263,6 +1405,8 @@ function initPlayer() {
     barActive.value = true
     player.on('loadedmetadata', () => { onLoaded() })
     player.on('timeupdate', () => onTime())
+    // MSE 缓冲变化不会触发 timeupdate：单独跟进，保证灰条跟得上
+    player.on('progress', () => paintRangesThrottled())
     player.on('ended', () => onEnded())
     player.on('error', () => onError())
     // 右上角浮层跟着控制条同节奏显隐；菜单打开 / 暂停时保持可见
@@ -1343,6 +1487,16 @@ function destroyPlayer() {
     videoEl = null
     progressCtrl = null
     hoverBound = false
+    // 缓存灰条：停轮询并丢掉服务端区间，换片后由 setupRanges 重新建立
+    if (cacheTimer) { clearInterval(cacheTimer); cacheTimer = null }
+    if (statsTimer) { clearInterval(statsTimer); statsTimer = null }
+    statsOpen.value = false
+    statsRows.value = []
+    rangesHost = null
+    cacheRaw = []
+    cacheTotal = 0
+    cacheSegments = 0
+    cacheAhead.value = 0
     previewUrls = []
     tipEl = null
     tipImgEl = null
@@ -1430,6 +1584,191 @@ function setupPreviewHover() {
 
 saveTimer = setInterval(() => saveProgress(false), 10000)
 
+// ---- 进度条「已缓存」显示 ----
+/* 两层灰条叠在进度条上：
+   ① 服务端已缓存（分片在内存里 / 后台预读过）—— 决定这一刻要不要等网络；
+   ② 浏览器已缓冲（video.buffered，MSE 里真的能立刻出画面）—— 画得更浅、盖在上面。
+   在线播放列表是 no-store 的，每次播放重新拉，所以缓存进度按影片轮询（2 秒）。 */
+const cacheAhead = ref(0)
+let rangesHost = null
+let cacheRaw = []          // 服务端已缓存区间（秒，按播放列表时长计）
+let cacheTotal = 0         // 播放列表总时长（秒）
+let cacheSegments = 0      // 播放列表总分片数（调试面板显示的 x/y 段）
+let cacheTimer = null
+let lastPaint = 0
+
+function cacheScale() {
+  // 播放列表总时长与播放器时长偶有差异（广告 / 丢段 / 容器偏移）：按比例对齐到进度条
+  const d = dur.value || 0
+  return (d > 0 && cacheTotal > 0) ? d / cacheTotal : 1
+}
+
+function ensureRangesHost() {
+  const holder = progressCtrl && progressCtrl.querySelector('.vjs-progress-holder')
+  if (!holder) return null
+  if (!rangesHost || !holder.contains(rangesHost)) {
+    rangesHost = document.createElement('div')
+    rangesHost.className = 'vp-ranges'
+    // 插成第一个子节点：video.js 的已播进度条在其后，天然盖在上面
+    holder.insertBefore(rangesHost, holder.firstChild)
+  }
+  return rangesHost
+}
+
+function bufferedRanges() {
+  const v = videoEl
+  if (!v || !v.buffered) return []
+  const out = []
+  for (let i = 0; i < v.buffered.length; i++) {
+    out.push([v.buffered.start(i), v.buffered.end(i)])
+  }
+  return out
+}
+
+function paintRanges() {
+  const host = ensureRangesHost()
+  if (!host) return
+  const total = dur.value || 0
+  host.textContent = ''
+  if (!total) return
+  const add = (list, cls) => {
+    for (const [s, e] of list) {
+      if (e <= 0 || s >= total) continue
+      const left = (Math.max(0, s) / total) * 100
+      const width = (Math.min(total, e) / total) * 100 - left
+      if (width < 0.15) continue
+      const bar = document.createElement('i')
+      bar.className = 'vp-range ' + cls
+      bar.style.left = left + '%'
+      bar.style.width = width + '%'
+      host.appendChild(bar)
+    }
+  }
+  const k = cacheScale()
+  // 缓存层先画（在下面），浏览器缓冲层后画（盖在上面）
+  add(cacheRaw.map(([s, e]) => [s * k, e * k]), 'cache')
+  add(bufferedRanges(), 'buf')
+  // 「已缓存多长」取当前播放点往后连续可用的一段
+  const t = cur.value || 0
+  let ahead = 0
+  for (const r of cacheRaw) {
+    const s = r[0] * k
+    const e = r[1] * k
+    if (t >= s && t <= e) { ahead = Math.max(0, e - t); break }
+  }
+  cacheAhead.value = ahead
+}
+
+function paintRangesThrottled() {
+  const now = performance.now()
+  if (now - lastPaint < 400) return
+  lastPaint = now
+  paintRanges()
+}
+
+async function loadCacheProgress() {
+  if (!props.movieId || streamMode.value !== 'hls') return
+  try {
+    const r = await strmCacheProgress(props.movieId)
+    cacheRaw = (r && r.ranges) || []
+    cacheTotal = Number((r && r.total) || 0)
+    cacheSegments = Number((r && r.segments) || 0)
+  } catch (e) {
+    // 旧后端没有这个接口：不画缓存层，播放照常
+    cacheRaw = []
+    cacheTotal = 0
+    cacheSegments = 0
+  }
+  paintRanges()
+}
+
+function setupRanges() {
+  if (!player) return
+  ensureRangesHost()
+  paintRanges()
+  clearInterval(cacheTimer)
+  if (streamMode.value === 'hls') {
+    loadCacheProgress()
+    cacheTimer = setInterval(loadCacheProgress, 2000)
+  }
+}
+
+// ---- 播放调试信息（右键画面开关）----
+/* 排查「卡 / 到底缓存了多少 / 放的什么清晰度」时不用开 DevTools：
+   右键画面弹出，每 0.5 秒刷新。纯只读，不碰播放状态与进度上报。 */
+const statsOpen = ref(false)
+const statsRows = ref([])
+let statsTimer = null
+
+function rangeSum(list) {
+  return list.reduce((a, r) => a + Math.max(0, r[1] - r[0]), 0)
+}
+
+function collectStats() {
+  const v = videoEl
+  const rows = []
+  if (!v) { statsRows.value = rows; return }
+  const total = dur.value || 0
+  const pos = v.currentTime || 0
+  const mode = streamMode.value === 'hls' ? t('player.statsModeHls')
+    : streamMode.value === 'strm' ? t('player.statsModeStrm') : t('player.statsModeLocal')
+  rows.push([t('player.statsMode'), mode])
+  rows.push([t('player.statsTime'),
+    `${fmtClock(pos)} / ${total ? fmtClock(total) : '—'}` +
+    (total ? ` · ${Math.round((pos / total) * 100)}%` : '')])
+  rows.push([t('player.statsPicture'), v.videoWidth ? `${v.videoWidth}×${v.videoHeight}` : '—'])
+  let frames = '—'
+  try {
+    const q = v.getVideoPlaybackQuality ? v.getVideoPlaybackQuality() : null
+    if (q && q.totalVideoFrames) {
+      frames = `${Math.max(0, q.totalVideoFrames - q.droppedVideoFrames)} / ${q.totalVideoFrames}`
+        + ` · ${t('player.statsDropped', { n: q.droppedVideoFrames })}`
+    }
+  } catch (e) { /* 老浏览器没有这个 API */ }
+  rows.push([t('player.statsFrames'), frames])
+  const br = bufferedRanges()
+  if (br.length) {
+    let ahead = 0
+    for (const [s, e] of br) {
+      if (pos >= s && pos <= e) { ahead = Math.max(0, e - pos); break }
+    }
+    rows.push([t('player.statsBuffer'), t('player.statsSpan', {
+      n: br.length, total: fmtClock(rangeSum(br)), ahead: fmtClock(ahead),
+    })])
+  } else {
+    rows.push([t('player.statsBuffer'), t('player.statsNone')])
+  }
+  if (cacheRaw.length) {
+    const k = cacheScale()
+    rows.push([t('player.statsCache'), t('player.statsCacheValue', {
+      n: cacheRaw.length, all: cacheSegments || '—',
+      total: fmtClock(rangeSum(cacheRaw) * k), ahead: fmtClock(cacheAhead.value),
+    })])
+  } else {
+    rows.push([t('player.statsCache'), t('player.statsNone')])
+  }
+  // 进度条灰条是否真的挂上了：看不到灰条时先看这一行
+  rows.push([t('player.statsLayer'), rangesHost && rangesHost.isConnected
+    ? t('player.statsLayerOn', { n: rangesHost.childElementCount })
+    : t('player.statsLayerOff')])
+  rows.push([t('player.statsState'), `readyState ${v.readyState} · networkState ${v.networkState}`])
+  const vol = Math.round((player ? player.volume() : v.volume) * 100)
+  const muted = (player ? player.muted() : v.muted)
+  rows.push([t('player.statsAudio'),
+    `${vol}%${muted ? ' · ' + t('player.statsMuted') : ''} · ${(v.playbackRate || 1).toFixed(2)}x`])
+  statsRows.value = rows
+}
+
+function toggleStats() {
+  statsOpen.value = !statsOpen.value
+  clearInterval(statsTimer)
+  statsTimer = null
+  if (statsOpen.value) {
+    collectStats()
+    statsTimer = setInterval(collectStats, 500)
+  }
+}
+
 // 外部请求暂停（如连播途中打开影片详情抽屉，画面被盖住时不应继续出声）
 function onPauseRequest() {
   if (player && !player.paused()) player.pause()
@@ -1473,12 +1812,17 @@ onBeforeUnmount(() => {
   document.removeEventListener('webkitfullscreenchange', onFullscreenChange)
   unlockOrientation()  // 别把设备方向锁留在退出播放器之后
   clearInterval(saveTimer)
+  clearTimeout(autoRetryTimer)
   destroyPlayer()
 })
 
 watch(() => props.movieId, () => {
   // 切换影片：结束上一个会话并销毁重建播放器
   destroyPlayer()
+  clearTimeout(autoRetryTimer)
+  autoRetryLeft = 0
+  retryAttempt.value = 0
+  renewing.value = false
   failed.value = false
   autoExternalDone = false
   remuxTried = false
@@ -1498,7 +1842,7 @@ watch(() => props.movieId, () => {
 <template>
   <div class="player">
     <div v-show="!failed" ref="containerEl" class="vjs-wrap" :class="{ 'web-fs': webFs }"
-         :style="videoVars">
+         :style="videoVars" @contextmenu.prevent="toggleStats">
       <!-- 锐化滤镜：kernel 由画面控制台的「锐化」滑块驱动，0 时是恒等核（无效果） -->
       <svg class="vp-svg-filters" aria-hidden="true" focusable="false" width="0" height="0">
         <filter id="vp-sharpen" x="0" y="0" width="100%" height="100%">
@@ -1554,6 +1898,29 @@ watch(() => props.movieId, () => {
         <div v-if="skipOutro" class="vp-btn vp-tag" :title="$t('player.skipOutroClear')" @click.stop="clearSkip('outro')">
           {{ $t('player.outroTag', { t: fmtSkip(skipOutro) }) }}<span class="vp-x">✕</span>
         </div>
+        <!-- 清晰度 / 字幕：按在线来源列出画质与中文字幕判定，切换即改主源并重播 -->
+        <div v-if="streamMode && srcList.length > 1" class="vp-btn vp-quality"
+             :class="{ on: qualityOpen }" :title="$t('player.qualityTip')"
+             @click.stop="qualityOpen = !qualityOpen">
+          {{ qualityLabel }}
+          <div v-if="qualityOpen" class="vp-menu vp-qmenu" @click.stop>
+            <button v-for="s in srcList" :key="s.id" class="vp-item vp-qitem"
+                    :class="{ on: s.is_primary, off: !srcPlayable(s) }"
+                    :disabled="!srcPlayable(s)" :title="srcReason(s) || $t('player.qualityTip')"
+                    @click="pickSource(s)">
+              <span class="vp-qres">{{ srcQuality(s) }}</span>
+              <span class="vp-qsub" :class="s.sub_zh === 'zh' ? 'ok' : ''">{{ srcSub(s) }}</span>
+              <span class="vp-qsite ellipsis">{{ s.site || $t('detail.srcUnknown') }}</span>
+              <span v-if="s.is_primary" class="vp-qnow">{{ $t('player.qCurrent') }}</span>
+              <span v-else-if="!srcPlayable(s)" class="vp-qwhy">{{ srcReason(s) }}</span>
+            </button>
+          </div>
+        </div>
+        <!-- 已缓存时长：进度条灰条的数字版，告诉用户「还能连播多久不用等」 -->
+        <div v-if="cacheAhead >= 3" class="vp-btn vp-cache-tag"
+             :title="$t('player.cacheAheadHint')">
+          {{ $t('player.cacheAhead', { t: fmtShort(Math.round(cacheAhead)) }) }}
+        </div>
         <div v-if="canMarkIntro || canMarkOutro" class="vp-btn vp-mark" :class="{ on: markOpen }"
              :title="$t('player.markSkipTip')" @click.stop="markOpen = !markOpen">
           ⚑ <span class="vp-mark-label">{{ $t('player.markSkip') }}</span>
@@ -1573,6 +1940,31 @@ watch(() => props.movieId, () => {
         <span>{{ skipToast }}</span>
         <button class="vp-undo" @click.stop="undoSkip">{{ $t('player.undo') }}</button>
       </div>
+
+      <!-- 正在重新获取播放地址：常驻小卡片。
+           以前这段提示放在下方失败面板里，而每次自动重试都会先收起面板再重载源，
+           于是「出现 → 消失 → 再出现」，看起来就是闪一下、看不清。
+           现在重试期间画面保持可见，状态画在画面上，不随重载消失。 -->
+      <div v-if="renewing && !streamFailed && !preparing" class="vp-renew">
+        <span class="vp-renew-spin"></span>
+        <div class="vp-renew-txt">
+          <b>{{ $t('player.renewing') }}</b>
+          <span>{{ retryAttempt > 0 ? $t('player.renewingAttempt', { n: retryAttempt }) : $t('player.renewingDesc') }}</span>
+        </div>
+      </div>
+
+      <!-- 播放调试信息：右键画面开关（排查卡顿 / 缓冲 / 清晰度时不用开 DevTools） -->
+      <div v-if="statsOpen" class="vp-stats" @click.stop @contextmenu.stop.prevent>
+        <div class="vp-stats-head">
+          <span>{{ $t('player.statsTitle') }}</span>
+          <span class="vp-stats-x" :title="$t('player.statsClose')" @click="statsOpen = false">✕</span>
+        </div>
+        <div class="vp-stats-body">
+          <div v-for="(row, i) in statsRows" :key="i" class="vp-stats-row">
+            <span class="k">{{ row[0] }}</span><span class="v">{{ row[1] }}</span>
+          </div>
+        </div>
+      </div>
     </div>
 
     <!-- 浏览器不兼容的容器/音轨：正在快速重封装为 MP4（只复制视频流，不重编码） -->
@@ -1583,11 +1975,23 @@ watch(() => props.movieId, () => {
       <div class="p-bar"><i :style="{ width: Math.max(3, preparePercent) + '%' }"></i></div>
     </div>
 
-    <div v-if="failed && !preparing" class="p-fail">
+    <!-- 硬失败（重试预算用完）：画面收起，给出原因与出路。
+         「正在重新获取播放地址」不再走这里——它由画面上的常驻卡片表达。 -->
+    <div v-if="failed && !preparing && !renewing" class="p-fail">
       <div class="icon">▶</div>
-      <div class="title">{{ $t('player.cannotDecode') }}</div>
-      <p class="desc">{{ $t('player.cannotDecodeDesc') }}</p>
-      <button v-if="!isRemote" class="btn primary" @click="openExternal">{{ $t('player.openExternal') }}</button>
+      <template v-if="streamFailed">
+        <div class="title">{{ $t('player.streamFailed') }}</div>
+        <p class="desc">{{ isRemote ? $t('player.streamFailedDesc') : $t('player.streamFailedLocal') }}</p>
+        <div class="hstack" style="gap:8px;justify-content:center">
+          <button class="btn primary" @click="retryStream(true)">{{ $t('player.retry') }}</button>
+          <button v-if="!isRemote" class="btn" @click="openExternal">{{ $t('player.openExternal') }}</button>
+        </div>
+      </template>
+      <template v-else>
+        <div class="title">{{ $t('player.cannotDecode') }}</div>
+        <p class="desc">{{ $t('player.cannotDecodeDesc') }}</p>
+        <button v-if="!isRemote" class="btn primary" @click="openExternal">{{ $t('player.openExternal') }}</button>
+      </template>
     </div>
   </div>
 </template>
@@ -1726,6 +2130,50 @@ watch(() => props.movieId, () => {
   font-size: 12px; cursor: pointer; user-select: none;
 }
 .vp-btn:hover, .vp-btn.on { background: rgba(255,255,255,.18); }
+/* 已缓存时长：只读数字，别抢「标记跳过」的点击 */
+.vp-cache-tag { cursor: default; opacity: .78; }
+.vp-cache-tag:hover { background: rgba(0,0,0,.5); }
+/* 进度条上的两层灰条：服务端已缓存在下（淡蓝），浏览器已缓冲在上（更亮） */
+/* video.js 自带的 load-progress 与底槽同色（rgba(115,133,159,.5)），等于看不见；
+   这里顺手改亮一点，万一 VHS 更新了它也能露出来，不依赖我们自绘的那层。 */
+.vjs-wrap :deep(.video-js .vjs-load-progress),
+.vjs-wrap :deep(.video-js .vjs-load-progress div) { background: rgba(255,255,255,.18); }
+.vjs-wrap :deep(.vp-ranges) {
+  position: absolute; top: 0; right: 0; bottom: 0; left: 0;
+  z-index: 0; pointer-events: none;
+}
+.vjs-wrap :deep(.vp-range) {
+  position: absolute; top: 0; bottom: 0; display: block;
+  /* 两小时的片子里，30 秒缓冲只占 0.4%（约 2px）：给个最小宽度，不然等于没画 */
+  min-width: 2px;
+}
+.vjs-wrap :deep(.vp-range.cache) { background: rgba(122, 196, 255, .42); }
+.vjs-wrap :deep(.vp-range.buf) { background: rgba(255, 255, 255, .5); }
+
+/* 播放调试信息面板：右键画面开关 */
+.vp-stats {
+  position: absolute; top: 10px; left: 10px; z-index: 40;
+  min-width: 260px; max-width: 42%;
+  padding: 8px 10px 9px;
+  border-radius: 8px; border: 1px solid rgba(255,255,255,.16);
+  background: rgba(12, 14, 18, .88); color: rgba(255,255,255,.9);
+  font-size: 12px; line-height: 1.7; user-select: text;
+  backdrop-filter: blur(4px);
+}
+.vp-stats-head {
+  display: flex; align-items: center; justify-content: space-between;
+  font-weight: 600; margin-bottom: 4px; color: #fff;
+}
+.vp-stats-x {
+  cursor: pointer; padding: 0 3px; opacity: .7;
+}
+.vp-stats-x:hover { opacity: 1; }
+.vp-stats-row { display: flex; gap: 10px; }
+.vp-stats-row .k { color: rgba(255,255,255,.55); flex: 0 0 auto; }
+.vp-stats-row .v {
+  color: rgba(255,255,255,.92); font-variant-numeric: tabular-nums;
+  word-break: break-all;
+}
 /* 已标记的跳过点：带时间点与 ✕，一眼看出是「点它清除」而不是标记入口 */
 .vp-tag, .vp-mark { gap: 5px; }
 .vp-x { font-size: 10px; opacity: .6; }
@@ -1777,6 +2225,18 @@ watch(() => props.movieId, () => {
 }
 .vp-item:hover { background: var(--c-surface-2); color: var(--c-text); }
 .vp-item.on { color: #fff; background: var(--c-primary); }
+/* 清晰度 / 字幕菜单：一条来源一行（画质 · 字幕判定 · 站点），当前主源高亮 */
+.vp-quality { position: relative; }
+.vp-qmenu { width: 290px; max-height: 46vh; overflow-y: auto; }
+.vp-qitem { align-items: baseline; }
+.vp-qitem.off { opacity: .55; cursor: not-allowed; }
+.vp-qres { flex: none; width: 46px; font-variant-numeric: tabular-nums; }
+.vp-qsub { flex: none; font-size: 11.5px; color: var(--c-text-3); }
+.vp-qsub.ok { color: var(--c-ok, #3fb950); }
+.vp-item.on .vp-qsub { color: rgba(255,255,255,.82); }
+.vp-qsite { color: var(--c-text-3); font-size: 11.5px; }
+.vp-qnow { flex: none; margin-left: auto; font-size: 11px; opacity: .85; }
+.vp-qwhy { flex: none; margin-left: auto; font-size: 11px; color: var(--c-warn, #d29922); }
 /* 字幕入口只保留浮层右上角的 CC：video.js 自带的按钮是「悬停弹出」，
    鼠标往菜单上一挪就收起，几乎点不中，留着只会让人以为是 bug */
 .vjs-wrap :deep(.video-js .vjs-subs-caps-button) { display: none !important; }
@@ -1805,6 +2265,26 @@ watch(() => props.movieId, () => {
   background: rgba(0,0,0,.78); color: #fff; font-size: 13px;
   white-space: nowrap;
 }
+/* 正在重新获取播放地址：顶部居中常驻卡片。位置避开左上角的调试面板与底部控制条，
+   不接收点击（重试期间用户仍要能暂停 / 调音量） */
+.vp-renew {
+  position: absolute; left: 50%; top: 14px; transform: translateX(-50%);
+  z-index: 15; display: flex; align-items: center; gap: 10px;
+  max-width: min(560px, 86%);
+  padding: 8px 14px; border-radius: 12px;
+  background: rgba(0,0,0,.74); color: #fff;
+  box-shadow: 0 4px 16px rgba(0,0,0,.4);
+  pointer-events: none;
+}
+.vp-renew-txt { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.vp-renew-txt b { font-size: 13px; font-weight: 600; }
+.vp-renew-txt span { font-size: 12px; color: rgba(255,255,255,.72); }
+.vp-renew-spin {
+  width: 14px; height: 14px; flex: none; border-radius: 50%;
+  border: 2px solid rgba(255,255,255,.24); border-top-color: #fff;
+  animation: vp-renew-rot .8s linear infinite;
+}
+@keyframes vp-renew-rot { to { transform: rotate(360deg); } }
 .vp-undo {
   border: 0; border-radius: 999px; padding: 3px 10px; cursor: pointer;
   background: var(--c-primary); color: #fff; font-size: 12px;

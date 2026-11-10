@@ -9,6 +9,7 @@ import {
   posterTaskStart, posterTaskState, posterTaskCancel,
   fsMounts,
   listPlugins, togglePlugin, regenAllPreviews, streamCacheStats, clearStreamCache,
+  strmCacheStats, clearStrmCache,
   extStatus,
   listSessions, revokeSession, getAudit, logout as apiLogout, logoutAll as apiLogoutAll,
   setPin, privacyState, privacyLock, trustedDevices, revokeTrusted,
@@ -16,7 +17,7 @@ import {
   listApiKeys, createApiKey, revokeApiKey,
   embyStatus, embyTest, embyRefresh, listSubtitleSources,
 } from '../api.js'
-import { toast, confirmDialog, fmtAgo, fmtDateTime, prettyHostPath, setSiteTitle } from '../utils.js'
+import { toast, confirmDialog, fmtAgo, fmtDateTime, prettyHostPath, setSiteTitle, isLocalHost } from '../utils.js'
 import { useTasks } from '../composables/useTasks.js'
 import { basicOnly, setBasicOnly, resetGuide } from '../composables/useGuide.js'
 import { LANGUAGES, i18nState, setLang } from '../i18n'
@@ -47,6 +48,8 @@ const TAB_ICONS = {
   remote: '🌐', privacy: '🔒', ext: '🧰', about: 'ℹ️',
 }
 const tab = ref('library')
+/* 本机回环访问：不展示浏览器插件配对 / 安装入口（本地环境没有配对场景） */
+const localMode = isLocalHost()
 /* 其他页面（如解锁码提示条）可以请求直接打开某个标签 */
 watch(() => state.settingsTab, (v) => {
   if (!v) return
@@ -85,6 +88,12 @@ const cfg = reactive({
   stream: {
     auto_remux: true, remux_cache_mb: 4096, strm_proxy: false, hls_direct: false,
     upstream_proxy: '',
+    auto_renew: true, auto_renew_interval: 10, renew_cooldown: 30,
+    browser_refresh: true, browser_timeout: 30,
+    prefer_subtitle: true, prefer_quality: true, probe_media: true, probe_timeout: 30,
+    cache_segments: true, cache_mb: 64, cache_ttl: 300,
+    disk_cache: true, disk_cache_mb: 6144,
+    prefetch_count: 4, prefetch_workers: 2, smart_egress: true,
     strm_referer: '', strm_referer_mode: 'full', strm_user_agent: '', strm_extra_headers: {},
   },
   wiki: { languages: ['ja', 'zh'] },
@@ -220,7 +229,13 @@ async function load() {
     cfg.network = Object.assign({ proxy: '' }, c.network)
     cfg.stream = Object.assign(
       { auto_remux: true, remux_cache_mb: 4096, strm_proxy: false, hls_direct: false,
-        upstream_proxy: '', strm_referer: '', strm_referer_mode: 'full',
+        upstream_proxy: '', auto_renew: true, auto_renew_interval: 10, renew_cooldown: 30,
+        browser_refresh: true, browser_timeout: 30,
+        prefer_subtitle: true, prefer_quality: true, probe_media: true, probe_timeout: 30,
+        cache_segments: true, cache_mb: 64, cache_ttl: 300,
+        disk_cache: true, disk_cache_mb: 6144,
+        prefetch_count: 4, prefetch_workers: 2, smart_egress: true,
+        strm_referer: '', strm_referer_mode: 'full',
         strm_user_agent: '', strm_extra_headers: {} },
       c.stream,
     )
@@ -300,6 +315,7 @@ async function load() {
       c.privacy,
     )
     loadStreamCache()
+    loadDiskCache()
     loadSecurity()
     loadAsr()
     loadExtStatus()
@@ -438,6 +454,28 @@ async function clearCacheNow() {
     toast(t('settings.playCleared', { n: r.removed || 0 }), 'ok')
     await loadStreamCache()
   } catch (e) { toast(e.message, 'err') } finally { clearingCache.value = false }
+}
+
+/* 分片磁盘缓存的实际占用：改完上限能立刻看到效果，不用去 data/stream_cache 数文件 */
+const diskUsedMb = ref(null)
+const clearingDisk = ref(false)
+async function loadDiskCache() {
+  try {
+    const r = await strmCacheStats()
+    diskUsedMb.value = r.disk_on ? Math.round((r.disk_bytes || 0) / 104857.6) / 10 : null
+  } catch (e) { diskUsedMb.value = null }
+}
+
+/* 清空分片缓存：上限调到几 GB 后，用户需要一个「立刻收回空间」的出口，
+   否则只能自己去删 data/stream_cache 目录 */
+async function clearDiskCache() {
+  if (!await confirmDialog(t('settings.diskClear'), t('settings.diskClearConfirm'), { okText: t('settings.diskClear') })) return
+  clearingDisk.value = true
+  try {
+    const r = await clearStrmCache()
+    diskUsedMb.value = 0
+    toast(t('settings.diskCleared', { n: r.removed || 0 }), 'ok')
+  } catch (e) { toast(e.message, 'err') } finally { clearingDisk.value = false }
 }
 
 /* ---------------- 登录与会话（安全，见 docs/安全与隐私设计.md） ---------------- */
@@ -608,6 +646,23 @@ async function saveIngest() {
         strm_referer_mode: cfg.stream.strm_referer_mode === 'origin' ? 'origin' : 'full',
         strm_user_agent: (cfg.stream.strm_user_agent || '').trim(),
         strm_extra_headers: extra,
+        auto_renew: !!cfg.stream.auto_renew,
+        auto_renew_interval: Math.max(2, Math.min(1440, Number(cfg.stream.auto_renew_interval) || 10)),
+        renew_cooldown: Math.max(1, Math.min(1440, Number(cfg.stream.renew_cooldown) || 30)),
+        browser_refresh: !!cfg.stream.browser_refresh,
+        browser_timeout: Math.max(8, Math.min(120, Number(cfg.stream.browser_timeout) || 30)),
+        prefer_subtitle: !!cfg.stream.prefer_subtitle,
+        prefer_quality: !!cfg.stream.prefer_quality,
+        probe_media: !!cfg.stream.probe_media,
+        probe_timeout: Math.max(5, Math.min(180, Number(cfg.stream.probe_timeout) || 30)),
+        cache_segments: !!cfg.stream.cache_segments,
+        cache_mb: Math.max(0, Math.min(2048, Number(cfg.stream.cache_mb) || 0)),
+        cache_ttl: Math.max(30, Math.min(3600, Number(cfg.stream.cache_ttl) || 300)),
+        disk_cache: !!cfg.stream.disk_cache,
+        disk_cache_mb: Math.max(0, Math.min(102400, Number(cfg.stream.disk_cache_mb) || 0)),
+        prefetch_count: Math.max(0, Math.min(12, Number(cfg.stream.prefetch_count) || 0)),
+        prefetch_workers: Math.max(1, Math.min(4, Number(cfg.stream.prefetch_workers) || 2)),
+        smart_egress: cfg.stream.smart_egress !== false,
       },
     })
     toast(t('settings.ingestSaved'), 'ok')
@@ -2641,6 +2696,93 @@ onMounted(async () => {
               <label>{{ $t('settings.ingestTtl') }}</label>
               <input class="inp" type="number" min="1" max="168" v-model.number="cfg.ingest.stale_ttl_hours" style="max-width:120px" />
             </div>
+            <div class="sub-block">
+              <div class="sub-title">{{ $t('settings.renewTitle') }}</div>
+              <p class="muted">{{ $t('settings.renewHint') }}</p>
+            </div>
+            <div class="field">
+              <label class="toggle"><input type="checkbox" v-model="cfg.stream.auto_renew" /><span class="track"></span></label>
+              <span>{{ $t('settings.renewAuto') }}</span>
+            </div>
+            <div class="field">
+              <label>{{ $t('settings.renewInterval') }}</label>
+              <input class="inp" type="number" min="2" max="1440" v-model.number="cfg.stream.auto_renew_interval" style="max-width:120px" />
+            </div>
+            <div class="field">
+              <label>{{ $t('settings.renewCooldown') }}</label>
+              <input class="inp" type="number" min="1" max="1440" v-model.number="cfg.stream.renew_cooldown" style="max-width:120px" />
+            </div>
+            <div class="field">
+              <label class="toggle"><input type="checkbox" v-model="cfg.stream.browser_refresh" /><span class="track"></span></label>
+              <span>{{ $t('settings.renewBrowser') }}</span>
+              <span class="hint">{{ $t('settings.renewBrowserHint') }}</span>
+            </div>
+            <div class="field">
+              <label>{{ $t('settings.renewTimeout') }}</label>
+              <input class="inp" type="number" min="8" max="120" v-model.number="cfg.stream.browser_timeout" style="max-width:120px" />
+            </div>
+            <div class="field col">
+              <div class="sub-title">{{ $t('settings.preferTitle') }}</div>
+              <p class="muted">{{ $t('settings.preferHint') }}</p>
+            </div>
+            <div class="field">
+              <label class="toggle"><input type="checkbox" v-model="cfg.stream.prefer_subtitle" /><span class="track"></span></label>
+              <span>{{ $t('settings.preferSubtitle') }}</span>
+              <span class="hint">{{ $t('settings.preferSubtitleHint') }}</span>
+            </div>
+            <div class="field">
+              <label class="toggle"><input type="checkbox" v-model="cfg.stream.prefer_quality" /><span class="track"></span></label>
+              <span>{{ $t('settings.preferQuality') }}</span>
+              <span class="hint">{{ $t('settings.preferQualityHint') }}</span>
+            </div>
+            <div class="field">
+              <label class="toggle"><input type="checkbox" v-model="cfg.stream.probe_media" /><span class="track"></span></label>
+              <span>{{ $t('settings.probeMedia') }}</span>
+              <span class="hint">{{ $t('settings.probeMediaHint') }}</span>
+            </div>
+            <div class="field col">
+              <div class="sub-title">{{ $t('settings.cacheTitle') }}</div>
+              <p class="muted">{{ $t('settings.cacheHint') }}</p>
+            </div>
+            <div class="field">
+              <label class="toggle"><input type="checkbox" v-model="cfg.stream.cache_segments" /><span class="track"></span></label>
+              <span>{{ $t('settings.cacheSegments') }}</span>
+              <span class="hint">{{ $t('settings.cacheSegmentsHint') }}</span>
+            </div>
+            <div class="field">
+              <label>{{ $t('settings.cacheMb') }}</label>
+              <input class="inp" type="number" min="0" max="2048" v-model.number="cfg.stream.cache_mb" style="max-width:120px" />
+              <span class="hint">{{ $t('settings.cacheMbHint') }}</span>
+            </div>
+            <div class="field">
+              <label class="toggle"><input type="checkbox" v-model="cfg.stream.disk_cache" /><span class="track"></span></label>
+              <span>{{ $t('settings.diskCache') }}</span>
+              <span class="hint">{{ $t('settings.diskCacheHint') }}</span>
+            </div>
+            <div class="field">
+              <label>{{ $t('settings.diskCacheMb') }}</label>
+              <div class="hstack" style="gap:10px">
+                <input class="inp" type="number" min="0" max="102400" v-model.number="cfg.stream.disk_cache_mb" style="max-width:120px" />
+                <span v-if="diskUsedMb !== null" class="muted">{{ $t('settings.diskCacheUsed', { used: diskUsedMb }) }}</span>
+                <button class="btn tiny" :disabled="clearingDisk" @click="clearDiskCache">{{ $t('settings.diskClear') }}</button>
+              </div>
+              <span class="hint">{{ $t('settings.diskCacheMbHint') }}</span>
+            </div>
+            <div class="field">
+              <label>{{ $t('settings.prefetchCount') }}</label>
+              <input class="inp" type="number" min="0" max="12" v-model.number="cfg.stream.prefetch_count" style="max-width:120px" />
+              <span class="hint">{{ $t('settings.prefetchCountHint') }}</span>
+            </div>
+            <div class="field">
+              <label class="toggle"><input type="checkbox" v-model="cfg.stream.smart_egress" /><span class="track"></span></label>
+              <span>{{ $t('settings.smartEgress') }}</span>
+              <span class="hint">{{ $t('settings.smartEgressHint') }}</span>
+            </div>
+            <div class="field">
+              <label>{{ $t('settings.prefetchWorkers') }}</label>
+              <input class="inp" type="number" min="1" max="4" v-model.number="cfg.stream.prefetch_workers" style="max-width:120px" />
+              <span class="hint">{{ $t('settings.prefetchWorkersHint') }}</span>
+            </div>
             <div class="field col">
               <label>{{ $t('settings.ingestCors') }}</label>
               <input class="inp" v-model="corsText" placeholder="https://example.com, http://127.0.0.1:5173" />
@@ -2674,7 +2816,7 @@ onMounted(async () => {
           </div>
         </div>
 
-        <div class="panel">
+        <div v-if="!localMode" class="panel">
           <div class="panel-head">{{ $t('settings.ingestPair') }}</div>
           <div class="panel-body">
             <span class="hint">{{ $t('settings.ingestPairHint') }}</span>

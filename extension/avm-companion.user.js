@@ -2,7 +2,7 @@
 // @name         AVM Companion（片匣浏览器接入）
 // @name:en      AVM Companion
 // @namespace    https://github.com/dengji85/avm
-// @version      0.5.6
+// @version      0.5.8
 // @description  把在线观看的影片与真实观看时长同步到本地 AVM 片库；仅在你主动点击后上报，页面正文不上传。
 // @author       AVM
 // @license      MIT
@@ -40,6 +40,62 @@
   // 版本号唯一来源是 @version（经 GM_info 读取），避免两处不同步
   const AVM_VER = (typeof GM_info !== 'undefined' && GM_info && GM_info.script)
     ? GM_info.script.version : '?';
+
+  // 入库结果文案：与 /api/ingest/link 的 status（created / source_added / duplicate）
+  // 一一对应。插件跑在第三方站点、读不到 AVM 前端的语言设置，按浏览器语言就近匹配。
+  const L10N = (() => {
+    const lang = String((typeof navigator !== 'undefined' && navigator.language) || 'zh-CN').toLowerCase();
+    if (lang.startsWith('ja')) {
+      return {
+        created: (id) => '追加しました（新規作品 ' + id + '）',
+        added: (n) => '新しいソースとして追加しました（この作品は ' + n + ' 件）',
+        duplicate: 'ライブラリに登録済み（同じソースのため追加していません）',
+        updated: 'ライブラリに登録済み（再生アドレスを更新しました）',
+        scraping: ' · 自動スクレイピング中',
+        openDetail: 'AVM の詳細を開く',
+        linkNew: 'ライブラリに追加',
+        linkUpdate: '既存の作品を更新',
+        linkAddSource: 'この作品に新しいソースとして追加',
+      };
+    }
+    if (lang.startsWith('zh') && /hant|tw|hk/.test(lang)) {
+      return {
+        created: (id) => '已加入（新建作品 ' + id + '）',
+        added: (n) => '已作為新來源加入（該作品現有 ' + n + ' 個來源）',
+        duplicate: '已在片庫（同一來源，未重複加入）',
+        updated: '已在片庫（播放地址已更新）',
+        scraping: ' · 自動刮削中',
+        openDetail: '已加入片庫 · 打開 AVM 詳情',
+        linkNew: '立即加入片庫',
+        linkUpdate: '更新已有作品',
+        linkAddSource: '作為新來源加入本作品',
+      };
+    }
+    if (lang.startsWith('zh')) {
+      return {
+        created: (id) => '已加入（新建作品 ' + id + '）',
+        added: (n) => '已作为新来源加入（该作品现有 ' + n + ' 个来源）',
+        duplicate: '已在片库（同一来源，未重复添加）',
+        updated: '已在片库（播放地址已更新）',
+        scraping: ' · 自动刮削中',
+        openDetail: '已在片库 · 打开 AVM 详情',
+        linkNew: '立即加入片库',
+        linkUpdate: '更新已有作品',
+        linkAddSource: '作为新来源加入本作品',
+      };
+    }
+    return {
+      created: (id) => 'Added (new title ' + id + ')',
+      added: (n) => 'Added as a new source (this title now has ' + n + ' sources)',
+      duplicate: 'Already in library (same source, not added again)',
+      updated: 'Already in library (playback URL updated)',
+      scraping: ' · auto-scraping',
+      openDetail: 'In library · open AVM details',
+      linkNew: 'Add to library',
+      linkUpdate: 'Update existing title',
+      linkAddSource: 'Add as a new source to this title',
+    };
+  })();
 
   // 阶段诊断日志：用户报告「浮标不出现」时，控制台里断在哪个编号就是哪一步的问题。
   // 每条日志一个字符的代价，换来不再盲猜。
@@ -458,13 +514,22 @@
     }
     $('avm-cands').innerHTML = html;
     $('avm-cands').value = cfg.manualPlayUrl || (best ? best.u : '');
+    const known = !!(existing && existing.movie_id);
     const openBtn = $('avm-open');
-    if (openBtn) openBtn.style.display = (existing && existing.movie_id) ? 'block' : 'none';
-    // 已在库时主按钮就是「更新播放地址」：捕获到正确地址后点一下即可覆盖库中的错误地址
+    if (openBtn) {
+      openBtn.style.display = known ? 'block' : 'none';
+      openBtn.textContent = L10N.openDetail;
+    }
+    // 已在库时给两个动作，不是二选一：
+    //   更新已有作品 = 把当前页面的播放地址写回已有来源（同一条来源时不会重复插入）；
+    //   作为新来源加入 = 当前页面来自另一个站点 / 另一个可播页面时，挂成这部作品的新来源。
+    // 两者都走 /api/ingest/link，由后端三态（created / source_added / duplicate）决定结果。
     const linkBtn = $('avm-link');
-    if (linkBtn) {
-      linkBtn.textContent = (existing && existing.movie_id)
-        ? '更新播放地址（覆盖当前来源）' : '立即加入片库';
+    if (linkBtn) linkBtn.textContent = known ? L10N.linkUpdate : L10N.linkNew;
+    const addBtn = $('avm-addsrc');
+    if (addBtn) {
+      addBtn.style.display = known ? 'block' : 'none';
+      addBtn.textContent = L10N.linkAddSource;
     }
     const confirmBox = $('avm-confirm');
     if (confirmBox) {
@@ -475,7 +540,8 @@
   // 统一入库：FAB 单击与面板按钮共用；silent=true 表示失败时自动展开面板
   let adding = false;
   let linkedKey = '';
-  async function doLink(silent, extraTip, force) {
+  async function doLink(silent, extraTip, force, opts) {
+    const asSource = !!(opts && opts.asSource);
     if (adding) return { ok: false, busy: true };
     if (!cfg.token) {
       toast('请先填写访问令牌');
@@ -494,8 +560,9 @@
       return { ok: false, needConfirm: true };
     }
     const key = ev.page_url + '|' + ev.play_url;
-    if (linkedKey === key) {
-      toast('已在片库（地址未变化）');
+    // 「作为新来源加入」不吃本地缓存：同一来源必须问一次后端，才能如实提示「已存在」
+    if (!asSource && linkedKey === key) {
+      toast(L10N.duplicate);
       return { ok: true, dup: true };
     }
     adding = true;
@@ -509,16 +576,22 @@
     linkedKey = key;
     pendingNoCode = false;
     // 状态统一在成功后落地：↩ 撤销窗口只给「本次新建的影片」，
-    // linked 复用已有来源不提供撤销，避免误删用户已有的来源
+    // 复用已有来源不提供撤销，避免误删用户已有的来源
     if (r.data.status === 'created' && r.data.source_id) {
       saveLastAdded({ source_id: r.data.source_id, movie_id: r.data.movie_id, at: Date.now() });
     }
     existing = { movie_id: r.data.movie_id };
     applyFabState();
     popFab();
-    toast((r.data.status === 'created' ? '已加入（新建影片 ' : '已追加来源 ') +
-      r.data.movie_id + '）' + (r.data.scrape === 'queued' ? ' · 自动刮削中' : '') +
-      (extraTip || ''));
+    // 面板开着时立刻按「已在库」刷新按钮（主按钮 → 更新已有作品，并出现「作为新来源加入」）
+    if (panel && panel.style.display !== 'none') refreshPanel();
+    // 三种结果分别提示：新建作品 / 已作为新来源加入（带来源总数）/ 重复已存在
+    let msg;
+    if (r.data.status === 'created') msg = L10N.created(r.data.movie_id);
+    else if (r.data.status === 'source_added') msg = L10N.added(r.data.source_count || 0);
+    else if (r.data.play_url_updated) msg = L10N.updated;
+    else msg = L10N.duplicate;
+    toast(msg + (r.data.scrape === 'queued' ? L10N.scraping : '') + (extraTip || ''));
     // 广播采集任务：顶层 / 子帧谁有播放器谁计时，dedupeKey 全局一致，
     // 服务端按它幂等复用同一场次（不会重复计时）
     const task = {
@@ -553,7 +626,8 @@
       <div id="avm-diag" style="opacity:.55;font-size:11px;margin-bottom:8px"></div>
       <button id="avm-open" style="display:none;width:100%;padding:8px;margin-bottom:6px;font-weight:600;cursor:pointer;background:#1f9d55;color:#fff;border:0;border-radius:6px">已在片库 · 打开 AVM 详情</button>
       <button id="avm-link" style="width:100%;padding:8px;font-weight:600;cursor:pointer">立即加入片库</button>
-      <!-- 已在库时按钮文案由 refreshPanel 切换为「更新播放地址」 -->
+      <button id="avm-addsrc" style="display:none;width:100%;padding:8px;margin-top:6px;font-weight:600;cursor:pointer;box-sizing:border-box;background:transparent;color:inherit;border:1px solid #4a5568;border-radius:6px">作为新来源加入本作品</button>
+      <!-- 已在库时：主按钮变「更新已有作品」，并额外出现「作为新来源加入本作品」（由 refreshPanel 控制） -->
 
       <div id="avm-current" style="opacity:.6;font-size:11px;word-break:break-all;margin-top:6px"></div>
       <div id="avm-tip" style="margin-top:6px;opacity:.85;word-break:break-all"></div>
@@ -608,6 +682,7 @@
         r.data.status === 'ambiguous' ? '存在歧义，请在 AVM 中确认' : '库中还没有，可以加入');
     });
     $('avm-link').addEventListener('click', () => doLink(false));
+    $('avm-addsrc').addEventListener('click', () => doLink(false, '', false, { asSource: true }));
     $('avm-open').addEventListener('click', () => {
       if (existing && existing.movie_id) openInAvm(existing.movie_id);
     });

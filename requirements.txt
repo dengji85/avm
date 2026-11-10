@@ -16,3 +16,8 @@ Send2Trash>=1.8.0
 # Windows 环境下完全不触发（实测改了代码服务也不重启），装上它 uvicorn
 # 会自动改用可靠的 watchfiles 监听。
 # watchfiles>=1.0
+# 可选：在线来源续期的「无头浏览器兜底」。jable 等源站对服务端请求返回
+# Cloudflare 人机校验，静态抓取拿不到播放地址，只有本机浏览器内核能过。
+# 装 Playwright 后复用本机已装 Chrome / Edge（channel="chrome"），无需再
+# 下载 Chromium；不装也能用，续期会降级为静态抓取 + 提示用插件回写。
+# playwright>=1.45

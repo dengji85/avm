@@ -10,13 +10,13 @@ import {
   getActress, avatarUrl, getConfig, scanMovieSubtitles, extStatus,
   adCheckResult, adCheckRunOne, adSheetUrl,
   movieSources, setPrimarySource, deleteSource, addMovieSource,
-  toggleSource, checkSource, refreshSource,
+  toggleSource, checkSource, refreshSource, probeSource,
 } from '../api.js'
 import SubtitleSummary from './SubtitleSummary.vue'
 import AddToCollectionBtn from './AddToCollectionBtn.vue'
 import {
   toast, confirmDialog, copyText, coverFallback, avatarFallback, fmtSize, fmtDuration,
-  fmtDate, fmtAgo, qualityTag,
+  fmtDate, fmtAgo, qualityTag, isLocalHost,
 } from '../utils.js'
 import { t } from '../i18n/index.js'
 import { useTasks } from '../composables/useTasks.js'
@@ -388,8 +388,15 @@ const quality = computed(() => qualityTag(mv.value?.resolution))
 
 /* ---------- 在线来源（浏览器接入二期） ---------- */
 const sources = ref([])
+/* 来源数角标：来源列表拉过一次后就以它为准（插件新加的来源在切标签时即反映），
+   还没拉过时退回影片自带的聚合来源 */
+const srcLoaded = ref(false)
+const srcCount = computed(() => (srcLoaded.value ? sources.value.length
+  : ((mv.value && mv.value.sources) || []).length))
 const srcLoading = ref(false)
 const srcBusy = ref(false)
+/* 本机回环访问：不展示浏览器插件相关引导（本地环境没有安装 / 配对场景） */
+const localMode = isLocalHost()
 const srcAddOpen = ref(false)
 const srcAdd = reactive({ page_url: '', play_url: '', title: '', kind: 'hls' })
 const srcRefreshFor = reactive({ id: 0, play_url: '' })
@@ -407,6 +414,7 @@ async function loadSources() {
     srcLoading.value = true
     const r = await movieSources(id.value)
     sources.value = r.items || []
+    srcLoaded.value = true
   } catch (e) { toast(e.message, 'err') }
   finally {
     srcLoading.value = false
@@ -434,6 +442,29 @@ function srcBadge(s) {
   if (s.expired || s.status === 'stale') return 'warn'
   return 'ok'
 }
+/* 来源画质：只显示探测到的真实高度；未探测 / 失败显示「未知」，不拿文件名猜 */
+function srcQuality(s) {
+  const h = Number(s.media_height || 0)
+  if (!h) return ''
+  return h >= 2160 ? '4K' : h + 'p'
+}
+/* 中文字幕判定：结论 + 依据，鼠标悬停看依据（站点标注 / 字幕轨 / 未发现 / 未判定） */
+function srcSubText(s) {
+  if (s.sub_zh === 'zh') return t('detail.srcSubZh')
+  if (s.sub_zh === 'none') return t('detail.srcSubNone')
+  return t('detail.srcSubUnknown')
+}
+function srcSubTone(s) {
+  if (s.sub_zh === 'zh') return 'ok'
+  if (s.sub_zh === 'none') return ''
+  return 'muted'
+}
+function srcSubTitle(s) {
+  const why = s.sub_evidence === 'hls_track' ? t('detail.srcSubWhyTrack')
+    : s.sub_evidence === 'site_label' ? t('detail.srcSubWhySite')
+      : s.sub_evidence === 'none' ? t('detail.srcSubWhyNone') : t('detail.srcSubWhyUnknown')
+  return why + (s.media_probe_note ? '\n' + s.media_probe_note : '')
+}
 
 async function srcRun(fn, okKey) {
   if (srcBusy.value) return
@@ -446,6 +477,7 @@ async function srcRun(fn, okKey) {
   finally { srcBusy.value = false }
 }
 function checkOne(s) { return srcRun(() => checkSource(s.id), 'detail.srcCheckStarted') }
+function probeOne(s) { return srcRun(() => probeSource(s.id), 'detail.srcProbeDone') }
 function primaryOne(s) { return srcRun(() => setPrimarySource(s.id), 'detail.srcPrimaryDone') }
 function toggleOne(s) { return srcRun(() => toggleSource(s.id, !s.available), 'detail.srcToggleDone') }
 async function playSource(s) {
@@ -1514,7 +1546,7 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', onKey); stopSource
               <button class="tab" :class="{ on: tab === 'info' }" @click="tab = 'info'">{{ $t('detail.tabInfo') }}</button>
               <button class="tab" :class="{ on: tab === 'files' }" @click="tab = 'files'">{{ $t('detail.tabFiles') }}</button>
               <button class="tab" :class="{ on: tab === 'sources' }" @click="tab = 'sources'">
-                {{ $t('detail.tabSources') }}<span v-if="mv.sources && mv.sources.length" class="src-tab-count">{{ mv.sources.length }}</span>
+                {{ $t('detail.tabSources') }}<span v-if="srcCount" class="src-tab-count">{{ srcCount }}</span>
               </button>
               <!-- 重刮削 / 导出 NFO 收进主区「⋯更多」，这里只留标签页 -->
             </div>
@@ -1768,7 +1800,9 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', onKey); stopSource
                 </div>
 
                 <div v-if="srcLoading && !sources.length" class="empty"><span class="spinner"></span></div>
-                <div v-else-if="!sources.length" class="empty"><div class="desc">{{ $t('detail.srcEmpty') }}</div></div>
+                <div v-else-if="!sources.length" class="empty">
+                  <div class="desc">{{ localMode ? $t('detail.srcEmptyLocal') : $t('detail.srcEmpty') }}</div>
+                </div>
                 <div v-else class="src-list">
                   <div v-for="s in sources" :key="s.id" class="src-row" :class="{ off: !s.available }">
                     <div class="src-top">
@@ -1777,6 +1811,8 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', onKey); stopSource
                       <span class="badge" :class="srcBadge(s)">{{ srcStatus(s) }}</span>
                       <span v-if="s.is_primary" class="badge primary">{{ $t('detail.srcPrimary') }}</span>
                       <span v-if="s.pinned" class="badge">{{ $t('detail.srcPinned') }}</span>
+                      <span class="badge q" :class="{ muted: !srcQuality(s) }">{{ srcQuality(s) || $t('detail.srcQualityUnknown') }}</span>
+                      <span class="badge" :class="srcSubTone(s)" :title="srcSubTitle(s)">{{ srcSubText(s) }}</span>
                       <span class="muted sm">{{ s.kind }}</span>
                     </div>
                     <div class="src-url ellipsis" :title="s.play_url || s.page_url">
@@ -1793,6 +1829,7 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', onKey); stopSource
                       <button v-if="s.available && s.play_url && s.status !== 'invalid' && s.status !== 'unsupported'"
                               class="btn tiny primary" :disabled="srcBusy" @click="playSource(s)">{{ $t('detail.srcPlay') }}</button>
                       <button class="btn tiny ghost" :disabled="srcBusy || s.checking" @click="checkOne(s)">{{ $t('detail.srcCheck') }}</button>
+                      <button class="btn tiny ghost" :disabled="srcBusy || s.checking" :title="$t('detail.srcProbeHint')" @click="probeOne(s)">{{ $t('detail.srcProbe') }}</button>
                       <button class="btn tiny ghost" :disabled="srcBusy || s.checking" @click="openRefresh(s)">{{ $t('detail.srcRefresh') }}</button>
                       <button class="btn tiny ghost" :disabled="srcBusy || !!s.is_primary" @click="primaryOne(s)">{{ $t('detail.srcSetPrimary') }}</button>
                       <button class="btn tiny ghost" :disabled="srcBusy" @click="toggleOne(s)">{{ s.available ? $t('detail.srcDisable') : $t('detail.srcEnable') }}</button>
@@ -2367,13 +2404,16 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', onKey); stopSource
 .src-entry:hover { border-color: var(--c-text-3); }
 .src-path { font-size: var(--fs-xs); color: var(--c-text-3); max-width: 320px; }
 .src-open { color: var(--c-text-3); }
-.src-list { display: flex; flex-direction: column; gap: var(--sp-3); }
+/* 来源多时不要挤成一坨：列表自身滚动，操作区跟着每条来源走 */
+.src-list { display: flex; flex-direction: column; gap: var(--sp-3); max-height: min(52vh, 560px); overflow-y: auto; padding-right: 4px; }
 .src-row {
   display: flex; flex-direction: column; gap: var(--sp-2);
   border: 1px solid var(--c-line); border-radius: var(--r-md); padding: var(--sp-3);
 }
 .src-row.off { opacity: .62; }
 .src-top { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; }
+/* 画质徽标用等宽数字，来源多时竖排也不会跳动 */
+.src-top .badge.q { font-variant-numeric: tabular-nums; }
 .src-site { max-width: 260px; font-size: var(--fs-md); }
 .src-url { font-size: var(--fs-sm); color: var(--c-text-2); font-family: monospace; }
 .src-meta { display: flex; flex-wrap: wrap; gap: var(--sp-3); font-size: var(--fs-xs); color: var(--c-text-3); }

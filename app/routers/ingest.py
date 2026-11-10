@@ -221,6 +221,39 @@ def source_refresh(source_id: int,
         source_id, str(p.get("play_url") or ""), str(p.get("page_url") or "")))
 
 
+@router.post("/sources/{source_id}/probe")
+def source_probe(source_id: int) -> Dict[str, Any]:
+    """探测来源清晰度 / 字幕判定（同步执行，单条约十几秒；失败只记说明）。"""
+    from .. import media_probe
+    return media_probe.probe_source(source_id)
+
+
+@router.post("/sources/probe/start")
+def sources_probe_start(payload: Dict[str, Any] = Body(default={})) -> Dict[str, Any]:
+    """后台批量探测清晰度 / 字幕（可取消；默认只探还没探过的来源）。"""
+    from .. import media_probe
+    p = payload or {}
+    try:
+        limit = int(p.get("limit") or 300)
+    except (TypeError, ValueError):
+        limit = 300
+    return media_probe.start(limit=limit, force=bool(p.get("force")))
+
+
+@router.get("/sources/probe/state")
+def sources_probe_state() -> Dict[str, Any]:
+    """探测进度：running / total / done / ok / failed / percent / message。"""
+    from .. import media_probe
+    return media_probe.state()
+
+
+@router.post("/sources/probe/cancel")
+def sources_probe_cancel() -> Dict[str, Any]:
+    """取消探测：当前条目跑完即停，已写入的结果保留。"""
+    from .. import media_probe
+    return media_probe.cancel()
+
+
 @router.get("/sources")
 def sources_list(status: str = Query(default=""), q: str = Query(default=""),
                  page: int = Query(default=1, ge=1),
@@ -230,6 +263,27 @@ def sources_list(status: str = Query(default=""), q: str = Query(default=""),
     from ..db import db
     with db() as conn:
         return ingest.list_all_sources(conn, status=status, q=q, page=page, size=size)
+
+
+@router.post("/sources/patrol/start")
+def sources_patrol_start() -> Dict[str, Any]:
+    """立即巡检：后台批量重新解析过期 / 410 的来源（已在跑时返回同一任务）。"""
+    from .. import source_renew_job
+    return source_renew_job.start()
+
+
+@router.get("/sources/patrol/state")
+def sources_patrol_state() -> Dict[str, Any]:
+    """巡检进度：running / total / done / renewed / failed / percent / message。"""
+    from .. import source_renew_job
+    return source_renew_job.state()
+
+
+@router.post("/sources/patrol/cancel")
+def sources_patrol_cancel() -> Dict[str, Any]:
+    """取消巡检：当前条目跑完即停，已续期的来源保留结果。"""
+    from .. import source_renew_job
+    return source_renew_job.cancel()
 
 
 @router.post("/sources/batch")

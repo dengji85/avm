@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 import copy
 import io
+import logging
 import os
 import socket
 import platform
@@ -39,6 +40,7 @@ from .db import connect, db, query_all, query_one
 from .jobs import SCAN, SCRAPE, ACTRESS_FETCH, NFO_EXPORT
 
 router = APIRouter(prefix="/api")
+log = logging.getLogger("avm.stream")
 
 
 # 按领域拆出的子路由（阶段 2）：路径与行为不变，只是文件分开。
@@ -3380,14 +3382,27 @@ def _proxy_upstream(target: str, request: Request, movie_id: int = 0) -> Respons
         movie_id = int(digits[0]) if digits else 0
     headers = _strm_headers(target, movie_id)
     rng = request.headers.get("range")
+    from . import stream_cache
+    # 分片缓存：命中直接返回，免掉一次回源往返（回看 / 拖动 / 抖动重取最常见）
+    if not rng:
+        hit = stream_cache.get(target)
+        if hit:
+            data, ctype = hit
+            stream_cache.note_request(movie_id, target, headers, _strm_proxies(target))
+            return Response(data, media_type=ctype,
+                            headers={"Content-Length": str(len(data)),
+                                     "Cache-Control": "private, max-age=300"})
     if rng:
         headers["Range"] = rng
+    from . import http_pool
+    t0 = time.time()
     try:
-        up = requests.get(target, headers=headers, stream=True,
-                          timeout=(8, 30), allow_redirects=True,
-                          proxies=_strm_proxies(target))
+        up = http_pool.session().get(target, headers=headers, stream=True,
+                                     timeout=(8, 30), allow_redirects=True,
+                                     proxies=_strm_proxies(target))
     except Exception as exc:
         raise HTTPException(502, "串流源不可达：%s" % exc)
+    ttfb = time.time() - t0
     if up.status_code >= 400:
         code = up.status_code
         up.close()
@@ -3416,14 +3431,56 @@ def _proxy_upstream(target: str, request: Request, movie_id: int = 0) -> Respons
         media = seg_types[ext]
     elif not media or media.lower().startswith(("application/octet-stream", "text/plain")):
         media = "application/octet-stream"
+    # 有的 CDN 给分片套伪装扩展名（.css / .json / .svg），Content-Type 也就跟着
+    # 回 text/xx、image/xx。对 Content-Type 敏感的播放器（Safari 原生 HLS）会
+    # 因此拒播，这里按首字节（0x47 = MPEG-TS 同步字节）纠正。
+    # 只建一条迭代器：先取一块判断类型，再把它原样吐回，字节数不会少。
+    upstream_iter = up.iter_content(64 * 1024)
+    head = b""
+    if media.lower().startswith(("text/", "image/")):
+        try:
+            head = next(upstream_iter, b"")
+        except Exception:
+            head = b""
+        media = "video/mp2t" if head[:1] == b"\x47" else "application/octet-stream"
+
+    # 只缓存「整段 GET 的分片 / 外挂字幕」；Range 请求与直链 MP4 一律透传
+    cacheable = bool(not rng and stream_cache.cacheable(target, media))
+    # 浏览器侧缓存：本地分片地址由「源地址哈希」生成，同一 URL 的字节不会变，
+    # 允许浏览器用自己的磁盘缓存复用（同一个片子再看一遍 / 拖回原处不用再走网络）；
+    # Range 与直链仍 no-store，避免把整部 MP4 塞进浏览器缓存。
+    resp_headers["Cache-Control"] = "private, max-age=300" if cacheable else "no-store"
 
     def body():
+        buf = [] if cacheable else None
+        total = 0
         try:
-            for chunk in up.iter_content(64 * 1024):
+            if head:
+                total += len(head)
+                if buf is not None:
+                    buf.append(head)
+                yield head
+            for chunk in upstream_iter:
                 if chunk:
+                    total += len(chunk)
+                    if buf is not None:
+                        if total <= stream_cache.MAX_ITEM:
+                            buf.append(chunk)
+                        else:
+                            buf = None      # 超过单段上限：放弃缓存，别把内存拖垮
                     yield chunk
         finally:
             up.close()
+            # 边播边攒：播完这一段就进缓存，下次回看 / 预取直接命中
+            if buf is not None and buf:
+                stream_cache.put(target, b"".join(buf), media)
+            stream_cache.note_request(movie_id, target, headers, _strm_proxies(target))
+            # 分片耗时（仅 DEBUG 级）：首字节慢 = 代理握手 / 链路过长；
+            # 下载慢（超过分片时长）= 带宽不够，后端再怎么并发也没用。
+            if log.isEnabledFor(10):
+                log.debug("seg %s ttfb=%.2fs total=%.2fs bytes=%d cached=%s",
+                          os.path.basename(urlsplit(target).path)[-28:], ttfb,
+                          time.time() - t0, total, cacheable)
 
     return StreamingResponse(body(), status_code=up.status_code,
                              media_type=media, headers=resp_headers)
@@ -3483,17 +3540,20 @@ def _rewrite_playlist(text: str, base: str, movie_id: int) -> str:
 
 
 def _serve_playlist(target: str, movie_id: int, _retried: bool = False,
-                    allow_failover: bool = True) -> Response:
-    """主播放列表：失败时标记来源并自动降级一次，再用新地址重试。
+                    allow_failover: bool = True, _renewed: bool = False) -> Response:
+    """主播放列表：失败时先等同源续期重试，再降级换源。
 
     子 playlist（分片层）传 ``allow_failover=False``：那类 403 多是签名过期，
     只需要续期重建 playlist，不该把整条来源换掉。
     """
     import requests
+    from . import http_pool
+    from . import stream_cache
     err = ""
+    bad_status = 0
     try:
-        r = requests.get(target, headers=_strm_headers(target, movie_id), timeout=(8, 20),
-                         proxies=_strm_proxies(target))
+        r = http_pool.session().get(target, headers=_strm_headers(target, movie_id),
+                                    timeout=(8, 20), proxies=_strm_proxies(target))
         if r.status_code < 400:
             text = r.text or ""
             if not text.lstrip().startswith("#EXTM3U"):
@@ -3503,9 +3563,14 @@ def _serve_playlist(target: str, movie_id: int, _retried: bool = False,
                                             or "application/octet-stream"),
                                 headers={"Cache-Control": "no-store"})
             body = _rewrite_playlist(text, r.url or target, movie_id)
+            try:
+                stream_cache.note_playlist(movie_id, text, r.url or target)
+            except Exception:
+                pass        # 记顺序失败只影响预取，不该让播放列表 500
             return Response(body, media_type="application/vnd.apple.mpegurl",
                             headers={"Cache-Control": "no-store"})
         err = "HTTP %d" % r.status_code
+        bad_status = r.status_code
         # 403/登录墙通常返回 HTML 而不是媒体内容：把「回源站观看」写进原因，
         # 让来源的 check_note 与播放失败提示都指向现实的出路。
         ctype = str(r.headers.get("Content-Type") or "").lower()
@@ -3519,6 +3584,14 @@ def _serve_playlist(target: str, movie_id: int, _retried: bool = False,
         err = type(exc).__name__          # 不回显完整地址 / 异常里的查询串
     if not _retried:
         from . import stream_verify
+        # 401/403/410 多半是防盗链头缺失或签名过期：先等同源续期（浏览器约 10s），
+        # 成功就带着新头 / 新地址自动重试一次——用户不需要手动点重试。
+        if not _renewed and allow_failover and bad_status in (401, 403, 410):
+            sid = stream_verify.primary_source_id(movie_id)
+            if sid and stream_verify.can_renew(sid) and stream_verify.refresh_now(sid, 20):
+                alt = _strm_source(movie_id) or target
+                if _is_playlist_url(alt):
+                    return _serve_playlist(alt, movie_id, False, allow_failover, True)
         if allow_failover:
             alt = stream_verify.playback_failover(movie_id, target, err)
             if alt and alt != target and _is_hls(alt):
@@ -3570,7 +3643,10 @@ def stream_info(movie_id: int) -> Dict[str, Any]:
     return {"stream": bool(target), "hls": is_hls,
             "hls_direct": hls_direct,
             "direct_url": target if hls_direct else "",
-            "source_id": fresh["source_id"], "stale": fresh["stale"]}
+            "source_id": fresh["source_id"], "stale": fresh["stale"],
+            # 正在后台重新获取播放地址：前端据此显示「正在获取播放地址」并自动重试
+            "renewing": bool(fresh["source_id"]
+                             and stream_verify.is_refreshing(fresh["source_id"]))}
 
 
 @router.get("/strm/hls/{movie_id}")
@@ -3580,6 +3656,30 @@ def strm_hls(movie_id: int):
     if not target or not _is_playlist_url(target):
         raise HTTPException(404, "该影片不是 HLS 串流")
     return _serve_playlist(target, movie_id)
+
+
+@router.get("/strm/cache/{movie_id}")
+def strm_cache_progress(movie_id: int) -> Dict[str, Any]:
+    """分片缓存进度：已缓存的片内时间区间（秒），播放器进度条据此画「已缓存」段。
+
+    纯内存读取，不触发任何网络请求；没有播放列表记录时 ``ranges`` 为空。
+    """
+    from . import stream_cache
+    return stream_cache.progress(movie_id)
+
+
+@router.get("/strm/cache-stats")
+def strm_cache_stats() -> Dict[str, Any]:
+    """分片缓存的规模：内存条数 / 磁盘文件数与占用 / 两层上限（设置页展示用）。"""
+    from . import stream_cache
+    return stream_cache.stats()
+
+
+@router.post("/strm/cache-clear")
+def strm_cache_clear() -> Dict[str, Any]:
+    """清空分片缓存（内存 + 磁盘）：把磁盘上限调小、或想立刻收回空间时用。"""
+    from . import stream_cache
+    return {"ok": True, "removed": stream_cache.clear()}
 
 
 @router.get("/strm/seg/{movie_id}/{name}")

@@ -571,15 +571,14 @@ def _start_auto_scan() -> None:
 
 
 def _start_auto_renew() -> None:
-    """后台在线来源自动续期：定期扫描过期 / 410 的来源，重新获取播放地址。
+    """后台在线来源巡检：按间隔启动一次巡检任务，重新解析过期 / 410 的来源。
 
-    与 auto-scan 一样是 daemon 线程，完全在后端完成，不需要打开任何页面，
-    也不依赖浏览器插件。只做常规 HTTP 请求；CF 拦截等失败会留下原因并由
-    renew_due 的冷却机制控制重试频率。
+    与 auto-scan 一样是 daemon 线程，只负责定时器；批量、进度、取消与
+    单条降级都在 ``source_renew_job`` 里（长任务规范）。
     """
     import threading
 
-    from . import stream_verify
+    from . import source_renew_job
 
     def _loop() -> None:
         time.sleep(60)          # 启动后先让服务完全就绪
@@ -593,7 +592,7 @@ def _start_auto_renew() -> None:
                 time.sleep(120)
                 continue
             try:
-                stream_verify.renew_due()
+                source_renew_job.start()
             except Exception:  # noqa: BLE001 后台任务不因单轮失败退出
                 pass
             time.sleep(max(2, interval) * 60)
