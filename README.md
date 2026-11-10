@@ -135,7 +135,7 @@ data/
 
 ## 插件与扩展
 
-**[AVM Companion](extension/avm-companion.user.js)**（`v0.5.1`，**版本独立于主程序**）是 Tampermonkey / Violentmonkey 用户脚本：影片页一键入库、上报真实观看时长、断网补报。安装脚本 → 在 AVM「设置 → 浏览器接入」复制专用令牌 → 播放几秒后点浮标。只在**主动点击后**上报番号、标题、页面地址与播放地址，不上传正文 / Cookie / DOM；本机地址不注入。协议见 [插件设计文档](docs/浏览器插件与在线资源设计.md)。
+**[AVM Companion](extension/avm-companion.user.js)**（`v0.5.8`，**版本独立于主程序**）是 Tampermonkey / Violentmonkey 用户脚本：影片页一键入库、上报真实观看时长、断网补报。每个 Release 会一并附带 `avm-companion-<插件版本>.user.js`，直接下载安装即可（文件名带版本，升级时不会装重复）。安装脚本 → 在 AVM「设置 → 浏览器接入」复制专用令牌 → 播放几秒后点浮标。只在**主动点击后**上报番号、标题、页面地址与播放地址，不上传正文 / Cookie / DOM；本机地址不注入。协议见 [插件设计文档](docs/浏览器插件与在线资源设计.md)。
 
 **可选扩展组件**：FFmpeg（抽帧 / 转封装）、人脸定位（海报智能裁切）、语音识别 + 模型（提取对白）、MetaTube（补充刮削源）。
 离线安装推荐：把 `.zip` 放进 `data/ext/packages/`，在「设置 → 扩展组件 → 手动导入」下拉选中即可（零上传）；NAS 可指定共享目录。详见 [扩展组件手册](docs/扩展组件手册.md)。

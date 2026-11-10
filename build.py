@@ -127,3 +127,30 @@ try:
 ])
 finally:
     _restore_build_date(_original_api)
+
+
+def _export_userscript():
+    """把浏览器用户脚本按版本号复制进 dist/，让它跟着 Release 一起发。
+
+    文件名带插件自己的版本（avm-companion-0.5.8.user.js，**与主程序版本无关**）：
+    用户脚本管理器的安装页只显示文件名，带版本才能一眼看出装的是哪一版；
+    不带版本的话浏览器会把两份当同一个脚本，用户也没法对照更新说明。
+
+    脚本缺失时只打印跳过，不让打包失败——插件不是运行必要条件。
+    """
+    src = os.path.join("extension", "avm-companion.user.js")
+    if not os.path.exists(src):
+        print("[build] userscript missing, skipped")
+        return None
+    with open(src, "r", encoding="utf-8") as f:
+        head = f.read(800)            # 版本号在 UserScript 头里，前 800 字足够
+    m = re.search(r'@version\s+([0-9][0-9.]*)', head)
+    ver = m.group(1) if m else "dev"
+    os.makedirs("dist", exist_ok=True)
+    out = os.path.join("dist", "avm-companion-%s.user.js" % ver)
+    shutil.copyfile(src, out)
+    print("[build] userscript exported: %s" % out)
+    return out
+
+
+_export_userscript()

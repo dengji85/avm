@@ -2,6 +2,8 @@ name: Release (Windows exe)
 
 # 打 v* 标签时自动：构建前端 → PyInstaller 打包单文件 exe → 创建 / 更新 GitHub
 # Release 并附加产物（SHA256 由 GitHub 资产详情页自带，不再单独产出校验文件）。
+# 产物含 exe 与浏览器用户脚本 avm-companion-<插件版本>.user.js（插件版本独立于主程序，
+# 由 build.py 从 UserScript 头的 @version 取，见 docs/浏览器插件与在线资源设计.md）。
 # 同时重打 asr-libs / opencv-libs 组件 zip 并更新到 ext-bundle 固定 tag 的
 # Release（组件资产与应用发版解耦，见 docs/扩展组件手册.md）。
 # 与 docker.yml 并行执行、互不依赖（一条 tag 同时产出 exe 与多架构镜像）。
@@ -61,6 +63,7 @@ jobs:
           name: AVM-windows-exe
           path: |
             dist/AVM-*.exe
+            dist/avm-companion-*.user.js
 
       # 发布说明从 CHANGELOG.md 自动抽取对应版本段，避免手改 RELEASE_NOTES.md 导致发出旧版内容
       - name: Generate release notes from CHANGELOG
@@ -92,6 +95,7 @@ jobs:
           body_path: RELEASE_NOTES.md
           files: |
             dist/AVM-*.exe
+            dist/avm-companion-*.user.js
           fail_on_unmatched_files: true
 
   # 语音识别依赖的预打包 zip：便携版 exe 里没有 pip，「一键安装」下载的就是它。
