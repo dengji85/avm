@@ -1,4 +1,4 @@
-﻿import { reactive, watch } from 'vue'
+import { reactive, watch } from 'vue'
 import { t } from './i18n'
 
 const PREF_KEY = 'avm.prefs.v2'
