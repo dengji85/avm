@@ -93,7 +93,9 @@ const cfg = reactive({
     prefer_subtitle: true, prefer_quality: true, probe_media: true, probe_timeout: 30,
     cache_segments: true, cache_mb: 64, cache_ttl: 300,
     disk_cache: true, disk_cache_mb: 6144,
-    prefetch_count: 4, prefetch_workers: 2, smart_egress: true,
+    prefetch_count: 20, prefetch_workers: 4, smart_egress: true,
+    idle_prefetch: true, idle_prefetch_seconds: 300, idle_prefetch_workers: 2,
+    idle_prefetch_mb: 512,
     strm_referer: '', strm_referer_mode: 'full', strm_user_agent: '', strm_extra_headers: {},
   },
   wiki: { languages: ['ja', 'zh'] },
@@ -234,7 +236,9 @@ async function load() {
         prefer_subtitle: true, prefer_quality: true, probe_media: true, probe_timeout: 30,
         cache_segments: true, cache_mb: 64, cache_ttl: 300,
         disk_cache: true, disk_cache_mb: 6144,
-        prefetch_count: 4, prefetch_workers: 2, smart_egress: true,
+        prefetch_count: 20, prefetch_workers: 4, smart_egress: true,
+        idle_prefetch: true, idle_prefetch_seconds: 300, idle_prefetch_workers: 2,
+        idle_prefetch_mb: 512,
         strm_referer: '', strm_referer_mode: 'full',
         strm_user_agent: '', strm_extra_headers: {} },
       c.stream,
@@ -660,8 +664,12 @@ async function saveIngest() {
         cache_ttl: Math.max(30, Math.min(3600, Number(cfg.stream.cache_ttl) || 300)),
         disk_cache: !!cfg.stream.disk_cache,
         disk_cache_mb: Math.max(0, Math.min(102400, Number(cfg.stream.disk_cache_mb) || 0)),
-        prefetch_count: Math.max(0, Math.min(12, Number(cfg.stream.prefetch_count) || 0)),
-        prefetch_workers: Math.max(1, Math.min(4, Number(cfg.stream.prefetch_workers) || 2)),
+        prefetch_count: Math.max(0, Math.min(40, Number(cfg.stream.prefetch_count) || 0)),
+        prefetch_workers: Math.max(1, Math.min(8, Number(cfg.stream.prefetch_workers) || 2)),
+        idle_prefetch: cfg.stream.idle_prefetch !== false,
+        idle_prefetch_seconds: Math.max(0, Math.min(1800, Number(cfg.stream.idle_prefetch_seconds) || 0)),
+        idle_prefetch_workers: Math.max(1, Math.min(4, Number(cfg.stream.idle_prefetch_workers) || 2)),
+        idle_prefetch_mb: Math.max(0, Math.min(4096, Number(cfg.stream.idle_prefetch_mb) || 0)),
         smart_egress: cfg.stream.smart_egress !== false,
       },
     })
@@ -2770,7 +2778,7 @@ onMounted(async () => {
             </div>
             <div class="field">
               <label>{{ $t('settings.prefetchCount') }}</label>
-              <input class="inp" type="number" min="0" max="12" v-model.number="cfg.stream.prefetch_count" style="max-width:120px" />
+              <input class="inp" type="number" min="0" max="40" v-model.number="cfg.stream.prefetch_count" style="max-width:120px" />
               <span class="hint">{{ $t('settings.prefetchCountHint') }}</span>
             </div>
             <div class="field">
@@ -2780,8 +2788,28 @@ onMounted(async () => {
             </div>
             <div class="field">
               <label>{{ $t('settings.prefetchWorkers') }}</label>
-              <input class="inp" type="number" min="1" max="4" v-model.number="cfg.stream.prefetch_workers" style="max-width:120px" />
+              <input class="inp" type="number" min="1" max="8" v-model.number="cfg.stream.prefetch_workers" style="max-width:120px" />
               <span class="hint">{{ $t('settings.prefetchWorkersHint') }}</span>
+            </div>
+            <div class="field">
+              <label class="toggle"><input type="checkbox" v-model="cfg.stream.idle_prefetch" /><span class="track"></span></label>
+              <span>{{ $t('settings.idlePrefetch') }}</span>
+              <span class="hint">{{ $t('settings.idlePrefetchHint') }}</span>
+            </div>
+            <div class="field">
+              <label>{{ $t('settings.idlePrefetchSeconds') }}</label>
+              <input class="inp" type="number" min="0" max="1800" step="30" v-model.number="cfg.stream.idle_prefetch_seconds" style="max-width:120px" />
+              <span class="hint">{{ $t('settings.idlePrefetchSecondsHint') }}</span>
+            </div>
+            <div class="field">
+              <label>{{ $t('settings.idlePrefetchWorkers') }}</label>
+              <input class="inp" type="number" min="1" max="4" v-model.number="cfg.stream.idle_prefetch_workers" style="max-width:120px" />
+              <span class="hint">{{ $t('settings.idlePrefetchWorkersHint') }}</span>
+            </div>
+            <div class="field">
+              <label>{{ $t('settings.idlePrefetchMb') }}</label>
+              <input class="inp" type="number" min="0" max="4096" v-model.number="cfg.stream.idle_prefetch_mb" style="max-width:120px" />
+              <span class="hint">{{ $t('settings.idlePrefetchMbHint') }}</span>
             </div>
             <div class="field col">
               <label>{{ $t('settings.ingestCors') }}</label>

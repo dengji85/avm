@@ -119,6 +119,9 @@ export const strmCacheProgress = (id) => get(`/strm/cache/${id}`)
 export const strmCacheStats = () => get('/strm/cache-stats')
 /* 清空分片缓存（内存 + 磁盘）：返回删掉的文件数 */
 export const clearStrmCache = () => post('/strm/cache-clear', {})
+/* 暂停时的延伸预取：paused=true 让服务端从当前位置往后预下；false = 停 */
+export const strmPrefetch = (id, payload) => post(`/strm/prefetch/${id}`, payload)
+export const strmPrefetchState = (id) => get(`/strm/prefetch/${id}`)
 
 /* ---------------- 播放兼容：浏览器不认的容器/音轨 → 重封装为 MP4 后再播 ---------------- */
 export const playbackInfo = (id) => get(`/movies/${id}/playback-info`)

@@ -3564,7 +3564,13 @@ def _serve_playlist(target: str, movie_id: int, _retried: bool = False,
                                 headers={"Cache-Control": "no-store"})
             body = _rewrite_playlist(text, r.url or target, movie_id)
             try:
-                stream_cache.note_playlist(movie_id, text, r.url or target)
+                from . import stream_verify
+                # 来源 id 只用于磁盘目录分层；取不到就让 stream_cache 退回主机名
+                source_key = str(stream_verify.primary_source_id(movie_id) or "")
+            except Exception:
+                source_key = ""
+            try:
+                stream_cache.note_playlist(movie_id, text, r.url or target, source_key)
             except Exception:
                 pass        # 记顺序失败只影响预取，不该让播放列表 500
             return Response(body, media_type="application/vnd.apple.mpegurl",
@@ -3680,6 +3686,35 @@ def strm_cache_clear() -> Dict[str, Any]:
     """清空分片缓存（内存 + 磁盘）：把磁盘上限调小、或想立刻收回空间时用。"""
     from . import stream_cache
     return {"ok": True, "removed": stream_cache.clear()}
+
+
+@router.post("/strm/prefetch/{movie_id}")
+def strm_idle_prefetch(movie_id: int,
+                       payload: Dict[str, Any] = Body(default={})) -> Dict[str, Any]:
+    """暂停时告知服务端「从当前位置往后预下」，恢复播放时取消。
+
+    前端在 ``pause`` 时带 ``paused=true``、``position``、``source_id`` 调用；
+    恢复播放 / 关闭播放器时带 ``paused=false``。这里只做参数转换，下载全在
+    ``stream_cache`` 的独立线程池里跑，接口本身立即返回。
+    """
+    from . import stream_cache
+    if not bool(payload.get("paused", True)):
+        return stream_cache.stop_idle(movie_id, "resumed")
+    try:
+        position = max(0.0, float(payload.get("position") or 0))
+    except (TypeError, ValueError):
+        position = 0.0
+    target = _strm_source(movie_id)
+    return stream_cache.start_idle(
+        movie_id, position, str(payload.get("source_id") or ""),
+        _strm_headers(target, movie_id), _strm_proxies(target))
+
+
+@router.get("/strm/prefetch/{movie_id}")
+def strm_idle_prefetch_state(movie_id: int) -> Dict[str, Any]:
+    """空闲预取状态：是否在跑、已下多少秒 / 多少段、为什么停的。"""
+    from . import stream_cache
+    return stream_cache.idle_status(movie_id)
 
 
 @router.get("/strm/seg/{movie_id}/{name}")

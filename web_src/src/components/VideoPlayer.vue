@@ -2,7 +2,7 @@
 import { ref, reactive, computed, onMounted, onBeforeUnmount, watch, nextTick } from 'vue'
 import videojs from 'video.js'
 import 'video.js/dist/video-js.css'
-import { streamUrl, strmHlsUrl, strmCacheProgress, streamInfo, setProgress, playMovie, markPlayed, startSession, updateSession, endSession, getPreviews, genPreviews, playbackInfo, prepareStream, prepareStreamStatus, subtitleTracks, setSkipPoints, saveSubtitleSync, anchorSubtitleSync, reportSourceFailure, movieSources, setPrimarySource } from '../api.js'
+import { streamUrl, strmHlsUrl, strmCacheProgress, strmPrefetch, strmPrefetchState, streamInfo, setProgress, playMovie, markPlayed, startSession, updateSession, endSession, getPreviews, genPreviews, playbackInfo, prepareStream, prepareStreamStatus, subtitleTracks, setSkipPoints, saveSubtitleSync, anchorSubtitleSync, reportSourceFailure, movieSources, setPrimarySource } from '../api.js'
 import { toast, fmtClock } from '../utils.js'
 import { t } from '../i18n/index.js'
 import SubtitleConsole from './player/SubtitleConsole.vue'
@@ -631,6 +631,7 @@ let hoverBound = false    // 是否已绑定进度条 hover 事件
 
 // 网络串流（.strm）：'' = 普通文件；'strm' = 直连地址；'hls' = m3u8（走同源代理播放列表）
 const streamMode = ref('')
+const streamSourceId = ref('')  // 当前主源 id：暂停预取时带给后端（换源即失效）
 const directSrc = ref('')   // HLS 浏览器直连地址（仅开关开启时后端下发）
 let proxyTried = false
 let hlsProxyTried = false
@@ -640,13 +641,17 @@ let failoverTried = false
 /** 播放前问一次后端：这部片是不是网络串流、要不要按 HLS 处理（轻量接口，无 ffprobe） */
 async function resolveSource() {
   streamMode.value = ''
+  streamSourceId.value = ''
   directSrc.value = ''
   streamFailed.value = false
   proxyTried = false
   hlsProxyTried = false
   try {
     const info = await streamInfo(props.movieId)
-    if (info && info.stream) streamMode.value = info.hls ? 'hls' : 'strm'
+    if (info && info.stream) {
+      streamMode.value = info.hls ? 'hls' : 'strm'
+      streamSourceId.value = info.source_id || ''
+    }
     // 开关开启时优先进浏览器直连（源站对人机校验敏感、服务端代理被拦的场景）
     if (info && info.hls && info.hls_direct && info.direct_url) directSrc.value = info.direct_url
     // 刚入库的来源往往还没截到防盗链头，后端正在后台补：先给用户可见状态
@@ -1407,6 +1412,15 @@ function initPlayer() {
     player.on('timeupdate', () => onTime())
     // MSE 缓冲变化不会触发 timeupdate：单独跟进，保证灰条跟得上
     player.on('progress', () => paintRangesThrottled())
+    // 拖动 / 换清晰度后 buffered 区间会整体变化，立即重画一次；
+    // 暂停状态下换位置也按新位置重排后台预下
+    player.on('seeked', () => {
+      paintRanges()
+      if (player && player.paused()) startIdlePrefetch()
+    })
+    // 暂停 → 后端从当前位置往后预下（跳转超过 60 秒缓冲也能直接读本地）；恢复播放即取消
+    player.on('pause', () => startIdlePrefetch())
+    player.on('play', () => stopIdlePrefetch())
     player.on('ended', () => onEnded())
     player.on('error', () => onError())
     // 右上角浮层跟着控制条同节奏显隐；菜单打开 / 暂停时保持可见
@@ -1448,6 +1462,7 @@ function initPlayer() {
 }
 
 function destroyPlayer() {
+  stopIdlePrefetch()   // 关播放器 / 切影片：先让后台预下停掉（按发起时记的影片 id）
   clearInterval(barKeepTimer)
   barKeepTimer = 0
   if (clickTimer) { clearTimeout(clickTimer); clickTimer = null }
@@ -1489,6 +1504,7 @@ function destroyPlayer() {
     hoverBound = false
     // 缓存灰条：停轮询并丢掉服务端区间，换片后由 setupRanges 重新建立
     if (cacheTimer) { clearInterval(cacheTimer); cacheTimer = null }
+    if (rangeTimer) { clearInterval(rangeTimer); rangeTimer = null }
     if (statsTimer) { clearInterval(statsTimer); statsTimer = null }
     statsOpen.value = false
     statsRows.value = []
@@ -1595,6 +1611,7 @@ let cacheRaw = []          // 服务端已缓存区间（秒，按播放列表�
 let cacheTotal = 0         // 播放列表总时长（秒）
 let cacheSegments = 0      // 播放列表总分片数（调试面板显示的 x/y 段）
 let cacheTimer = null
+let rangeTimer = null      // 缓冲条补画：暂停 / 本地文件时没有 timeupdate，靠定时兜底
 let lastPaint = 0
 
 function cacheScale() {
@@ -1687,10 +1704,65 @@ function setupRanges() {
   ensureRangesHost()
   paintRanges()
   clearInterval(cacheTimer)
+  clearInterval(rangeTimer)
+  // 浏览器缓冲变化不一定有 timeupdate（暂停时、本地文件边下边播时都没有），
+  // 每秒补画一次：只是重画几个绝对定位的小块，开销可以忽略
+  rangeTimer = setInterval(paintRangesThrottled, 1000)
   if (streamMode.value === 'hls') {
     loadCacheProgress()
     cacheTimer = setInterval(loadCacheProgress, 2000)
   }
+}
+
+// ---- 暂停时的延伸预取 ----
+/* 浏览器的 MSE 缓冲上限约 60 秒（VHS 的源码常量，改不了），跳得更远只能等源站。
+   暂停时告知后端「从这里往后预下」，分片会落进本地磁盘缓存；之后跳回来或往前
+   跳到这段范围里，直接读本地。播放中不排，避免跟当前播放抢带宽。 */
+const idlePrefetch = ref(null)
+let idleTimer = null         // 暂停期间轮询状态（3 秒）
+let idleStartTimer = null    // 暂停后延迟 1.5 秒再排，避开「点一下就播」
+let idleMovieId = 0          // 发起预取的影片：切片 / 卸载时按它取消，别误伤新的
+
+async function refreshIdleState() {
+  if (!idleMovieId) return
+  try {
+    const r = await strmPrefetchState(idleMovieId)
+    // 只在真在跑时显示；跑完后进度条灰条已经变长，不再常驻标签
+    idlePrefetch.value = (r && r.running) ? r : null
+  } catch (e) {
+    idlePrefetch.value = null
+  }
+}
+
+function stopIdlePrefetch() {
+  clearTimeout(idleStartTimer)
+  idleStartTimer = null
+  if (idleTimer) { clearInterval(idleTimer); idleTimer = null }
+  idlePrefetch.value = null
+  const mid = idleMovieId
+  idleMovieId = 0
+  if (!mid) return
+  // 恢复播放 / 关闭播放器 / 切来源：让服务端停下（失败也不影响播放）
+  strmPrefetch(mid, { paused: false }).catch(() => {})
+}
+
+function startIdlePrefetch() {
+  if (streamMode.value !== 'hls' || !props.movieId) return
+  clearTimeout(idleStartTimer)
+  idleStartTimer = setTimeout(async () => {
+    if (!player || !player.paused()) return
+    const mid = props.movieId
+    idleMovieId = mid
+    try {
+      await strmPrefetch(mid, {
+        paused: true,
+        position: player.currentTime() || 0,
+        source_id: streamSourceId.value || '',
+      })
+    } catch (e) { return }
+    refreshIdleState()
+    if (!idleTimer) idleTimer = setInterval(refreshIdleState, 3000)
+  }, 1500)
 }
 
 // ---- 播放调试信息（右键画面开关）----
@@ -1921,6 +1993,11 @@ watch(() => props.movieId, () => {
              :title="$t('player.cacheAheadHint')">
           {{ $t('player.cacheAhead', { t: fmtShort(Math.round(cacheAhead)) }) }}
         </div>
+        <!-- 暂停时后台预下：进度条灰条会跟着往后长，下完后跳到更远也不用等源站 -->
+        <div v-if="idlePrefetch && idlePrefetch.running" class="vp-btn vp-cache-tag vp-idle-tag"
+             :title="$t('player.idlePrefetchHint')">
+          {{ $t('player.idlePrefetch', { done: fmtShort(Math.round(Math.min(idlePrefetch.seconds || 0, idlePrefetch.want || 0))), total: fmtShort(Math.round(idlePrefetch.want || 0)) }) }}
+        </div>
         <div v-if="canMarkIntro || canMarkOutro" class="vp-btn vp-mark" :class="{ on: markOpen }"
              :title="$t('player.markSkipTip')" @click.stop="markOpen = !markOpen">
           ⚑ <span class="vp-mark-label">{{ $t('player.markSkip') }}</span>
@@ -2133,22 +2210,27 @@ watch(() => props.movieId, () => {
 /* 已缓存时长：只读数字，别抢「标记跳过」的点击 */
 .vp-cache-tag { cursor: default; opacity: .78; }
 .vp-cache-tag:hover { background: rgba(0,0,0,.5); }
-/* 进度条上的两层灰条：服务端已缓存在下（淡蓝），浏览器已缓冲在上（更亮） */
-/* video.js 自带的 load-progress 与底槽同色（rgba(115,133,159,.5)），等于看不见；
-   这里顺手改亮一点，万一 VHS 更新了它也能露出来，不依赖我们自绘的那层。 */
+/* 后台预下中：比「已缓存」淡一点，用蓝调区分「正在长」和「已经能跳」 */
+.vp-idle-tag { color: #8fd0ff; }
+/* 进度条上的三层叠加（从下到上）：底槽 → 服务端已缓存（蓝）→ 浏览器已缓冲（浅白）→ 已播（白）。
+   video.js 自带的 load-progress 也画 buffered，但它是 rgba(115,133,159,.5) 的底槽色，
+   和轨道几乎同色，等于看不见；这里把它压到最底层当兜底，真正可见的是我们自绘的 .vp-ranges。
+   z-index 必须显式排：原先 .vp-ranges 是 0 且插在 load-progress 之前，被它整段盖住，
+   于是「时间轴上没有已缓冲区间」。 */
 .vjs-wrap :deep(.video-js .vjs-load-progress),
-.vjs-wrap :deep(.video-js .vjs-load-progress div) { background: rgba(255,255,255,.18); }
+.vjs-wrap :deep(.video-js .vjs-load-progress div) { background: rgba(255,255,255,.18); z-index: 0; }
 .vjs-wrap :deep(.vp-ranges) {
   position: absolute; top: 0; right: 0; bottom: 0; left: 0;
-  z-index: 0; pointer-events: none;
+  z-index: 1; pointer-events: none;
 }
+.vjs-wrap :deep(.video-js .vjs-play-progress) { z-index: 2; }
 .vjs-wrap :deep(.vp-range) {
   position: absolute; top: 0; bottom: 0; display: block;
   /* 两小时的片子里，30 秒缓冲只占 0.4%（约 2px）：给个最小宽度，不然等于没画 */
   min-width: 2px;
 }
-.vjs-wrap :deep(.vp-range.cache) { background: rgba(122, 196, 255, .42); }
-.vjs-wrap :deep(.vp-range.buf) { background: rgba(255, 255, 255, .5); }
+.vjs-wrap :deep(.vp-range.cache) { background: rgba(122, 196, 255, .38); }
+.vjs-wrap :deep(.vp-range.buf) { background: rgba(255, 255, 255, .42); }
 
 /* 播放调试信息面板：右键画面开关 */
 .vp-stats {
