@@ -16,10 +16,17 @@ from .config import COVER_DIR, avatar_dir, fanart_dir, ensure_dirs, outbound_ssl
 
 IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif")
 
-# 同目录下按优先级嗅探的候选文件名（{stem} 为视频文件主名）
+# 同目录下按优先级嗅探的封面候选名（{stem} 为视频文件主名）。
+# 注意：fanart / backdrop / landscape / thumb 属于**背景图**，见 _FANART_PATTERNS，
+# 不再混进封面候选——否则一个只有 fanart.jpg 的目录会被当成海报。
 _SIBLING_PATTERNS = [
-    "{stem}-poster", "{stem}-cover", "{stem}-thumb", "{stem}-fanart", "{stem}",
-    "poster", "cover", "folder", "movie", "default", "fanart", "thumb", "landscape",
+    "{stem}-poster", "{stem}-cover", "{stem}",
+    "poster", "cover", "folder", "movie", "default",
+]
+# 背景图候选（Emby / Kodi 风格）；顺序即优先级：带视频主名的优先，通用名其次。
+_FANART_PATTERNS = [
+    "{stem}-fanart", "{stem}-backdrop", "{stem}-landscape", "{stem}-thumb",
+    "fanart", "backdrop", "landscape", "thumb",
 ]
 
 _MAGIC = [
@@ -605,20 +612,18 @@ def _drop_other_exts(key: str, keep: str) -> None:
                 pass
 
 
-def find_local_cover(video_path: str | Path, code: str = "") -> Optional[Path]:
-    """在视频同目录中查找可用作封面的图片。"""
+def _find_sibling(video_path: str | Path, patterns: list[str],
+                  code: str = "", code_patterns: tuple = ()) -> Optional[Path]:
+    """按 ``patterns`` 顺序在视频同目录找图：带主名的优先，通用名其次，番号名最后。"""
     try:
         p = Path(video_path)
         folder = p.parent
         if not folder.is_dir():
             return None
         stem = p.stem
-        candidates: list[str] = []
-        for pat in _SIBLING_PATTERNS:
-            candidates.append(pat.format(stem=stem))
+        candidates = [pat.format(stem=stem) for pat in patterns]
         if code:
-            candidates.extend([code, f"{code}-poster", f"{code}pl", f"{code}ps"])
-
+            candidates.extend(pat.format(code=code) for pat in code_patterns)
         existing = {f.name.lower(): f for f in folder.iterdir() if f.is_file()}
         for base in candidates:
             for ext in IMAGE_EXTS:
@@ -628,6 +633,18 @@ def find_local_cover(video_path: str | Path, code: str = "") -> Optional[Path]:
         return None
     except Exception:
         return None
+
+
+def find_local_cover(video_path: str | Path, code: str = "") -> Optional[Path]:
+    """在视频同目录中查找可用作封面的图片（不含 fanart 类背景图）。"""
+    return _find_sibling(video_path, _SIBLING_PATTERNS, code,
+                         (code, "{code}-poster", "{code}pl", "{code}ps"))
+
+
+def find_local_fanart(video_path: str | Path, code: str = "") -> Optional[Path]:
+    """在视频同目录中查找背景图（Emby 风格：fanart / backdrop / landscape / thumb）。"""
+    return _find_sibling(video_path, _FANART_PATTERNS, code,
+                         ("{code}-fanart", "{code}-backdrop", "{code}-landscape"))
 
 
 def download(url: str, cfg: Dict[str, Any], referer: str = "") -> Optional[bytes]:

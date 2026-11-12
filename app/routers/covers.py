@@ -133,13 +133,16 @@ def set_cover(movie_id: int, payload: Dict[str, Any] = Body(default={})) -> Dict
         movie = store.movie_detail(conn, movie_id)
         if not movie:
             raise HTTPException(404, "影片不存在")
+        fanart = ""
         if not location:  # 不传地址时自动嗅探本地图片
             name = scraper.sniff_local_cover(conn, movie_id, cfg)
+            # 同目录的 fanart / backdrop / landscape / thumb 顺手登记为背景图（只补空）
+            fanart = scraper.sniff_local_fanart(conn, movie_id, cfg) or ""
         else:
             name = scraper.save_cover(conn, movie, location, cfg, source="manual")
         if not name:
             raise HTTPException(400, "封面获取失败，请检查地址或本地文件是否有效")
-        return {"ok": True, "cover": name}
+        return {"ok": True, "cover": name, "fanart": fanart}
 
 
 @router.post("/movies/{movie_id}/cover/upload")

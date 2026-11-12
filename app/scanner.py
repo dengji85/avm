@@ -370,31 +370,50 @@ def store_upsert(conn, parsed, path, size, mtime, qh, strm_url="",
 
 
 def batch_local_covers(progress_cb=None):
+    """扫描后补本地图：先补封面，再补背景图（fanart）。
+
+    - 只处理有本地文件的影片（在线来源没有可嗅探的目录）；
+    - 封面只认 poster / cover / folder 等，背景图只认 fanart / backdrop / landscape / thumb；
+    - 两个集合分开查：只有背景图的目录通常没有封面，有封面的也可能缺背景图；
+    - 同一个连接上写入，循环结束后必须 commit（之前提前 close 会让补图全部丢失）。
+    """
     if progress_cb is None:
         progress_cb = SCAN.update
     from . import scraper
     cfg = load_config()
     conn = connect()
     try:
-        rows = conn.execute(
+        cover_ids = [r["id"] for r in conn.execute(
             "SELECT DISTINCT m.id FROM movies m "
             "WHERE (m.cover IS NULL OR m.cover = '') "
-            "AND EXISTS (SELECT 1 FROM movie_files f WHERE f.movie_id = m.id AND f.missing = 0)"
-        ).fetchall()
-        ids = [r["id"] for r in rows]
+            "AND EXISTS (SELECT 1 FROM movie_files f WHERE f.movie_id = m.id "
+            "AND f.missing = 0 AND COALESCE(f.kind, 'local') <> 'online')"
+        )]
+        fanart_ids = [r["id"] for r in conn.execute(
+            "SELECT DISTINCT m.id FROM movies m "
+            "WHERE (m.fanart IS NULL OR m.fanart = '') "
+            "AND EXISTS (SELECT 1 FROM movie_files f WHERE f.movie_id = m.id "
+            "AND f.missing = 0 AND COALESCE(f.kind, 'local') <> 'online')"
+        )]
+        total = len(cover_ids)
+        done = 0
+        for mid in cover_ids:
+            try:
+                scraper.sniff_local_cover(conn, mid, cfg)
+            except Exception:
+                pass
+            done += 1
+            if done % 20 == 0:
+                progress_cb(cover_done=done, cover_total=total)
+        progress_cb(cover_done=total, cover_total=total)
+        for mid in fanart_ids:
+            try:
+                scraper.sniff_local_fanart(conn, mid, cfg)
+            except Exception:
+                pass
+        conn.commit()
     finally:
         conn.close()
-    total = len(ids)
-    done = 0
-    for mid in ids:
-        try:
-            scraper.sniff_local_cover(conn, mid, cfg)
-        except Exception:
-            pass
-        done += 1
-        if done % 20 == 0:
-            progress_cb(cover_done=done, cover_total=total)
-    progress_cb(cover_done=total, cover_total=total)
 
 
 def import_local_nfo_after_scan(progress_cb=None):

@@ -621,6 +621,25 @@ def sniff_local_cover(conn, movie_id: int, cfg: Dict[str, Any]) -> Optional[str]
     return None
 
 
+def sniff_local_fanart(conn, movie_id: int, cfg: Dict[str, Any]) -> Optional[str]:
+    """把同目录的 Emby 风格背景图（fanart / backdrop / landscape / thumb）登记为 fanart。
+
+    只补空：已有 fanart（NFO 声明、远端刮削或本地补过）时不覆盖，所以用 NFO
+    显式指定背景图的目录仍以 NFO 为准。只登记，不参与竖版海报生成，也不改原文件名。
+    """
+    movie = store.movie_detail(conn, movie_id)
+    if not movie or str(movie.get("fanart") or ""):
+        return None
+    for f in movie.get("files") or []:
+        path = str(f.get("path") or "")
+        if not path or path.startswith("__avm_online__"):
+            continue
+        hit = images.find_local_fanart(path, movie.get("code") or "")
+        if hit:
+            return save_fanart(conn, movie, str(hit), cfg, source="local")
+    return None
+
+
 def import_local_nfo_one(conn, movie_id: int, cfg: Dict[str, Any]) -> bool:
     """读取影片同目录的本地 NFO/JSON 并写库（供「扫描后自动导入」调用）。
 
@@ -1056,13 +1075,17 @@ def start_scrape_async(ids: Optional[List[int]] = None, scope: str = "missing",
 
 
 def batch_local_covers() -> Dict[str, int]:
-    """本地封面嗅探；嗅探不到时自动从视频抽帧兜底。不联网。"""
+    """本地封面嗅探；嗅探不到时自动从视频抽帧兜底。不联网。
+
+    顺带把同目录的 fanart / backdrop / landscape / thumb 登记为背景图（只补空）。
+    """
     cfg = load_config()
     from .ext_components import ffmpeg_exe
     ffmpeg = ffmpeg_exe(cfg)
     conn = connect()
     found = 0
     extracted = 0
+    fanarts = 0
     ids: List[int] = []
     try:
         ids = [r["id"] for r in query_all(conn, "SELECT id FROM movies WHERE cover = ''")]
@@ -1071,7 +1094,13 @@ def batch_local_covers() -> Dict[str, int]:
                 found += 1
             elif store.extract_cover_from_video(conn, mid, ffmpeg):
                 extracted += 1
+        fan_ids = [r["id"] for r in query_all(
+            conn, "SELECT id FROM movies WHERE fanart = '' OR fanart IS NULL")]
+        for mid in fan_ids:
+            if sniff_local_fanart(conn, mid, cfg):
+                fanarts += 1
         conn.commit()
     finally:
         conn.close()
-    return {"checked": len(ids), "found": found, "extracted": extracted}
+    return {"checked": len(ids), "found": found,
+            "extracted": extracted, "fanarts": fanarts}

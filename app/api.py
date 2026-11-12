@@ -931,11 +931,26 @@ def rescan_local_covers() -> Dict[str, Any]:
                     found += 1
             except Exception:
                 pass
+        # 背景图（fanart / backdrop / landscape / thumb）单独补，只填空的
+        fan_rows = query_all(
+            conn,
+            "SELECT DISTINCT m.id FROM movies m "
+            "WHERE (m.fanart IS NULL OR m.fanart = '') "
+            "AND EXISTS (SELECT 1 FROM movie_files f WHERE f.movie_id = m.id AND f.missing = 0 "
+            "AND COALESCE(f.kind,'local') <> 'online')",
+        )
+        fanarts = 0
+        for r in fan_rows:
+            try:
+                if scraper.sniff_local_fanart(conn, r["id"], cfg):
+                    fanarts += 1
+            except Exception:
+                pass
         after = query_one(
             conn, "SELECT COUNT(*) c FROM movies WHERE cover='' OR cover IS NULL")["c"]
     return {"ok": True, "movies_scanned": len(rows),
             "covers_before_empty": before, "covers_after_empty": after,
-            "filled": max(before - after, 0)}
+            "filled": max(before - after, 0), "fanarts": fanarts}
 
 
 @router.post("/parse-preview")
