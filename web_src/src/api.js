@@ -383,6 +383,13 @@ export const subtitleCueList = (id, subId, params = {}) =>
 export const saveSubtitleSync = (id, subId, body) =>
   patch(`/movies/${id}/subtitles/${subId}/sync`, body)
 export const setSkipPoints = (id, body) => put(`/movies/${id}/skip`, body)
+/* 精彩时刻：多段区间标记（播放器画在进度条上，详情页可删） */
+export const movieMarkers = (id) => get(`/movies/${id}/markers`)
+export const addMovieMarker = (id, body) => post(`/movies/${id}/markers`, body)
+export const updateMovieMarker = (id, markerId, body) => put(`/movies/${id}/markers/${markerId}`, body)
+export const deleteMovieMarker = (id, markerId) => del(`/movies/${id}/markers/${markerId}`)
+/* 标记墙：跨影片列出标记，tag 传逗号分隔的标签名（OR 匹配） */
+export const allMovieMarkers = (params = {}) => get('/markers', params)
 /* AI 剧情问答与相似推荐 */
 export const aiAsk = (id, question) => post(`/ai/ask/${id}`, { question })
 export const aiAskHistory = (id, limit = 10) => get(`/ai/ask/${id}`, { limit })

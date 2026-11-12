@@ -79,6 +79,7 @@ const cfg = reactive({
   },
   ffmpeg_path: '',
   previews_quality: 'smart',
+  markers: { preview: true, preview_limit_mb: 200 },
   // 广告片检测阈值（判定逻辑与默认值见 app/adcheck.py）
   adcheck: { enabled: true, threshold_likely: 65, threshold_suspect: 35 },
   ai: { enabled: false, base_url: 'https://api.openai.com/v1', api_key: '', model: 'gpt-4o-mini', temperature: 0.4 },
@@ -273,6 +274,7 @@ async function load() {
       cfg.online_sites = PRESET_SITES.map((s) => ({ ...s }))
     }
     cfg.previews_quality = c.previews_quality || 'smart'
+    cfg.markers = Object.assign({ preview: true, preview_limit_mb: 200 }, c.markers)
     cfg.adcheck = Object.assign(
       { enabled: true, threshold_likely: 65, threshold_suspect: 35 }, c.adcheck)
 
@@ -339,6 +341,10 @@ async function saveLibrary() {
     const patch = {
       // ffmpeg_path 已迁到「AI 中心 → 扩展组件」编辑；这里不回写，避免用旧值覆盖
       previews_quality: cfg.previews_quality || 'smart',
+      markers: {
+        preview: !!cfg.markers.preview,
+        preview_limit_mb: Math.max(0, Number(cfg.markers.preview_limit_mb) || 0),
+      },
       adcheck: {
         enabled: !!cfg.adcheck.enabled,
         threshold_likely: Math.max(10, Math.min(100, Number(cfg.adcheck.threshold_likely) || 65)),
@@ -1628,6 +1634,21 @@ onMounted(async () => {
                 <option value="high">{{ $t('settings.pvHigh') }}</option>
               </select>
               <span class="hint">{{ $t('settings.previewQualityHint') }}</span>
+            </div>
+            <div class="field">
+              <label class="toggle">
+                <input type="checkbox" v-model="cfg.markers.preview" @change="saveLibrary" /><span class="track"></span>
+              </label>
+              <span>{{ $t('settings.markerPreview') }}</span>
+              <span class="hint">{{ $t('settings.markerPreviewHint') }}</span>
+            </div>
+            <div v-if="cfg.markers.preview" class="field-row">
+              <label>{{ $t('settings.markerPreviewLimit') }}</label>
+              <div class="hstack">
+                <input type="number" v-model="cfg.markers.preview_limit_mb" min="0" style="width:120px" @change="saveLibrary" />
+                <span class="muted">MB</span>
+              </div>
+              <span class="hint">{{ $t('settings.markerPreviewLimitHint') }}</span>
             </div>
             <div class="field">
               <button class="btn" :disabled="regenPv" @click="regeneratePreviews">{{ $t('settings.regenPreviewBtn') }}</button>

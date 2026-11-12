@@ -165,6 +165,25 @@ CREATE INDEX IF NOT EXISTS idx_files_size     ON movie_files(size);
 CREATE INDEX IF NOT EXISTS idx_ma_actress     ON movie_actress(actress_id);
 CREATE INDEX IF NOT EXISTS idx_mg_genre       ON movie_genre(genre_id);
 
+-- 精彩时刻：一部片可有多段区间，播放器画在进度条上、点一下跳到起点。
+-- 与 movies.skip_intro / skip_outro 并存：那两个是「整片级」的单点跳过，这里是可以
+-- 任意多的收藏片段（kind=marker 普通标记 / favorite 收藏）。
+CREATE TABLE IF NOT EXISTS movie_markers (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    movie_id   INTEGER NOT NULL REFERENCES movies(id) ON DELETE CASCADE,
+    start_sec  REAL    NOT NULL DEFAULT 0,
+    end_sec    REAL    NOT NULL DEFAULT 0,
+    label      TEXT    DEFAULT '',
+    kind       TEXT    DEFAULT 'marker',
+    color      TEXT    DEFAULT '',
+    sort       INTEGER DEFAULT 0,
+    is_primary INTEGER DEFAULT 0,           -- 唯一主标记：进度条加亮、详情页置顶 ★
+    thumb      TEXT    DEFAULT '',          -- 缩略图相对名 marker/<movie_id>/<id>.jpg
+    preview    TEXT    DEFAULT '',          -- 预览短片相对名 marker/<movie_id>/<id>.mp4
+    created_at TEXT    DEFAULT (datetime('now','localtime'))
+);
+CREATE INDEX IF NOT EXISTS idx_markers_movie ON movie_markers(movie_id, start_sec);
+
 CREATE TABLE IF NOT EXISTS watch_progress (
     movie_id   INTEGER PRIMARY KEY REFERENCES movies(id) ON DELETE CASCADE,
     position   REAL DEFAULT 0,
@@ -585,6 +604,21 @@ def _migrate(conn: sqlite3.Connection) -> None:
             conn.execute("ALTER TABLE watch_sessions ADD COLUMN %s %s" % (col, ddl))
     conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_ws_dedupe ON watch_sessions(dedupe_key) "
                  "WHERE dedupe_key <> ''")
+    # 精彩时刻增强：老库补「主标记 / 缩略图」列。标签关联表与索引在 SCHEMA 里建（IF NOT EXISTS），
+    # 这里再兜一次；部分唯一索引保证一影片只有一个主标记，重复执行无副作用。
+    marker_cols = {r[1] for r in conn.execute("PRAGMA table_info(movie_markers)").fetchall()}
+    for col, ddl in (("is_primary", "INTEGER DEFAULT 0"),
+                     ("thumb", "TEXT DEFAULT ''"),
+                     ("preview", "TEXT DEFAULT ''")):
+        if col not in marker_cols:
+            conn.execute("ALTER TABLE movie_markers ADD COLUMN %s %s" % (col, ddl))
+    conn.execute("CREATE TABLE IF NOT EXISTS movie_marker_tag ("
+                 "marker_id INTEGER NOT NULL REFERENCES movie_markers(id) ON DELETE CASCADE, "
+                 "tag_id INTEGER NOT NULL REFERENCES tags(id) ON DELETE CASCADE, "
+                 "PRIMARY KEY (marker_id, tag_id))")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_marker_tag ON movie_marker_tag(tag_id)")
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_markers_primary "
+                 "ON movie_markers(movie_id) WHERE is_primary = 1")
     conn.commit()
 
 

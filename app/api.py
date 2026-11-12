@@ -48,6 +48,7 @@ from .routers import adcheck as _adcheck_api        # noqa: E402
 from .routers import covers as _covers_api          # noqa: E402
 from .routers import ext as _ext_api                # noqa: E402
 from .routers import ingest as _ingest_api          # noqa: E402
+from .routers import markers as _markers_api        # noqa: E402
 from .routers import metatube as _metatube_api      # noqa: E402
 from .routers import subtitles as _subtitles_api    # noqa: E402
 
@@ -55,6 +56,7 @@ router.include_router(_adcheck_api.router)
 router.include_router(_covers_api.router)
 router.include_router(_ext_api.router)
 router.include_router(_ingest_api.router)
+router.include_router(_markers_api.router)
 router.include_router(_metatube_api.router)
 router.include_router(_subtitles_api.router)
 

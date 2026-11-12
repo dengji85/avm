@@ -85,6 +85,12 @@ DEFAULT_ONLINE_SITES: List[Dict[str, Any]] = [
 DEFAULT_CONFIG: Dict[str, Any] = {
     # 预览图密度：smart=按时长自适应 / low=稀疏省空间 / high=精细（影响抽帧张数）
     "previews_quality": "smart",
+    # 精彩时刻预览短片：打点后为标记生成 4 秒静音循环 mp4（仅本地文件）。
+    # 关掉后只保留静态缩略图；磁盘占用上限按最久未访问清理（0 = 不限制）。
+    "markers": {
+        "preview": True,
+        "preview_limit_mb": 200,
+    },
     # 广告片检测（内容级，见 app/adcheck.py）：抽帧统计「片头/片尾/整片的文字条比例」，
     # 用于找出片头拼宣传片、全程带跑马灯的劣质片源。阈值越高越保守。
     "adcheck": {
@@ -915,6 +921,16 @@ def video_exts(cfg: Dict[str, Any] | None = None) -> list:
     cfg = cfg or load_config()
     exts = cfg.get("library", {}).get("video_extensions") or cfg.get("library", {}).get("video_exts") or []
     return list(exts)
+
+
+def markers_cfg(cfg: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    """精彩时刻预览配置（与默认值合并）。老 config.json 没有这一节，读默认值即可。"""
+    cfg = cfg or load_config()
+    merged = copy.deepcopy(DEFAULT_CONFIG.get("markers") or {})
+    got = cfg.get("markers")
+    if isinstance(got, dict):
+        merged.update({k: v for k, v in got.items() if v is not None})
+    return merged
 
 
 def nfo_export_cfg(cfg: Dict[str, Any] | None = None) -> Dict[str, Any]:

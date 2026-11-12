@@ -2,7 +2,7 @@
 import { ref, reactive, computed, onMounted, onBeforeUnmount, watch, nextTick } from 'vue'
 import videojs from 'video.js'
 import 'video.js/dist/video-js.css'
-import { streamUrl, strmHlsUrl, strmCacheProgress, strmPrefetch, strmPrefetchState, streamInfo, setProgress, playMovie, markPlayed, startSession, updateSession, endSession, getPreviews, genPreviews, playbackInfo, prepareStream, prepareStreamStatus, subtitleTracks, setSkipPoints, saveSubtitleSync, anchorSubtitleSync, reportSourceFailure, movieSources, setPrimarySource } from '../api.js'
+import { streamUrl, strmHlsUrl, strmCacheProgress, strmPrefetch, strmPrefetchState, streamInfo, setProgress, playMovie, markPlayed, startSession, updateSession, endSession, getPreviews, genPreviews, playbackInfo, prepareStream, prepareStreamStatus, subtitleTracks, setSkipPoints, movieMarkers, addMovieMarker, updateMovieMarker, deleteMovieMarker, saveSubtitleSync, anchorSubtitleSync, reportSourceFailure, movieSources, setPrimarySource } from '../api.js'
 import { toast, fmtClock } from '../utils.js'
 import { t } from '../i18n/index.js'
 import SubtitleConsole from './player/SubtitleConsole.vue'
@@ -58,6 +58,10 @@ function fmtShort(sec) {
   const ss = String(s % 60).padStart(2, '0')
   return h ? h + ':' + String(m).padStart(2, '0') + ':' + ss : m + ':' + ss
 }
+/* 时间文字的盒宽必须恒定：显示格式只有两种，m:ss（≤59:59，5 字符）与 h:mm:ss
+   （最长 12:34:56，8 字符）。按「本片会用到的格式」预留宽度，避免每秒数字变化
+   把 flex:auto 的进度条推来推去；不足 1 小时的片不预留 8 字符的空白。 */
+const timeLong = computed(() => (Number(dur.value) || 0) >= 3600)
 function mountTimeHost() {
   const bar = player && player.controlBar && player.controlBar.el()
   if (!bar) return
@@ -268,6 +272,130 @@ let introJumped = false
 let outroJumped = false
 const canMarkIntro = ref(true)
 const canMarkOutro = ref(false)
+/* 精彩时刻：多段区间，画在进度条最上层，点一下跳到起点 */
+const markers = ref([])
+const editingMarker = ref(0)
+const editForm = reactive({ label: '', start: 0, end: 0, tags: '' })
+let markerTimer = null
+
+function thumbUrl(m) {
+  return m && m.thumb ? '/api/covers/' + m.thumb : ''
+}
+
+function previewUrl(m) {
+  return m && m.preview ? '/api/covers/' + m.preview : ''
+}
+
+/* 悬停播放标记预览：只挂一个 <video>，移出即卸载释放；触屏保持静图 */
+const hoverMarker = ref(0)
+const canHoverPreview = typeof window !== 'undefined' && !!window.matchMedia
+  && !window.matchMedia('(hover: none)').matches
+
+function hoverPreview(m) {
+  if (canHoverPreview && m && m.preview) hoverMarker.value = m.id
+}
+function leavePreview() {
+  hoverMarker.value = 0
+}
+watch(markOpen, (open) => { if (!open) hoverMarker.value = 0 })
+
+async function loadMarkers() {
+  if (!props.movieId) { markers.value = []; return }
+  try {
+    const r = await movieMarkers(props.movieId)
+    markers.value = (r && r.items) || []
+  } catch (e) {
+    markers.value = []      // 旧后端没有这个接口：不画标记，播放照常
+  }
+  paintRanges()
+}
+
+function scheduleMarkerRefresh() {
+  // 缩略图由后台 ffmpeg 抽帧生成，通常 1–2 秒落盘；预览短片稍慢，再补拉一次
+  if (markerTimer) clearTimeout(markerTimer)
+  markerTimer = setTimeout(() => {
+    markerTimer = null
+    loadMarkers()
+    if (markers.value.some((m) => !m.preview)) {
+      markerTimer = setTimeout(() => { markerTimer = null; loadMarkers() }, 4000)
+    }
+  }, 2000)
+}
+
+function addMoment() {
+  const v = videoEl
+  if (!v || !props.movieId) return
+  const total = dur.value || 0
+  const start = Math.max(0, Math.round(v.currentTime))
+  // 起点用当前播放位置，默认往后 30 秒（不超过片长），之后可编辑起止与标签
+  const end = total > start + 1 ? Math.min(total, start + 30) : start + 30
+  addMovieMarker(props.movieId, {
+    start, end, kind: 'marker', tags: [],
+    label: t('player.markMomentLabel', { n: markers.value.length + 1 }),
+  }).then((r) => {
+    if (r && r.item) {
+      markers.value = markers.value.filter((m) => m.id !== r.item.id)
+        .concat([r.item]).sort((a, b) => a.start - b.start)
+    }
+    paintRanges()
+    scheduleMarkerRefresh()
+    toast(t('player.markMomentDone', { t: fmtSkip(start) }), 'ok')
+  }).catch((e) => toast(e.message, 'err'))
+}
+
+function jumpToMarker(m) {
+  const v = videoEl
+  if (!v) return
+  v.currentTime = Math.max(0, Number(m.start) || 0)
+  markOpen.value = false
+}
+
+function startEdit(m) {
+  editingMarker.value = m.id
+  editForm.label = m.label || ''
+  editForm.start = Math.round((Number(m.start) || 0) * 10) / 10
+  editForm.end = Math.round((Number(m.end) || 0) * 10) / 10
+  editForm.tags = (m.tags || []).join(', ')
+}
+
+function saveEdit(m) {
+  if (!props.movieId || !m) return
+  updateMovieMarker(props.movieId, m.id, {
+    label: editForm.label,
+    start: Number(editForm.start) || 0,
+    end: Number(editForm.end) || 0,
+    tags: editForm.tags,
+  }).then((r) => {
+    const item = (r && r.item) || {}
+    markers.value = markers.value.map((x) => (x.id === m.id ? item : x))
+      .sort((a, b) => a.start - b.start)
+    editingMarker.value = 0
+    paintRanges()
+    scheduleMarkerRefresh()
+    toast(t('player.markerSaved'), 'ok')
+  }).catch((e) => toast(e.message, 'err'))
+}
+
+function togglePrimary(m) {
+  if (!props.movieId || !m) return
+  const on = !m.primary
+  updateMovieMarker(props.movieId, m.id, { is_primary: on }).then(() => {
+    markers.value = markers.value.map((x) => (x.id === m.id
+      ? Object.assign({}, x, { primary: on })
+      : (on ? Object.assign({}, x, { primary: false }) : x)))
+    paintRanges()
+  }).catch((e) => toast(e.message, 'err'))
+}
+
+function removeMarker(m) {
+  if (!props.movieId || !m) return
+  deleteMovieMarker(props.movieId, m.id).then(() => {
+    markers.value = markers.value.filter((x) => x.id !== m.id)
+    if (editingMarker.value === m.id) editingMarker.value = 0
+    paintRanges()
+    toast(t('player.markerDeleted'), 'ok')
+  }).catch((e) => toast(e.message, 'err'))
+}
 
 const PREF_KEY = 'avm.player.prefs'
 
@@ -349,6 +477,7 @@ async function loadSubtitleTracks(keepPreview = false) {
     subTracks.value = r.tracks || []
     skipIntro.value = r.skip_intro || 0
     skipOutro.value = r.skip_outro || 0
+    loadMarkers()
     subStatus.value = r.status || (subTracks.value.length ? 'unchecked' : 'none')
     // 偏好命中则用它，否则默认第一条（优先中文）
     const want = activeSub.value
@@ -625,7 +754,10 @@ let swipe = { active: false, dir: 0, startX: 0, startY: 0, startTime: 0, targetT
 let progressCtrl = null   // video.js 进度条容器 (.vjs-progress-control)
 let tipEl = null          // 预览浮层
 let tipImgEl = null       // 预览缩略图 <img>
+let tipVideoEl = null     // 标记区间预览短片 <video>（与 img 互斥显示）
+let tipMarkEl = null      // 标记区间标题行（起–止 / 标签），与预览合并进同一浮层
 let tipTimeEl = null      // 预览时间标签
+let tipMarkerId = 0       // 当前浮层里正在播的标记 id（0 = 静态帧）
 let previewUrls = []      // 预览图 URL 数组（与后端等距抽帧顺序一致）
 let hoverBound = false    // 是否已绑定进度条 hover 事件
 
@@ -1125,6 +1257,13 @@ function onKeydown(e) {
     webFs.value = false
     return
   }
+  // M：在当前画面一键打点（与 ⚑ 面板里的「标记精彩时刻」同一动作）
+  if ((e.key === 'm' || e.key === 'M')
+      && !e.ctrlKey && !e.metaKey && !e.altKey) {
+    e.preventDefault()
+    addMoment()
+    return
+  }
   if (e.key === 'ArrowLeft') {
     e.preventDefault()
     player.currentTime(Math.max(0, (videoEl.currentTime || 0) - 5))
@@ -1509,6 +1648,10 @@ function destroyPlayer() {
     statsOpen.value = false
     statsRows.value = []
     rangesHost = null
+    marksHost = null
+    markers.value = []
+    editingMarker.value = 0
+    if (markerTimer) { clearTimeout(markerTimer); markerTimer = null }
     cacheRaw = []
     cacheTotal = 0
     cacheSegments = 0
@@ -1516,6 +1659,9 @@ function destroyPlayer() {
     previewUrls = []
     tipEl = null
     tipImgEl = null
+    tipVideoEl = null
+    tipMarkEl = null
+    tipMarkerId = 0
     tipTimeEl = null
     swipeTipEl = null
     swipe = { active: false, dir: 0, startX: 0, startY: 0, startTime: 0, targetTime: 0 }
@@ -1532,34 +1678,129 @@ function buildTip() {
   progressCtrl.style.position = 'relative'
   tipEl = document.createElement('div')
   tipEl.className = 'vjs-preview-tip'
-  tipEl.innerHTML = '<img alt=""><span class="pt-time"></span>'
+  tipEl.innerHTML = '<span class="pt-mark"></span><img alt="">'
+    + '<video class="pt-video" muted loop playsinline preload="metadata"></video>'
+    + '<span class="pt-time"></span>'
   tipImgEl = tipEl.querySelector('img')
+  tipVideoEl = tipEl.querySelector('.pt-video')
+  tipVideoEl.style.display = 'none'
+  tipMarkEl = tipEl.querySelector('.pt-mark')
+  tipMarkEl.style.display = 'none'
   tipTimeEl = tipEl.querySelector('.pt-time')
   tipEl.style.display = 'none'
   progressCtrl.appendChild(tipEl)
 }
 
+/* 指针所在时刻落在哪个标记区间内（不论有没有预览短片） */
+function markerAtTime(t) {
+  for (const m of markers.value) {
+    const s = Number(m.start) || 0
+    const e = Number(m.end) || s
+    if (t >= s && t <= e) return m
+  }
+  return null
+}
+
+/* 标记信息作为浮层标题行：起–止 + 标签，替代会互相遮挡的原生 title 浮层 */
+function setTipMark(m) {
+  if (!tipMarkEl) return
+  if (!m) {
+    tipMarkEl.style.display = 'none'
+    tipMarkEl.textContent = ''
+    return
+  }
+  let text = fmtSkip(m.start) + ' – ' + fmtSkip(m.end)
+  const extra = m.label || (m.tags && m.tags.length ? m.tags.join(' / ') : '')
+  if (extra) text += ' · ' + extra
+  tipMarkEl.textContent = text
+  tipMarkEl.style.display = 'block'
+}
+
+/* 浮层切到标记短片：同一个 video 元素换源复用，不新建实例 */
+function useMarkerTip(m) {
+  if (!tipVideoEl || tipMarkerId === m.id) return
+  try { tipVideoEl.pause() } catch (e) { /* 忽略 */ }
+  tipMarkerId = Number(m.id) || 0
+  tipVideoEl.src = '/api/covers/' + m.preview
+  tipVideoEl.style.display = 'block'
+  tipImgEl.style.display = 'none'
+  const p = tipVideoEl.play()
+  if (p && p.catch) p.catch(() => { /* 自动播放被拦截时保留静帧 */ })
+}
+
+/* 移出标记 / 移出进度条：暂停并卸载 src，释放解码器 */
+function stopMarkerTip() {
+  if (!tipMarkerId) return
+  tipMarkerId = 0
+  if (tipVideoEl) {
+    try { tipVideoEl.pause() } catch (e) { /* 忽略 */ }
+    tipVideoEl.removeAttribute('src')
+    try { tipVideoEl.load() } catch (e) { /* 忽略 */ }
+    tipVideoEl.style.display = 'none'
+  }
+  if (tipImgEl) tipImgEl.style.display = ''
+}
+
+/* 我们的浮层已经给出「指针处实际时间」，video.js 自带的 hover 时间提示是重复信息，
+   还会被浮层压住：浮层可见期间在进度条容器上挂 avm-tip-on 让它让位，离开即摘掉。
+   不动 node_modules 样式、不做永久 display:none，拖动 seek 用的
+   .vjs-play-progress 时间提示保持原样。 */
+function setTipOn(on) {
+  if (!progressCtrl) return
+  progressCtrl.classList.toggle('avm-tip-on', !!on)
+}
+
 function onProgressMove(e) {
-  if (!progressCtrl || !tipEl || !previewUrls.length) return
+  if (!progressCtrl || !tipEl) return
   const holder = progressCtrl.querySelector('.vjs-progress-holder')
   if (!holder) return
   const hRect = holder.getBoundingClientRect()
   if (hRect.width <= 0) return
   let ratio = (e.clientX - hRect.left) / hRect.width
   ratio = Math.max(0, Math.min(1, ratio))
-  // 后端等距抽帧：t = dur*(i+1)/(count+1) -> index = round(ratio*(count+1))-1
-  const idx = Math.round(ratio * (previewUrls.length + 1)) - 1
-  const ci = Math.max(0, Math.min(previewUrls.length - 1, idx))
-  tipImgEl.src = previewUrls[ci]
-  tipTimeEl.textContent = fmtClock(ratio * (dur.value || 0))
-  // 浮层跟随鼠标横向居中（相对进度条容器）
-  const pRect = progressCtrl.getBoundingClientRect()
-  tipEl.style.left = (e.clientX - pRect.left) + 'px'
+  const t = ratio * (dur.value || 0)
+  const hit = markerAtTime(t)
+  setTipMark(hit)
+  let withImg = false
+  if (hit && hit.preview) {
+    useMarkerTip(hit)
+    withImg = true
+  } else {
+    if (tipMarkerId) stopMarkerTip()
+    if (previewUrls.length) {
+      // 后端等距抽帧：t = dur*(i+1)/(count+1) -> index = round(ratio*(count+1))-1
+      const idx = Math.round(ratio * (previewUrls.length + 1)) - 1
+      const ci = Math.max(0, Math.min(previewUrls.length - 1, idx))
+      tipImgEl.src = previewUrls[ci]
+      tipImgEl.style.display = ''
+      withImg = true
+    } else {
+      // 无静态帧、无标记短片：只留时间行（落在标记内时另有标题行），不摆一张黑图
+      tipImgEl.style.display = 'none'
+    }
+  }
+  // 有图 = 160×90 预览卡；无图 = 贴字的紧凑胶囊（宽度自适应）
+  tipEl.classList.toggle('has-img', withImg)
+  // 时间行始终跟随指针：任何位置都能看到这一刻的实际时间
+  tipTimeEl.textContent = fmtClock(t)
+  // 先显示再量宽度：三种形态宽窄不同，按实际宽度夹在播放器边界内
   tipEl.style.display = 'block'
+  const pRect = progressCtrl.getBoundingClientRect()
+  const playerRect = player ? player.el().getBoundingClientRect() : pRect
+  const half = (tipEl.offsetWidth || 160) / 2 + 2
+  const minLeft = Math.max(half, playerRect.left - pRect.left + half)
+  const maxLeft = Math.min(pRect.width - half, playerRect.right - pRect.left - half)
+  let left = e.clientX - pRect.left
+  if (maxLeft >= minLeft) left = Math.max(minLeft, Math.min(maxLeft, left))
+  tipEl.style.left = left + 'px'
+  // 浮层可见期间让 video.js 的 hover 时间提示让位，避免同一信息两处显示又互相遮挡
+  setTipOn(true)
 }
 
 function onProgressLeave() {
   if (tipEl) tipEl.style.display = 'none'
+  setTipOn(false)
+  stopMarkerTip()
 }
 
 function enableHover() {
@@ -1595,6 +1836,8 @@ function setupPreviewHover() {
   if (!player) return
   progressCtrl = player.el().querySelector('.vjs-progress-control')
   if (!progressCtrl) return
+  // 先挂监听：标记短片不依赖静态帧是否已抽好，落在区间内就能播
+  enableHover()
   ensurePreviews()
 }
 
@@ -1607,6 +1850,7 @@ saveTimer = setInterval(() => saveProgress(false), 10000)
    在线播放列表是 no-store 的，每次播放重新拉，所以缓存进度按影片轮询（2 秒）。 */
 const cacheAhead = ref(0)
 let rangesHost = null
+let marksHost = null
 let cacheRaw = []          // 服务端已缓存区间（秒，按播放列表时长计）
 let cacheTotal = 0         // 播放列表总时长（秒）
 let cacheSegments = 0      // 播放列表总分片数（调试面板显示的 x/y 段）
@@ -1632,6 +1876,19 @@ function ensureRangesHost() {
   return rangesHost
 }
 
+/* 精彩时刻单独一层（z-index 3）：已播条是白色、缓冲条是浅白/蓝，
+   标记用琥珀色并压在它们之上，才不会被「播过之后」的白色吞掉。 */
+function ensureMarksHost() {
+  const holder = progressCtrl && progressCtrl.querySelector('.vjs-progress-holder')
+  if (!holder) return null
+  if (!marksHost || !holder.contains(marksHost)) {
+    marksHost = document.createElement('div')
+    marksHost.className = 'vp-marks'
+    holder.appendChild(marksHost)
+  }
+  return marksHost
+}
+
 function bufferedRanges() {
   const v = videoEl
   if (!v || !v.buffered) return []
@@ -1640,6 +1897,36 @@ function bufferedRanges() {
     out.push([v.buffered.start(i), v.buffered.end(i)])
   }
   return out
+}
+
+function paintMarkers() {
+  const host = ensureMarksHost()
+  if (!host) return
+  host.textContent = ''
+  const total = dur.value || 0
+  if (!total || !markers.value.length) return
+  for (const m of markers.value) {
+    const s = Math.max(0, Number(m.start) || 0)
+    const e = Math.min(total, Number(m.end) || s)
+    if (e <= s || s >= total) continue
+    const bar = document.createElement('i')
+    bar.className = 'vp-mark-range'
+      + (m.primary ? ' primary' : '')
+      + (m.kind === 'favorite' ? ' favorite' : '')
+    bar.style.left = (s / total) * 100 + '%'
+    bar.style.width = Math.max(0.25, ((e - s) / total) * 100) + '%'
+    // 不用原生 title（会被预览浮层和 video.js 时间提示压住、且一层套一层），
+    // 改为 hover 时统一显示在预览浮层的标题行里；这里只留 aria-label
+    bar.setAttribute('aria-label', fmtSkip(s) + ' – ' + fmtSkip(e)
+      + (m.label ? ' · ' + m.label : ''))
+    // 单独一层且可点击：比「已播」高一层，播过之后仍看得见标记
+    bar.addEventListener('click', (ev) => {
+      ev.stopPropagation()
+      const v = videoEl
+      if (v) v.currentTime = s
+    })
+    host.appendChild(bar)
+  }
 }
 
 function paintRanges() {
@@ -1674,6 +1961,7 @@ function paintRanges() {
     if (t >= s && t <= e) { ahead = Math.max(0, e - t); break }
   }
   cacheAhead.value = ahead
+  paintMarkers()
 }
 
 function paintRangesThrottled() {
@@ -1912,7 +2200,7 @@ watch(() => props.movieId, () => {
 </script>
 
 <template>
-  <div class="player">
+  <div class="player" :class="{ 'vp-time-long': timeLong }">
     <div v-show="!failed" ref="containerEl" class="vjs-wrap" :class="{ 'web-fs': webFs }"
          :style="videoVars" @contextmenu.prevent="toggleStats">
       <!-- 锐化滤镜：kernel 由画面控制台的「锐化」滑块驱动，0 时是恒等核（无效果） -->
@@ -2001,10 +2289,65 @@ watch(() => props.movieId, () => {
         <div v-if="canMarkIntro || canMarkOutro" class="vp-btn vp-mark" :class="{ on: markOpen }"
              :title="$t('player.markSkipTip')" @click.stop="markOpen = !markOpen">
           ⚑ <span class="vp-mark-label">{{ $t('player.markSkip') }}</span>
-          <div v-if="markOpen" class="vp-menu" @click.stop>
+          <div v-if="markOpen" class="vp-menu vp-mk-menu" @click.stop>
             <button v-if="canMarkIntro" class="vp-item" @click="markIntro">{{ $t('player.markIntro') }}</button>
             <button v-if="canMarkOutro" class="vp-item" @click="markOutro">{{ $t('player.markOutro') }}</button>
             <button v-if="skipIntro || skipOutro" class="vp-item" @click="clearSkip('both')">{{ $t('player.skipClear') }}</button>
+            <!-- 精彩时刻：与片头片尾合并成同一个面板，不另开浮层 -->
+            <div class="vp-mk-sep"></div>
+            <button class="vp-item vp-mk-add" @click="addMoment">
+              ＋ {{ $t('player.markMoment') }}<kbd class="vp-mk-kbd">M</kbd>
+            </button>
+            <div v-if="markers.length" class="vp-mk-list">
+              <div v-for="m in markers" :key="m.id" class="vp-mk-card" :class="{ primary: m.primary }">
+                <button class="vp-mk-thumb" :title="$t('player.markerJump')" @click="jumpToMarker(m)"
+                        @mouseenter="hoverPreview(m)" @mouseleave="leavePreview">
+                  <video
+                    v-if="m.preview && hoverMarker === m.id"
+                    class="vp-mk-video"
+                    :src="previewUrl(m)"
+                    :poster="thumbUrl(m) || undefined"
+                    muted loop playsinline autoplay preload="none"
+                    @error="hoverMarker = 0"
+                  ></video>
+                  <img v-else-if="thumbUrl(m)" :src="thumbUrl(m)" alt="" loading="lazy">
+                  <span v-else class="vp-mk-ph">▶</span>
+                  <span class="vp-mk-badge">{{ fmtSkip(m.start) }}</span>
+                </button>
+                <div class="vp-mk-body">
+                  <template v-if="editingMarker === m.id">
+                    <input v-model="editForm.label" class="vp-mk-input"
+                           :placeholder="$t('player.markerLabelPh')" maxlength="40">
+                    <div class="vp-mk-times">
+                      <input v-model.number="editForm.start" class="vp-mk-input sm" type="number" min="0" step="0.5">
+                      <span>–</span>
+                      <input v-model.number="editForm.end" class="vp-mk-input sm" type="number" min="0" step="0.5">
+                    </div>
+                    <input v-model="editForm.tags" class="vp-mk-input"
+                           :placeholder="$t('player.markerTagsPh')">
+                    <div class="vp-mk-actions">
+                      <button class="vp-mk-act" @click.stop="saveEdit(m)">{{ $t('player.markerSave') }}</button>
+                      <button class="vp-mk-act" @click.stop="editingMarker = 0">{{ $t('common.cancel') }}</button>
+                    </div>
+                  </template>
+                  <template v-else>
+                    <button class="vp-mk-title" @click="jumpToMarker(m)">
+                      <span class="vp-mk-name">{{ m.label || $t('detail.markerNoLabel') }}</span>
+                      <span class="vp-mk-range">{{ fmtSkip(m.start) }}<template v-if="m.end > m.start + 0.5"> – {{ fmtSkip(m.end) }}</template></span>
+                    </button>
+                    <div v-if="m.tags && m.tags.length" class="vp-mk-tags">
+                      <span v-for="tg in m.tags" :key="tg" class="vp-mk-tag">{{ tg }}</span>
+                    </div>
+                    <div class="vp-mk-actions">
+                      <button class="vp-mk-act star" :class="{ on: m.primary }"
+                              :title="$t('player.markerPrimary')" @click.stop="togglePrimary(m)">★</button>
+                      <button class="vp-mk-act" :title="$t('player.markerEdit')" @click.stop="startEdit(m)">✎</button>
+                      <button class="vp-mk-act del" :title="$t('player.markerDelete')" @click.stop="removeMarker(m)">✕</button>
+                    </div>
+                  </template>
+                </div>
+              </div>
+            </div>
           </div>
         </div>
         <!-- 移动端（iOS 等）控制条里没有原生全屏按钮，这里补一个入口 -->
@@ -2091,6 +2434,14 @@ watch(() => props.movieId, () => {
   /* 字幕样式的默认值（applySubStyle 会以行内变量覆盖这两项） */
   --vp-sub-size: 22px;
   --vp-sub-bg: rgba(0, 0, 0, .55);
+  /* 进度条配色（从下到上共四层，暗色下逐层变亮）：
+     底槽 → 缓冲 → 已播 → 精彩时刻标记 */
+  --vp-track: rgba(255, 255, 255, .16);
+  --vp-track-hover: rgba(255, 255, 255, .26);
+  --vp-buf: rgba(255, 255, 255, .42);
+  --vp-cache: rgba(122, 196, 255, .42);
+  --vp-played: #fff;
+  --vp-mark: rgba(255, 193, 7, .82);
 }
 .vjs-wrap :deep(.video-js) {
   width: 100% !important;
@@ -2108,23 +2459,60 @@ watch(() => props.movieId, () => {
 }
 /* 锐化用的 SVG 卷积核定义：不占布局 */
 .vp-svg-filters { position: absolute; width: 0; height: 0; }
-/* 进度条 hover 预览浮层：跟随鼠标横向居中显示在进度条上方 */
+/* 进度条 hover 预览浮层：跟随鼠标横向居中显示在进度条上方。
+   两种形态，靠 .has-img 切换：
+   - 有图（.has-img）：160×90 预览卡（图/短片 + 标记标题行 + 时间行）；
+   - 无图：贴字的紧凑胶囊，宽度自适应，默认只有时间行，命中标记时多一行标题。
+   尺寸不加过渡：切换只改自身宽高，定位每次按实际宽度重算，指针下方不会跳。 */
 .vjs-wrap :deep(.vjs-preview-tip) {
   position: absolute;
   bottom: 100%;
   margin-bottom: 8px;
   transform: translateX(-50%);
-  background: rgba(0, 0, 0, .88);
-  border: 1px solid rgba(255, 255, 255, .18);
-  border-radius: 6px;
+  width: auto;
+  max-width: 260px;
+  background: rgba(16, 18, 24, .72);
+  border: 1px solid rgba(255, 255, 255, .16);
+  border-radius: 8px;
   overflow: hidden;
-  box-shadow: 0 4px 14px rgba(0, 0, 0, .5);
-  z-index: 8;
+  box-shadow: 0 3px 10px rgba(0, 0, 0, .35);
+  /* 半透明 + 轻模糊：在线片没有预览帧时也不至于糊一块纯黑 */
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  /* 压在 .vp-marks(3) 之上；video.js 的 hover 时间提示由 .avm-tip-on 让位 */
+  z-index: 9;
   pointer-events: none;
 }
-.vjs-wrap :deep(.vjs-preview-tip img) {
-  display: block;
+.vjs-wrap :deep(.vjs-preview-tip.has-img) {
   width: 160px;
+  background: rgba(0, 0, 0, .86);
+  border-color: rgba(255, 255, 255, .18);
+}
+/* 浮层可见期间（.avm-tip-on）藏掉 video.js 的 hover 时间提示：
+   我们的 .pt-time 已经显示指针处实际时间，留着只会被浮层压住。
+   只匹配 hover 用的 .vjs-mouse-display，拖动 seek 的
+   .vjs-play-progress .vjs-time-tooltip 不受影响；离开进度条 class 即摘除。 */
+.vjs-wrap :deep(.vjs-progress-control.avm-tip-on .vjs-mouse-display .vjs-time-tooltip) {
+  display: none;
+}
+.vjs-wrap :deep(.vjs-preview-tip .pt-mark) {
+  display: none;
+  padding: 3px 9px;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.4;
+  color: #ffd166;
+  background: rgba(255, 255, 255, .06);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* 有图态：标题行贴着预览图上沿，内边距收窄到与卡片同宽 */
+.vjs-wrap :deep(.vjs-preview-tip.has-img .pt-mark) { padding: 3px 6px; }
+.vjs-wrap :deep(.vjs-preview-tip img),
+.vjs-wrap :deep(.vjs-preview-tip .pt-video) {
+  display: block;
+  width: 100%;
   height: 90px;
   object-fit: cover;
   background: #000;
@@ -2132,11 +2520,18 @@ watch(() => props.movieId, () => {
 .vjs-wrap :deep(.vjs-preview-tip .pt-time) {
   display: block;
   text-align: center;
-  padding: 2px 0 4px;
+  padding: 3px 10px;
   font-size: 11px;
-  line-height: 1;
+  line-height: 1.2;
+  font-variant-numeric: tabular-nums;
   color: #fff;
-  background: rgba(0, 0, 0, .6);
+  background: transparent;
+}
+/* 有图态的时间行是卡片脚注，压一条分隔线；无图态保持胶囊本色 */
+.vjs-wrap :deep(.vjs-preview-tip.has-img .pt-time) {
+  padding: 3px 0 4px;
+  background: rgba(0, 0, 0, .55);
+  border-top: 1px solid rgba(255, 255, 255, .08);
 }
 /* 移动端横滑快进/快退：屏幕中央进度提示（含该时刻预览缩略图） */
 .vjs-wrap :deep(.vjs-swipe-tip) {
@@ -2212,25 +2607,123 @@ watch(() => props.movieId, () => {
 .vp-cache-tag:hover { background: rgba(0,0,0,.5); }
 /* 后台预下中：比「已缓存」淡一点，用蓝调区分「正在长」和「已经能跳」 */
 .vp-idle-tag { color: #8fd0ff; }
-/* 进度条上的三层叠加（从下到上）：底槽 → 服务端已缓存（蓝）→ 浏览器已缓冲（浅白）→ 已播（白）。
-   video.js 自带的 load-progress 也画 buffered，但它是 rgba(115,133,159,.5) 的底槽色，
-   和轨道几乎同色，等于看不见；这里把它压到最底层当兜底，真正可见的是我们自绘的 .vp-ranges。
-   z-index 必须显式排：原先 .vp-ranges 是 0 且插在 load-progress 之前，被它整段盖住，
-   于是「时间轴上没有已缓冲区间」。 */
+/* ---- 进度条本体：细轨 + 圆角 + hover 轻微高亮 ----
+   点击 / 拖动热区在 .vjs-progress-control（控制条 3em 高、flex 拉伸），
+   不在 holder 上，所以收细轨道不会缩小热区。 */
+.vjs-wrap :deep(.video-js .vjs-progress-control .vjs-progress-holder) {
+  height: 4px;
+  border-radius: 3px;
+  background: var(--vp-track);
+  transition: height .15s ease, background-color .15s ease;
+}
+.vjs-wrap :deep(.video-js .vjs-progress-control:hover .vjs-progress-holder) {
+  height: 6px;
+  background: var(--vp-track-hover);
+}
+/* 进度条上的四层叠加（从下到上）：底槽（--vp-track）→ 已缓冲（--vp-buf）→ 已播（--vp-played）→ 标记（--vp-mark）。
+   video.js 自带的 load-progress 也画 buffered，但颜色接近底槽；这里压到最底层当兜底，
+   真正可见的是我们自绘的 .vp-ranges。z-index 必须显式排：
+   原先 .vp-ranges 是 0 且插在 load-progress 之前，被它整段盖住，于是「时间轴上没有已缓冲区间」。 */
 .vjs-wrap :deep(.video-js .vjs-load-progress),
-.vjs-wrap :deep(.video-js .vjs-load-progress div) { background: rgba(255,255,255,.18); z-index: 0; }
+.vjs-wrap :deep(.video-js .vjs-load-progress div) {
+  background: rgba(255, 255, 255, .22); z-index: 0; border-radius: 3px;
+}
 .vjs-wrap :deep(.vp-ranges) {
   position: absolute; top: 0; right: 0; bottom: 0; left: 0;
   z-index: 1; pointer-events: none;
 }
-.vjs-wrap :deep(.video-js .vjs-play-progress) { z-index: 2; }
+.vjs-wrap :deep(.video-js .vjs-play-progress) {
+  z-index: 2; border-radius: 3px; background: var(--vp-played);
+}
 .vjs-wrap :deep(.vp-range) {
   position: absolute; top: 0; bottom: 0; display: block;
   /* 两小时的片子里，30 秒缓冲只占 0.4%（约 2px）：给个最小宽度，不然等于没画 */
-  min-width: 2px;
+  min-width: 2px; border-radius: 2px;
 }
-.vjs-wrap :deep(.vp-range.cache) { background: rgba(122, 196, 255, .38); }
-.vjs-wrap :deep(.vp-range.buf) { background: rgba(255, 255, 255, .42); }
+.vjs-wrap :deep(.vp-range.cache) { background: var(--vp-cache); }
+.vjs-wrap :deep(.vp-range.buf) { background: var(--vp-buf); }
+/* 精彩时刻：最上层（z-index 3），琥珀色，可点击跳到起点。
+   播过的部分会被白色已播条盖住普通区间，所以标记必须单独一层压在它上面；
+   上下各外扩 2px，比 4~6px 的轨道更粗，扫一眼也能分辨。 */
+.vjs-wrap :deep(.vp-marks) {
+  position: absolute; top: 0; right: 0; bottom: 0; left: 0;
+  z-index: 3; pointer-events: none;
+}
+.vjs-wrap :deep(.vp-mark-range) {
+  position: absolute; top: -2px; bottom: -2px; display: block;
+  min-width: 3px; border-radius: 2px;
+  background: var(--vp-mark);
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, .35);
+  pointer-events: auto; cursor: pointer;
+}
+.vjs-wrap :deep(.vp-mark-range:hover) { background: rgba(255, 214, 64, .95); }
+.vjs-wrap :deep(.vp-mark-range.favorite) { background: rgba(255, 120, 170, .8); }
+/* 主标记：加亮 + 白边，一眼看出哪一段是这部片的代表片段 */
+.vjs-wrap :deep(.vp-mark-range.primary) {
+  background: rgba(255, 236, 120, .98);
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, .85), 0 0 6px rgba(255, 200, 40, .8);
+}
+.vp-mk-menu { width: 300px; }
+.vp-mk-sep { height: 1px; margin: 6px 8px; background: rgba(255,255,255,.14); }
+.vp-mk-add { display: flex; align-items: center; justify-content: space-between; }
+.vp-mk-kbd {
+  margin-left: 8px; padding: 0 4px; border-radius: 4px; font-size: 10px; line-height: 16px;
+  border: 1px solid rgba(255,255,255,.28); color: rgba(255,255,255,.7);
+}
+.vp-mk-list {
+  max-height: 260px; overflow-y: auto; padding: 2px 6px 4px;
+  display: flex; flex-direction: column; gap: 6px;
+}
+.vp-mk-card {
+  display: flex; gap: 8px; padding: 5px; border-radius: 7px;
+  background: rgba(255,255,255,.05); border: 1px solid rgba(255,255,255,.08);
+}
+.vp-mk-card.primary { border-color: rgba(255,214,64,.55); background: rgba(255,214,64,.08); }
+.vp-mk-thumb {
+  position: relative; flex: none; width: 76px; height: 44px; padding: 0;
+  border: 0; border-radius: 5px; overflow: hidden; cursor: pointer;
+  background: rgba(0,0,0,.45); color: rgba(255,255,255,.75);
+}
+.vp-mk-thumb img { display: block; width: 100%; height: 100%; object-fit: cover; }
+.vp-mk-thumb .vp-mk-video { display: block; width: 100%; height: 100%; object-fit: cover; }
+.vp-mk-ph { font-size: 14px; }
+.vp-mk-badge {
+  position: absolute; right: 2px; bottom: 2px; padding: 0 3px; border-radius: 3px;
+  background: rgba(0,0,0,.65); color: #fff; font-size: 10px; line-height: 14px;
+}
+.vp-mk-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.vp-mk-title {
+  display: flex; flex-direction: column; gap: 1px; padding: 0; border: 0;
+  background: transparent; color: inherit; cursor: pointer; text-align: left;
+}
+.vp-mk-name {
+  font-size: 12px; color: rgba(255,255,255,.92);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.vp-mk-range { font-size: 10px; color: rgba(255,255,255,.55); font-variant-numeric: tabular-nums; }
+.vp-mk-tags { display: flex; flex-wrap: wrap; gap: 3px; }
+.vp-mk-tag {
+  padding: 0 4px; border-radius: 3px; font-size: 10px;
+  background: rgba(255,255,255,.1); color: rgba(255,255,255,.68);
+}
+.vp-mk-actions { display: flex; gap: 4px; margin-top: auto; }
+.vp-mk-act {
+  padding: 1px 5px; border: 0; border-radius: 4px; cursor: pointer;
+  background: rgba(255,255,255,.08); color: rgba(255,255,255,.75); font-size: 11px;
+}
+.vp-mk-act:hover { background: rgba(255,255,255,.18); color: #fff; }
+.vp-mk-act.star.on { background: rgba(255,214,64,.28); color: #ffd644; }
+.vp-mk-act.del:hover { background: rgba(220,80,80,.3); }
+.vp-mk-input {
+  width: 100%; box-sizing: border-box; padding: 2px 5px;
+  border: 1px solid rgba(255,255,255,.18); border-radius: 4px;
+  background: rgba(0,0,0,.3); color: #fff; font-size: 11px;
+}
+.vp-mk-input.sm { width: 58px; }
+.vp-mk-times {
+  display: flex; align-items: center; gap: 4px;
+  font-size: 10px; color: rgba(255,255,255,.5);
+}
 
 /* 播放调试信息面板：右键画面开关 */
 .vp-stats {
@@ -2274,6 +2767,19 @@ watch(() => props.movieId, () => {
 .vjs-wrap :deep(.video-js .vjs-current-time.vp-now) { padding-left: .4em; padding-right: .15em; }
 .vjs-wrap :deep(.video-js .vjs-time-divider) { padding: 0; min-width: 0; }
 .vjs-wrap :deep(.video-js .vjs-duration) { padding-left: .15em; padding-right: .5em; }
+/* 时间文字：等宽数字 + 按格式预留盒宽，保证每秒刷新时宽度不变。
+   缺这两条时 '1:10:03' → '1:11:11' 会让 .vjs-time-control 窄 1.5px（数字 1 比 0 窄），
+   flex:auto 的 .vjs-progress-control 与后面的总时长就整体左右挪一点，看起来像时间在漂。
+   预留宽度按本片会用到的格式给：≥1 小时是 h:mm:ss（最长 12:34:56 → 8.2ch），
+   不足 1 小时是 m:ss（最长 59:59 → 5.6ch）。取值略高于「字符数 × 1ch」，
+   是因为 min-width 算的是含左右内边距的盒宽，短片也不必空出两字符。 */
+.vjs-wrap :deep(.video-js .vjs-time-control.vp-now),
+.vjs-wrap :deep(.video-js .vjs-duration) {
+  font-variant-numeric: tabular-nums;
+  min-width: 5.6ch;
+}
+.player.vp-time-long .vjs-wrap :deep(.video-js .vjs-time-control.vp-now),
+.player.vp-time-long .vjs-wrap :deep(.video-js .vjs-duration) { min-width: 8.2ch; }
 .vjs-cc-host .vp-cc {
   position: relative; height: 100%; min-width: 2.6em; padding: 0 .5em;
   display: flex; align-items: center; justify-content: center;

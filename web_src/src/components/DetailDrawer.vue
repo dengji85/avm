@@ -11,6 +11,7 @@ import {
   adCheckResult, adCheckRunOne, adSheetUrl,
   movieSources, setPrimarySource, deleteSource, addMovieSource,
   toggleSource, checkSource, refreshSource, probeSource,
+  movieMarkers, updateMovieMarker, deleteMovieMarker,
 } from '../api.js'
 import SubtitleSummary from './SubtitleSummary.vue'
 import AddToCollectionBtn from './AddToCollectionBtn.vue'
@@ -36,6 +37,46 @@ const loading = ref(false)
 const tab = ref('preview')
 const playing = ref(false)
 const previews = ref([])
+/* 精彩时刻：只列出与删除，不做表格编辑（新增在播放器里点一下就行） */
+const markers = ref([])
+
+function fmtClock(sec) {
+  const s = Math.max(0, Math.round(Number(sec) || 0))
+  return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0')
+}
+
+async function loadMarkers() {
+  if (!id.value) { markers.value = []; return }
+  try {
+    const r = await movieMarkers(id.value)
+    markers.value = (r && r.items) || []
+  } catch (e) {
+    markers.value = []
+  }
+}
+
+async function delMarker(m) {
+  try {
+    await deleteMovieMarker(id.value, m.id)
+    markers.value = markers.value.filter((x) => x.id !== m.id)
+    await loadMarkers()   // 删掉主标记时后端会把下一条扶正，重新拉一次对齐 ★
+    toast(t('detail.markerDeleted'), 'ok')
+  } catch (e) {
+    toast(e.message, 'err')
+  }
+}
+
+async function setMarkerPrimary(m) {
+  const on = !m.primary
+  try {
+    await updateMovieMarker(id.value, m.id, { is_primary: on })
+    markers.value = markers.value.map((x) => (x.id === m.id
+      ? Object.assign({}, x, { primary: on })
+      : (on ? Object.assign({}, x, { primary: false }) : x)))
+  } catch (e) {
+    toast(e.message, 'err')
+  }
+}
 const pvLoading = ref(false)
 const similar = ref([])
 const pendingAutoplay = ref(false)
@@ -175,6 +216,15 @@ function openSubtitleSettings() {
   close()
   state.view = 'settings'
   state.settingsTab = 'subtitles'
+}
+
+/** 点标记标签：去标记墙按该标签筛选（跨影片看同类片段） */
+function openMarkersByTag(name) {
+  const tg = String(name || '').trim()
+  if (!tg) return
+  close()
+  state.markersFilter = tg
+  state.view = 'markers'
 }
 
 /**
@@ -379,6 +429,66 @@ const progressPct = computed(() => {
 
 const mainFile = computed(() => localFiles.value[0] || (mv.value?.files || [])[0] || null)
 
+/* ---- 详情页「精彩时刻」：整行点击从标记起点开播 ----
+   未展开播放器时把起点写进 playFrom，由 VideoPlayer 的 start-at 在元数据就绪后 seek；
+   已经在播时不重建播放器，直接复用 AI 时间戳那套 avm-seek 事件跳转。
+   播放器收起即清空，下次正常点「播放」仍回到上次进度。 */
+const playFrom = ref(null)
+const playerEl = ref(null)
+const playStartAt = computed(() => (playFrom.value == null ? progressPos.value : playFrom.value))
+watch(playing, (v) => { if (!v) playFrom.value = null })
+
+function playMarker(m) {
+  const s = Math.max(0, Number(m && m.start) || 0)
+  if (!playing.value) {
+    playFrom.value = s
+    playing.value = true
+    // 播放器刚挂载：等两帧拿到真实高度再滚，避免滚到空容器
+    nextTick(() => requestAnimationFrame(() => requestAnimationFrame(revealPlayer)))
+    return
+  }
+  window.dispatchEvent(new CustomEvent('avm-seek', { detail: { seconds: s } }))
+  revealPlayer()
+}
+
+/* 点击标记后把播放器滚进视野。
+   抽屉的滚动容器是 .dd-content（overflow-y:auto），不是 window；头部在滚动区之外，
+   不需要额外减头部高度。已在视野内（上下各留 12px）就不滚，连续点不同标记不会来回晃。 */
+function revealPlayer(tries = 3) {
+  const el = playerEl.value && playerEl.value.$el
+  if (!el) return
+  let box = el.parentElement
+  while (box) {
+    const oy = getComputedStyle(box).overflowY
+    if (oy === 'auto' || oy === 'scroll' || oy === 'overlay') break
+    box = box.parentElement
+  }
+  const r = el.getBoundingClientRect()
+  // 播放器还在初始化（高度为 0）时重试几次，避免滚到空容器
+  if (r.height < 40) { if (tries > 0) setTimeout(() => revealPlayer(tries - 1), 150); return }
+  const view = box ? box.getBoundingClientRect() : { top: 0, bottom: window.innerHeight }
+  if (r.top >= view.top + 12 && r.bottom <= view.bottom - 12) return
+  const pad = Math.max(0, ((box ? box.clientHeight : window.innerHeight) - r.height) / 2)
+  const top = (box ? box.scrollTop + (r.top - view.top) : window.scrollY + r.top) - pad
+  if (box) box.scrollTo({ top: Math.max(0, top), behavior: 'smooth' })
+  else window.scrollTo({ top: Math.max(0, top), behavior: 'smooth' })
+}
+
+/* 缩略图悬停预览：同屏只挂一个 <video>，移出即卸载释放解码器；
+   触屏或没有 preview 时保持静态图。 */
+const hoverMarker = ref(0)
+const canHoverPlay = typeof window !== 'undefined' && !!window.matchMedia
+  && !window.matchMedia('(hover: none)').matches
+function previewUrl(m) {
+  return m && m.preview ? '/api/covers/' + m.preview : ''
+}
+function hoverMarkerPreview(m) {
+  if (canHoverPlay && m && m.preview) hoverMarker.value = m.id
+}
+function leaveMarkerPreview() {
+  hoverMarker.value = 0
+}
+
 /** 网络串流只展示域名，避免把带签名的完整地址摊在界面上 */
 function hostOf(url) {
   try { return new URL(url).host } catch (e) { return url }
@@ -563,6 +673,7 @@ async function load() {
   playing.value = false
   previews.value = []
   similar.value = []
+  markers.value = []
   editing.value = false
   adSheetOpen.value = false
   loadAd()
@@ -576,6 +687,7 @@ async function load() {
       m.tags = t
     }
     mv.value = m
+    loadMarkers()
     // 封面 / 海报 URL 上的 ?t= 是版本号，换了图必须一起换，否则浏览器对同一个
     // URL 直接用缓存，刮削拿到的新封面看起来「没变」。
     bust.value = Date.now()
@@ -1161,8 +1273,9 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', onKey); stopSource
             <!-- 播放器 -->
             <VideoPlayer
               v-if="playing"
+              ref="playerEl"
               :movie-id="mv.id"
-              :start-at="progressPos"
+              :start-at="playStartAt"
               @progress="(p) => { if (mv.progress) mv.progress.position = p.position }"
             />
 
@@ -1425,6 +1538,33 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', onKey); stopSource
                   </dd>
                 </div>
               </dl>
+
+              <!-- 精彩时刻：播放器里 ⚑ 面板新增，这里做查看、设主标记与删除 -->
+              <div v-if="markers.length">
+                <div class="dd-sec-t">{{ $t('detail.secMarkers') }}</div>
+                <div class="dd-markers">
+                  <div v-for="m in markers" :key="m.id" class="dd-marker" :class="{ primary: m.primary }"
+                       role="button" tabindex="0" @click="playMarker(m)" @keydown.enter.self="playMarker(m)">
+                    <div class="dd-marker-thumb"
+                         @mouseenter="hoverMarkerPreview(m)" @mouseleave="leaveMarkerPreview">
+                      <video v-if="m.preview && hoverMarker === m.id" class="dd-marker-video"
+                             :src="previewUrl(m)" muted loop playsinline autoplay preload="none"
+                             @error="hoverMarker = 0"></video>
+                      <img v-else-if="m.thumb" :src="'/api/covers/' + m.thumb" alt="" loading="lazy">
+                      <span v-else class="ph">▶</span>
+                    </div>
+                    <div class="dd-marker-main">
+                      <span class="mono dd-marker-time">{{ fmtClock(m.start) }}<template v-if="m.end > m.start + 0.5"> – {{ fmtClock(m.end) }}</template></span>
+                      <span class="dim dd-marker-label">{{ m.label || $t('detail.markerNoLabel') }}</span>
+                      <button v-for="tg in (m.tags || [])" :key="tg" class="dd-marker-tag"
+                              :title="$t('detail.markerJumpTag')" @click.stop="openMarkersByTag(tg)">{{ tg }}</button>
+                    </div>
+                    <button class="dd-marker-star" :class="{ on: m.primary }"
+                            :title="$t('detail.markerPrimary')" @click.stop="setMarkerPrimary(m)">★</button>
+                    <button class="btn tiny ghost" @click.stop="delMarker(m)">{{ $t('common.delete') }}</button>
+                  </div>
+                </div>
+              </div>
 
               <!-- 已生成的 AI 字幕译文：下载 / 删除（生成入口统一在 AI 工作台） -->
               <div class="dd-sec-t">{{ $t('detail.secSubs') }}</div>
@@ -2337,6 +2477,48 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', onKey); stopSource
 .ai-entry-on { border-color: var(--c-primary); color: var(--c-primary); }
 
 .ai-sub-row { display: flex; align-items: center; gap: 8px; padding: 4px 0; font-size: var(--fs-sm); }
+/* 整行可点：点行 = 打开内嵌播放器并从这个标记起点开始播；悬停只做轻提示 */
+.dd-marker {
+  display: flex; align-items: center; gap: 8px;
+  padding: 5px 6px; margin-bottom: 4px; border-radius: var(--r-sm);
+  font-size: var(--fs-sm); background: var(--c-surface);
+  border: 1px solid transparent;
+  cursor: pointer;
+  transition: background-color .12s ease, border-color .12s ease;
+}
+.dd-marker:hover { background: var(--c-surface-3); border-color: var(--c-primary-line); }
+.dd-marker:focus-visible { outline: 2px solid var(--c-primary-line); outline-offset: -2px; }
+.dd-marker.primary { border-color: rgba(255, 200, 40, .45); }
+/* 缩略图容器：静态图与预览短片同尺寸，悬停时短片顶替静态图 */
+.dd-marker-thumb {
+  flex: none; width: 64px; height: 38px; border-radius: var(--r-sm);
+  overflow: hidden; background: var(--c-bg-2, rgba(0,0,0,.35));
+}
+.dd-marker-thumb img,
+.dd-marker-thumb video { display: block; width: 100%; height: 100%; object-fit: cover; }
+.dd-marker-thumb .ph {
+  display: flex; align-items: center; justify-content: center;
+  width: 100%; height: 100%;
+  color: var(--c-text-3); font-size: 12px;
+}
+.dd-marker-main {
+  flex: 1; min-width: 0; display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+}
+.dd-marker-time { flex: none; font-variant-numeric: tabular-nums; }
+.dd-marker-label { flex: 0 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dd-marker-tag {
+  appearance: none; cursor: pointer;
+  padding: 0 5px; border-radius: var(--r-sm); font-size: var(--fs-xs);
+  border: 1px solid transparent;
+  color: var(--c-text-3); background: var(--c-bg-2, rgba(255,255,255,.06));
+}
+.dd-marker-tag:hover { color: var(--c-text); border-color: var(--c-primary-line); }
+.dd-marker-star {
+  flex: none; width: 22px; height: 22px; border: 0; border-radius: var(--r-sm);
+  background: transparent; color: var(--c-text-3); cursor: pointer; font-size: 13px;
+}
+.dd-marker-star.on { color: #f5b301; }
+.dd-marker-star:hover { background: var(--c-bg-2, rgba(255,255,255,.08)); }
 .note-box {
   margin-top: var(--sp-3); padding: var(--sp-3);
   background: var(--c-surface); border-radius: var(--r-md);
