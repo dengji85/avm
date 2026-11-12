@@ -53,6 +53,8 @@ export const state = reactive({
   returnFromFilter: null,   // { id, title }
   // AI 问答里点时间戳：请求详情页播放器跳到该秒（{ id, seconds, n }；n 用于重复点击同一点也能触发）
   aiSeek: null,
+  // 从详情页标签跳到标记墙时带过去的筛选词（MarkersView 消费后清空）
+  markersFilter: null,
 
   // ---- 女优 ----
   actFollowOnly: false,
@@ -223,7 +225,7 @@ export function clearPlayQueue() {
  * 仅在合法视图 id 内生效，非法 hash 退回默认 home。
  */
 const VALID_VIEWS = ['home', 'gallery', 'stats', 'maintenance', 'actress', 'ai',
-  'collections', 'rankings', 'swipe', 'settings', 'recent']
+  'collections', 'rankings', 'markers', 'swipe', 'settings', 'recent']
 // 与 MaintenanceView 的 TABS 一一对应：白名单不全的话，切到未列出的子标签时
 // hash 不会更新，刷新/分享就回不到那一页。
 const VALID_MAINT = ['overview', 'missing', 'storage', 'sources', 'ad', 'subtitle',
@@ -376,6 +378,8 @@ export const NAV_ICONS = {
   shuffle: 'M10.59 9.17L5.41 4 4 5.41l5.17 5.17 1.42-1.41zM14.5 4l2.04 2.04L4 18.59 5.41 20 17.96 7.46 20 9.5V4h-5.5zm.33 9.41l-1.41 1.41 3.13 3.13L14.5 20H20v-5.5l-2.04 2.04-3.13-3.13z',
   // 扩展组件：拼图块
   ext: 'M10 3a2 2 0 0 1 2 2v1h3.5a1.5 1.5 0 0 1 1.5 1.5V11h1a2 2 0 1 1 0 4h-1v3.5a1.5 1.5 0 0 1-1.5 1.5H12v-1a2 2 0 1 0-4 0v1H4.5A1.5 1.5 0 0 1 3 18.5V15H2a2 2 0 1 1 0-4h1V7.5A1.5 1.5 0 0 1 4.5 6H8V5a2 2 0 0 1 2-2z',
+  // 标记墙：书签
+  markers: 'M6 2h12a1 1 0 0 1 1 1v18l-7-4-7 4V3a1 1 0 0 1 1-1z',
 }
 
 /* 顶部主导航（Tab）：核心内容用文字，最近观看用图标，其余收进「更多」hover 菜单 */
@@ -397,6 +401,7 @@ export const NAV_MORE = [
   { key: 'explore', title: 'navGroup.browse', items: [
     { id: 'actress', label: 'nav.actress', icon: 'actress' },
     { id: 'rankings', label: 'nav.rankings', icon: 'rankings' },
+    { id: 'markers', label: 'nav.markers', icon: 'markers' },
     { id: 'yearReview', label: 'nav.yearReview', icon: 'yearReview' },
     { id: 'swipe', label: 'nav.swipe', icon: 'swipe' },
   ] },

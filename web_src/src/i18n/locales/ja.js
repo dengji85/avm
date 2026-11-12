@@ -14,6 +14,7 @@ export default {
     recent: '視聴履歴',
     collections: 'コレクション',
     rankings: 'ランキング',
+    markers: 'ハイライト',
     swipe: 'スワイプ評価',
     settings: '設定',
     tasks: 'タスク',
@@ -200,6 +201,20 @@ export default {
     siteSubtitlePh: '例：マイ資料庫（空欄ならブランド名のみ）',
     siteSubtitleHint: 'ブラウザのタブ / タスクバーには「片匣 - 接尾辞」と表示されます。周囲に気づかれにくくするための偽装用です',
     pinNeedSet: '先に「簡易パスワード」を設定してから選択してください',
+  },
+  // ハイライトウォール（MarkersView）
+  markers: {
+    title: 'ハイライトウォール',
+    sub: '全作品でマークした区間。クリックでその場面へジャンプ',
+    moment: 'ハイライト',
+    open: '作品を開いてこの区間へ移動',
+    refresh: '更新',
+    loading: '読み込み中…',
+    clearTags: 'タグ絞り込みを解除',
+    empty: 'まだマークがありません',
+    emptyFiltered: 'タグに一致するマークがありません',
+    emptyHint: 'プレイヤーで M を押すと、ここにサムネイルが並びます。',
+    loadFailed: 'マークの読み込みに失敗しました',
   },
   common: {
     edit: '編集',

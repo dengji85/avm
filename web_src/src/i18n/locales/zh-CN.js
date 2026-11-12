@@ -15,6 +15,7 @@ export default {
     recent: '最近观看',
     collections: '片单',
     rankings: '排行榜',
+    markers: '精彩时刻',
     swipe: '滑动评分',
     settings: '设置',
     tasks: '任务',
@@ -208,6 +209,20 @@ export default {
     siteSubtitlePh: '如：我的资料库（留空则只显示品牌名）',
     siteSubtitleHint: '浏览器标签页 / 任务栏会显示为「片匣 - 后缀」，用于混淆，降低被旁人注意到的概率',
     pinNeedSet: '请先设置「简单密码」，再选择该解锁方式',
+  },
+  // 标记墙（MarkersView）
+  markers: {
+    title: '精彩时刻墙',
+    sub: '所有影片里标记过的片段，点一下直接跳到那一段',
+    moment: '精彩时刻',
+    open: '打开影片并跳到这一段',
+    refresh: '刷新',
+    loading: '加载中…',
+    clearTags: '清除标签筛选',
+    empty: '还没有标记',
+    emptyFiltered: '没有符合标签的标记',
+    emptyHint: '在播放器里按 M 打个点，这里就会出现缩略图。',
+    loadFailed: '标记加载失败',
   },
   common: {
     edit: '编辑',

@@ -61,6 +61,7 @@ import ActressDetailView from './views/ActressDetailView.vue'
 import CollectionsView from './views/CollectionsView.vue'
 import RecentView from './views/RecentView.vue'
 import RankingsView from './views/RankingsView.vue'
+import MarkersView from './views/MarkersView.vue'
 import SwipeView from './views/SwipeView.vue'
 import StatsView from './views/StatsView.vue'
 import MaintenanceView from './views/MaintenanceView.vue'
@@ -78,6 +79,7 @@ const VIEWS = {
   collections: CollectionsView,
   recent: RecentView,
   rankings: RankingsView,
+  markers: MarkersView,
   swipe: SwipeView,
   stats: StatsView,
   maintenance: MaintenanceView,

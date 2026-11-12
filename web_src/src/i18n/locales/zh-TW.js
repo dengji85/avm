@@ -14,6 +14,7 @@ export default {
     recent: '最近觀看',
     collections: '片單',
     rankings: '排行榜',
+    markers: '精彩時刻',
     swipe: '滑動評分',
     settings: '設定',
     tasks: '任務',
@@ -200,6 +201,20 @@ export default {
     siteSubtitlePh: '如：我的資料庫（留空則只顯示品牌名）',
     siteSubtitleHint: '瀏覽器分頁 / 工具列會顯示為「片匣 - 後綴」，用於混淆，降低被旁人注意到的機率',
     pinNeedSet: '請先設定「簡易密碼」，再選擇該解鎖方式',
+  },
+  // 標記牆（MarkersView）
+  markers: {
+    title: '精彩時刻牆',
+    sub: '所有影片裡標記過的片段，點一下直接跳到那一段',
+    moment: '精彩時刻',
+    open: '開啟影片並跳到這一段',
+    refresh: '重新整理',
+    loading: '載入中…',
+    clearTags: '清除標籤篩選',
+    empty: '還沒有標記',
+    emptyFiltered: '沒有符合標籤的標記',
+    emptyHint: '在播放器裡按 M 打個點，這裡就會出現縮圖。',
+    loadFailed: '標記載入失敗',
   },
   common: {
     edit: '編輯',

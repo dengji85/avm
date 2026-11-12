@@ -14,6 +14,7 @@ export default {
     recent: 'Recently Watched',
     collections: 'Collections',
     rankings: 'Rankings',
+    markers: 'Highlights',
     swipe: 'Swipe Rating',
     settings: 'Settings',
     tasks: 'Tasks',
@@ -200,6 +201,20 @@ export default {
     siteSubtitlePh: 'e.g. My Library (leave empty to show the brand name only)',
     siteSubtitleHint: 'The tab / taskbar title becomes "片匣 - suffix". Use it as camouflage so passers-by pay less attention',
     pinNeedSet: 'Set the PIN first, then choose this unlock method',
+  },
+  // Highlights wall (MarkersView)
+  markers: {
+    title: 'Highlights',
+    sub: 'Every marked moment across your library — click to jump straight there',
+    moment: 'Highlight',
+    open: 'Open the movie at this moment',
+    refresh: 'Refresh',
+    loading: 'Loading…',
+    clearTags: 'Clear tag filter',
+    empty: 'No highlights yet',
+    emptyFiltered: 'No highlights match these tags',
+    emptyHint: 'Press M in the player to mark a moment; thumbnails show up here.',
+    loadFailed: 'Failed to load highlights',
   },
   common: {
     edit: 'Edit',
