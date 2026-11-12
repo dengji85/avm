@@ -204,6 +204,40 @@ def import_text(body: Dict[str, Any] = Body(default={})) -> Dict[str, Any]:
     return {"ok": True, "added": added, "existed": existed, "total": len(codes)}
 
 
+@router.post("/ingest/import/links")
+def import_links(body: Dict[str, Any] = Body(default={})) -> Dict[str, Any]:
+    """按「片名或番号 + 播放地址」逐行导入，返回每行结果。
+
+    - 每行用制表符 / 逗号 / 竖线 / 空格分隔均可；地址须以 http(s):// 开头；
+    - ``.m3u8`` 直接作为播放地址入库，普通页面地址走 refresh_from 回源提取；
+    - 缺列、地址非法、库中匹配到多部影片只让该行失败，不影响其他行；
+    - 事务提交后再派发轻验证 / 回源提取 / 刮削；可用性探测由前端另行触发。
+    """
+    from .. import ingest, scraper, stream_verify
+    from ..db import db
+
+    text = str((body or {}).get("text") or "")
+    scrape = bool((body or {}).get("scrape", True))
+    if not text.strip():
+        raise HTTPException(status_code=400, detail="文本为空")
+    if len(text.splitlines()) > 500:
+        raise HTTPException(status_code=400, detail="单次最多导入 500 行")
+    with db() as conn:
+        res = ingest.import_links(conn, text, scrape)
+    for action, target in res.pop("follow", []):
+        try:
+            if action == "check":
+                stream_verify.submit_check(int(target))
+            elif action == "refresh":
+                stream_verify.submit_refresh(int(target))
+            elif action == "scrape" and target:
+                res["scrape_queued"] = int(res.get("scrape_queued") or 0) + 1
+                scraper.queue_movie_scrape(int(target))
+        except Exception:
+            pass        # 后置动作失败不回滚已入库的数据
+    return res
+
+
 @router.get("/sources/{source_id}/check")
 def source_check(source_id: int) -> Dict[str, Any]:
     """异步验证来源可用性；立即返回 checking，前端 1 秒轮询来源列表看结果。"""

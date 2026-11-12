@@ -547,6 +547,8 @@ export const checkSource = (id) => get(`/sources/${id}/check`)
 export const refreshSource = (id, body = {}) => post(`/sources/${id}/refresh`, body)
 /* 维护 → 文本导入：从论坛帖子 / Excel 粘贴区域批量提取番号建档 */
 export const importText = (text, scrape = true) => post('/ingest/import/text', { text, scrape })
+/* 文本导入「片名/番号 + 播放地址」：逐行入库并返回每行结果 */
+export const importLinks = (text, scrape = true) => post('/ingest/import/links', { text, scrape })
 export const reportSourceFailure = (movieId, reason = '') =>
   post('/ingest/source-failed', { movie_id: movieId, reason })
 /* 维护 → 来源体检：全库来源列表与批量操作 */

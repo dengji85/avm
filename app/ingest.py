@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 import sqlite3
 from datetime import datetime
 from typing import Any, Dict, List, Optional
@@ -384,6 +385,110 @@ def link(conn: sqlite3.Connection, payload: Dict[str, Any]) -> Dict[str, Any]:
         "evidence": _public(ev),
         "sources": sources,
     }
+
+
+# ----------------------------------------------------------------- 文本批量导入
+
+# 一行的形态：「片名或番号」+ 分隔符（制表符 / 逗号 / 竖线 / 空格）+ 播放地址。
+# 地址用正则单独摘出来，剩下的部分一律当片名，这样片名里带逗号也不会被切碎。
+_IMPORT_URL_RE = re.compile(r"https?://[^\s,，|｜]+", re.I)
+_IMPORT_SEP_RE = re.compile(r"[\t,，|｜]+")
+
+
+def _valid_http_url(url: str) -> bool:
+    try:
+        p = urlsplit(str(url or ""))
+    except ValueError:
+        return False
+    return p.scheme in ("http", "https") and bool(p.netloc)
+
+
+def import_links(conn: sqlite3.Connection, text: str, scrape: bool = False) -> Dict[str, Any]:
+    """按「片名/番号 + 播放地址」逐行入库，返回每行结果。
+
+    复用 :func:`link` 的幂等建片 / 加来源；单行失败只记原因，不影响其他行。
+    ``.m3u8`` 直接当播放地址入库；普通页面地址写进 ``page_url``，由调用方
+    在事务提交后排队 ``refresh`` 回源站提取真实播放地址（refresh_from 那条路）。
+
+    返回值里的 ``follow`` 是提交后才能执行的后置动作（轻验证 / 回源提取 /
+    刮削），由路由层负责派发——不能在未提交的事务里起独立连接。
+    """
+    from . import parser
+
+    lines = str(text or "").splitlines()
+    items: List[Dict[str, Any]] = []
+    follow: List[tuple] = []
+    total = 0
+    for no, raw in enumerate(lines, 1):
+        s = raw.strip()
+        if not s or s.startswith("#"):
+            continue
+        total += 1
+        base = {"line": no, "text": s[:200]}
+        m = _IMPORT_URL_RE.search(s)
+        if not m:
+            items.append(dict(base, status="failed",
+                              message="缺少播放地址（需以 http:// 或 https:// 开头）"))
+            continue
+        url = m.group(0).rstrip(".,;:)]}\"'")
+        name = _IMPORT_SEP_RE.sub(" ", (s[:m.start()] + " " + s[m.end():])).strip()
+        name = re.sub(r"\s+", " ", name)
+        if not _valid_http_url(url):
+            items.append(dict(base, status="failed", message="播放地址格式不合法"))
+            continue
+        if not name:
+            items.append(dict(base, status="failed", message="缺少片名或番号"))
+            continue
+
+        kind = "hls" if ident.is_hls_url(url) else "page"
+        code = ""
+        try:
+            code, _, _ = parser.extract_code(name)
+        except Exception:
+            code = ""
+        payload: Dict[str, Any] = {"code": code or "", "title": name,
+                                   "kind": "hls" if kind == "hls" else "page"}
+        if kind == "hls":
+            payload["play_url"] = url
+        else:
+            payload["page_url"] = url
+        try:
+            res = link(conn, payload)
+        except Exception as exc:          # 单行异常不该炸整批
+            items.append(dict(base, status="failed",
+                              message="写入失败：%s" % str(exc)[:120]))
+            continue
+        if not res.get("ok"):
+            items.append(dict(base, status="failed",
+                              message=res.get("message") or "写入失败"))
+            continue
+
+        status = res.get("status") or ""
+        sid = int(res.get("source_id") or 0)
+        item = dict(base, status=status, code=code or "",
+                    movie_id=int(res.get("movie_id") or 0),
+                    source_id=sid,
+                    site=urlsplit(url).netloc, kind=kind)
+        items.append(item)
+
+        if not sid:
+            continue
+        if kind == "hls":
+            if status in ("created", "source_added") or res.get("play_url_updated"):
+                follow.append(("check", sid))
+        else:
+            row = query_one(conn, "SELECT play_url FROM movie_sources WHERE id = ?", (sid,))
+            if not str((row or {}).get("play_url") or ""):
+                # 只有页面地址：提交后回源站提取播放地址（refresh_from）
+                follow.append(("refresh", sid))
+        if status == "created" and scrape:
+            follow.append(("scrape", int(res.get("movie_id") or 0)))
+
+    counts = {"created": 0, "source_added": 0, "duplicate": 0, "failed": 0}
+    for it in items:
+        counts[it["status"]] = counts.get(it["status"], 0) + 1
+    return {"ok": True, "total": total, "items": items,
+            "summary": counts, "follow": follow}
 
 
 # ----------------------------------------------------------------- 观看事件
