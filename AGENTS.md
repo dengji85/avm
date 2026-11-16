@@ -142,9 +142,41 @@ def cancel(): _JOB["cancel"] = True              # 取消=置标志，循环内�
 
 - **过程文件不入库**：临时脚本（`_*.py` / `*.mjs`）、日志（`*.log`）、`data/`、`dist/`、`*.spec` 均被 ignore；提交前 `git status --short` 自查。
 - **提交信息**：`feat:` / `fix:` / `chore:` / `docs:` + 中文摘要，正文用 `-` 列要点（参见 `git log`）。
-- **CHANGELOG**：每条改动写进 `## [版本] → ### 改进 / 修复` 顶部，面向用户描述效果而非实现。
+- **CHANGELOG / 发布说明**：`CHANGELOG.md` 的版本段**直接就是 GitHub Release 正文**——`release.yml` 按 `\n## ` 抽取该段、去掉版本标题行写进 `RELEASE_NOTES.md`。所以写法按 7.1，不要另写一份。
 - **版本号单一真源**：`app/__init__.__version__`；打 tag 触发 Release（产物 + SHA256 + ASR 组件 zip）。
 - 未经要求不提交、不打 tag；`main` 不做 force push。
+
+### 7.1 发布说明怎么写（给用户看，不是给开发者）
+
+**唯一判据：上一个已发布版本的用户能不能感知到？不能就不写。**
+
+- 先确认基线：`git tag --sort=-creatordate | Select-Object -First 3` 找到上一版 tag，`git log <tag>..HEAD --oneline` 看真实差异。
+- **新功能的开发过程修复，一律不写**。上一版压根没有这个页面/按钮，用户不可能遇到——写进去是自说自话。
+- **实现细节不写**：像素值、CSS 变量、类名、接口字段、内部重构、代码分层。
+- **老问题修复要写**，但用用户语言：「番号压在封面上看不清」而不是「提高角标对比度」。
+- **别漏功能**：核实功能代码是否真的在上一版 tag 之前。踩过——`v1.17.2` 的 tag 比精彩时刻的代码提交早一天，功能实际随下一版首次发布，说明里必须补上。
+
+**格式**（照 `v1.17.0` 的成稿）：
+
+```markdown
+## [1.17.3] - 2026-11-16
+
+**本次更新主要是 …（一句话，最多三个重点）。**
+
+- **功能名**：用户怎么操作、能感知到什么
+- 一行说完的次要改进
+- 顺带收拾的细节
+
+### ⬆️ 升级（数据都在 `data/`，自动迁移，无需重建库）
+
+* **Windows**：下载新 `AVM-*.exe` 放到原目录替换旧 exe，重启即可；
+* **Docker**：`docker compose pull && docker compose up -d`（数据在 `/data` 卷，原地保留）；
+* 详细迁移 / 回滚见 **[docs/升级指南.md](docs/升级指南.md)**。
+* 扩展组件离线资源在 [ext-bundle](https://github.com/dengji85/avm/releases/tag/ext-bundle)
+* 油猴脚本在 [extension/avm-companion.user.js](https://github.com/dengji85/avm/blob/main/extension/avm-companion.user.js)
+```
+
+**硬约束**：版本段内只能用 `### ` 及更低级标题，**不能出现 `## `**——抽取脚本按 `\n## ` 切断，出现就会把说明截成半截。
 
 ---
 
@@ -161,6 +193,9 @@ def cancel(): _JOB["cancel"] = True              # 取消=置标志，循环内�
 | 海报 / 缩略图被拉成糊图 | 只缩小不放大；优先官方竖版源 |
 | `--reload` 子进程杀不干净占端口 | 按端口找 `OwningProcess` 杀，再启动 |
 | 前端 `npm` 直接 `Start-Process` 失败 | 用 `cmd /c npm run dev` |
+| 发布说明把开发过程修复当成版本变化 | 先比对上一版 tag 与功能提交的先后；新功能内部的 bug 一律不写（见 7.1） |
+| CHANGELOG 版本段里出现 `##` 标题 | 发布说明会被截成半截；段内只用 `###` 及更低级 |
+| 忘了某功能其实还没发过 | 用 `git log <上一版tag>..HEAD --oneline` 核对，别凭印象写 |
 
 ---
 
