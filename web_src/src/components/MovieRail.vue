@@ -232,6 +232,10 @@ watch(() => props.reloadKey, () => reset())
               :reason="reasonOf ? reasonOf(m) : ''"
               @open="openMovie"
             />
+            <!-- 卡片上的额外操作（播放 / 详情）：由使用方通过 #overlay 插槽提供 -->
+            <div v-if="$slots.overlay" class="rail-item__overlay">
+              <slot name="overlay" :movie="m"></slot>
+            </div>
           </div>
 
           <!-- 还能继续加载：尾部占位卡，滑到这里时自动追加 -->
@@ -309,6 +313,16 @@ watch(() => props.reloadKey, () => reset())
   border-color: var(--c-line-strong, rgba(255, 255, 255, .16));
   z-index: 3;
 }
+
+/* 卡片上的操作浮层（悬停显示） */
+.rail-item__overlay {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity var(--t-base, .2s);
+}
+.rail-item:hover .rail-item__overlay { opacity: 1; }
 
 /* 尾部「继续加载」占位卡 */
 .rail-tail {

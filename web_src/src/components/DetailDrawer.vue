@@ -1336,7 +1336,7 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', onKey); stopSource
                     </button>
                     <button v-if="canExternal" class="btn" :disabled="!hasPlayable" @click="play">↗ {{ $t('player.external') }}</button>
                     <button class="btn icon" :class="{ active: !!castTo }" :disabled="!hasPlayable"
-                            :data-tip="castTo ? castTo : $t('detail.cast')" @click="openCast">📺</button>
+                            :data-tip="castTo ? castTo : $t('detail.cast')" @click="openCast"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7h18v13H3zM8 3l4 4 4-4"/></svg></button>
                     <button v-if="castTo" class="btn ghost" @click="stopCast">{{ $t('detail.castStop') }}</button>
                     </div>
                   </div>
@@ -1345,10 +1345,10 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', onKey); stopSource
                     <span class="dd-g-lbl">{{ $t('detail.grpMark') }}</span>
                     <div class="dd-btns icons">
                     <button class="btn icon" :class="{ active: mv.favorite }" @click="flip('favorite')" :data-tip="$t('flag.favorite')">{{ mv.favorite ? '♥' : '♡' }}</button>
-                    <button class="btn icon" :class="{ active: mv.watchlist }" @click="flip('watchlist')" :data-tip="$t('flag.watchlist')">⌚</button>
+                    <button class="btn icon" :class="{ active: mv.watchlist }" @click="flip('watchlist')" :data-tip="$t('flag.watchlist')"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg></button>
                     <button class="btn icon" :class="{ active: mv.watched }" @click="flip('watched')" :data-tip="$t('flag.watched')">{{ mv.watched ? '●' : '○' }}</button>
                     <AddToCollectionBtn :movie-id="id" variant="detail" />
-                    <button v-if="canReveal" class="btn icon" @click="openFolder" :data-tip="$t('detail.revealFolder')">📁</button>
+                    <button v-if="canReveal" class="btn icon" @click="openFolder" :data-tip="$t('detail.revealFolder')"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg></button>
                     </div>
                   </div>
 
@@ -1358,7 +1358,7 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', onKey); stopSource
                     <!-- 前 3 个平铺，其余进「更多」：站点行只占一行 -->
                     <button v-for="s in topSites" :key="s.id" class="btn site-flat"
                             :title="renderSiteUrl(s, (mv && mv.code) || '')" @click="openSite(s)">
-                      <span class="i">🔗</span> {{ s.name || s.url }}
+                      <span class="i"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.1 0l2-2A5 5 0 0 0 12 4l-1.5 1.5M14 11a5 5 0 0 0-7.1 0l-2 2A5 5 0 0 0 12 20l1.5-1.5"/></svg></span> {{ s.name || s.url }}
                     </button>
                     <div v-if="moreSites.length" class="dd-sites-more" :class="{ open: sitesMoreOpen }">
                       <button class="btn site-flat" :aria-expanded="sitesMoreOpen"
@@ -1471,7 +1471,7 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', onKey); stopSource
                 </div>
                 <div v-if="mainFile && mainFile.strm_url" class="dd-fact">
                   <dt>{{ $t('detail.fSource') }}</dt>
-                  <dd class="mono dim">🌐 {{ hostOf(mainFile.strm_url) }}</dd>
+                  <dd class="mono dim"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18zM3 12h18M12 3c2.5 2.5 3.5 5.5 3.5 9s-1 6.5-3.5 9c-2.5-2.5-3.5-5.5-3.5-9s1-6.5 3.5-9z"/></svg> {{ hostOf(mainFile.strm_url) }}</dd>
                 </div>
                 <div v-if="mv.added_at" class="dd-fact">
                   <dt>{{ $t('detail.fAdded') }}</dt>
@@ -1799,7 +1799,7 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', onKey); stopSource
                       <div v-if="ai.aiSubs.length" class="hstack wrap">
                         <span v-for="s in ai.aiSubs" :key="s.id" class="badge tag-removable">
                           {{ s.lang || 'AI' }} · {{ s.filename }}
-                          <button class="tag-x" :title="$t('common.download')" @click.stop="ai.downloadSub(s)">⬇</button>
+                          <button class="tag-x" :title="$t('common.download')" @click.stop="ai.downloadSub(s)"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12M7 10l5 5 5-5M4 20h16"/></svg></button>
                           <button class="tag-x" :title="$t('common.delete')" @click.stop="ai.removeAiSub(s)">×</button>
                         </span>
                       </div>

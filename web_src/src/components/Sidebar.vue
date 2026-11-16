@@ -1,7 +1,9 @@
 <script setup>
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, computed } from 'vue'
 import { state, NAV_GROUPS, NAV_ICONS } from '../state.js'
 import { maintenanceSummary } from '../api.js'
+
+const groups = computed(() => NAV_GROUPS)
 
 /* 维护中心待办角标 */
 const badge = ref(0)
@@ -23,7 +25,7 @@ function go(id) {
 <template>
   <aside class="sidebar" :class="{ collapsed: state.sidebarCollapsed, 'mobile-open': state.mobileNavOpen }">
     <div class="sb-body">
-      <div v-for="g in NAV_GROUPS" :key="g.title" class="nav-group">
+      <div v-for="g in groups" :key="g.title" class="nav-group">
         <div class="nav-group-title">{{ $t(g.title) }}</div>
         <div
           v-for="it in g.items"

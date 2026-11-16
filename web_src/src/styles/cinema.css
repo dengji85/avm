@@ -1,0 +1,1577 @@
+/* ============================================================
+   经典界面统一主题 · 发现页设计语言
+   ------------------------------------------------------------
+   参考基准：发现页（DiscoverView）
+   只做视觉层，不改任何业务逻辑与 DOM 结构。约定：
+
+     · 字体   展示字走衬线（页面标题 / 影片名），正文走无衬线，
+              元信息 / 编号 / 计数走等宽
+     · 色彩   全站只有一个强调色（品牌玫红），其余靠墨色层次
+     · 形态   内容卡 6px 弧度，控件 6px，标签与搜索为胶囊，
+              纯图标动作为圆形，浮层用 10px + 重阴影
+     · 分隔   优先用留白与底色差，发丝线只在需要「切一刀」时出现
+     · 动效   一次性入场编排 + 交互即时反馈，不做循环环境动画
+
+   本文件在 main.js 中最后引入，可覆盖 ui.css / layout.css 的默认值；
+   统一用 body.cinema-skin 前缀提高一级特异性，压过组件的 scoped 样式。
+   ============================================================ */
+
+body.cinema-skin {
+  --cin-serif: var(--c-serif);
+  --cin-sans: var(--c-sans);
+  --cin-mono: var(--c-mono);
+  /* 数据可视化色：发现页没有蓝色，图表统一收敛到品牌红的暖邻居（琥珀） */
+  --c-data: #d8a657;
+  --c-data-soft: rgba(216, 166, 87, .16);
+  /* 页面级留白：桌面端疏朗，窄屏自动收紧（不要写死 px） */
+  --gutter-x: clamp(16px, 3vw, 44px);
+  letter-spacing: 0;
+}
+
+/* ============================================================
+   1. 排版层级
+   ============================================================ */
+
+/* 页面标题：衬线展示字 + 等宽副信息 */
+body.cinema-skin .ph-title,
+body.cinema-skin .tb-title {
+  font-family: var(--cin-serif);
+  font-weight: 400;
+  letter-spacing: var(--ls-tight);
+  color: var(--c-text);
+}
+body.cinema-skin .ph-title { font-size: clamp(21px, 2vw, 26px); line-height: 1.25; }
+body.cinema-skin .tb-title { font-size: clamp(20px, 1.9vw, 24px); line-height: 1.25; }
+body.cinema-skin .ph-sub,
+body.cinema-skin .tb-sub {
+  font-family: var(--cin-mono);
+  font-size: 11px;
+  letter-spacing: var(--ls-wide);
+  color: var(--c-text-3);
+  font-variant-numeric: tabular-nums;
+}
+body.cinema-skin .ph-ico { font-size: 15px; opacity: .8; }
+
+/* 区块标题：无衬线半粗，是「内容分组」而不是「页面」 */
+body.cinema-skin .section-title {
+  font-family: var(--cin-sans);
+  font-size: 15px;
+  font-weight: 650;
+  letter-spacing: 0;
+  color: var(--c-text);
+}
+body.cinema-skin .section-title .count {
+  font-family: var(--cin-mono);
+  font-size: 10.5px;
+  letter-spacing: var(--ls-wide);
+  font-weight: 400;
+}
+
+/* 等宽眉标：编号 / 类型 / 计数这类「数据」统一一种写法 */
+body.cinema-skin .eyebrow,
+body.cinema-skin .dd-code,
+body.cinema-skin .dd-sub,
+body.cinema-skin .muted.tabular {
+  font-family: var(--cin-mono);
+  letter-spacing: var(--ls-caps);
+}
+
+/* ============================================================
+   2. 应用骨架
+   ============================================================ */
+
+/* ---------- 顶栏：半透明毛玻璃 + 发丝线，滚到哪里都稳 ---------- */
+body.cinema-skin .topnav {
+  height: 62px;
+  gap: var(--sp-4);
+  padding: 0 var(--gutter-x);
+  background: color-mix(in srgb, var(--c-bg) 86%, transparent);
+  border-bottom: 1px solid var(--c-line);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+}
+body.cinema-skin .topnav .brand {
+  gap: 10px;
+  font-family: var(--cin-serif);
+  font-size: 17px;
+  font-weight: 500;
+  letter-spacing: .16em;
+}
+body.cinema-skin .topnav .brand .logo {
+  width: 26px; height: 26px;
+  border-radius: var(--r-sm);
+  box-shadow: none;
+}
+body.cinema-skin .topnav .brand:hover .logo { transform: scale(1.05); }
+
+/* 主导航：文字 + 底部指示线，不画胶囊容器 */
+body.cinema-skin .topnav .main-tabs {
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  padding: 0;
+  margin: 0 6px;
+  gap: 4px;
+}
+body.cinema-skin .topnav .main-tabs .tab {
+  height: 34px;
+  padding: 0 10px;
+  border-radius: var(--r-ctl);
+  background: transparent;
+  color: var(--c-text-2);
+  font-size: 13px;
+  font-weight: 500;
+  letter-spacing: 0;
+  transition: color var(--t-fast), background var(--t-fast);
+}
+body.cinema-skin .topnav .main-tabs .tab:hover {
+  color: var(--c-text);
+  background: var(--c-surface-2);
+}
+body.cinema-skin .topnav .main-tabs .tab.active {
+  color: var(--c-text);
+  background: transparent;
+  font-weight: 600;
+  box-shadow: none;
+}
+
+/* 搜索：下划线式，和发现页一致 */
+body.cinema-skin .topnav .search {
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  border-bottom: 1px solid var(--c-line);
+  max-width: 460px;
+  transition: border-color var(--t-fast);
+}
+body.cinema-skin .topnav .search:focus-within { border-bottom-color: var(--c-primary); }
+body.cinema-skin .topnav .search input {
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  height: 36px;
+  font-size: 13px;
+}
+body.cinema-skin .topnav .search input:focus { box-shadow: none; }
+body.cinema-skin .topnav .search .kbd kbd {
+  border-radius: var(--r-xs);
+  font-family: var(--cin-mono);
+}
+body.cinema-skin .topnav .sem-toggle { border-radius: var(--r-xs); }
+/* 窄屏：搜索框与顶栏动作区收缩，避免撑出横向滚动 */
+@media (max-width: 900px) {
+  body.cinema-skin .topnav .search { min-width: 0; width: 150px; }
+}
+@media (max-width: 600px) {
+  body.cinema-skin .topnav .search { min-width: 0; width: 118px; flex: 0 1 auto; }
+  /* 快捷键提示与 AI 语义开关在窄屏放不下：前者隐藏，后者收进 AI 中心 */
+  body.cinema-skin .topnav .search .kbd { display: none; }
+  body.cinema-skin .topnav .sem-toggle { display: none; }
+  body.cinema-skin .topnav .actions { gap: 4px; }
+}
+/* 窄屏文字导航放不下：收进抽屉菜单（与发现页一致） */
+@media (max-width: 720px) {
+  body.cinema-skin .topnav .main-tabs { display: none; }
+}
+body.cinema-skin .topnav .sem-toggle.on {
+  background: var(--c-primary);
+  border-color: var(--c-primary);
+  color: #fff;
+}
+
+/* ---------- 侧栏：留白分组，不画装饰线 ---------- */
+body.cinema-skin .sidebar {
+  background: var(--c-bg);
+  border-right: 1px solid var(--c-line);
+}
+body.cinema-skin .sidebar::before { display: none; }
+body.cinema-skin .sidebar .sb-body {
+  padding: var(--sp-5) var(--sp-3);
+  gap: var(--sp-6);
+}
+body.cinema-skin .nav-group-title {
+  padding: 0 var(--sp-3) 6px;
+  font-family: var(--cin-mono);
+  font-size: 9.5px;
+  font-weight: 500;
+  letter-spacing: var(--ls-caps);
+  text-transform: uppercase;
+  color: var(--c-text-3);
+}
+body.cinema-skin .nav-group-title::before {
+  width: 10px; height: 1px;
+  border-radius: 0;
+  background: var(--c-line-strong);
+  opacity: 1;
+}
+body.cinema-skin .nav-item {
+  height: 38px;
+  padding: 0 var(--sp-3);
+  border-radius: var(--r-ctl);
+  border-left: 0;
+  color: var(--c-text-2);
+  font-size: 13px;
+  transition: background var(--t-fast), color var(--t-fast);
+}
+body.cinema-skin .nav-item:hover {
+  background: var(--c-surface-2);
+  color: var(--c-text);
+}
+body.cinema-skin .nav-item:hover .ico { color: var(--c-text); }
+body.cinema-skin .nav-item.on {
+  background: var(--c-primary-soft);
+  color: var(--c-text);
+  box-shadow: inset 2px 0 0 var(--c-primary);
+  border-radius: 0 var(--r-ctl) var(--r-ctl) 0;
+  font-weight: 600;
+}
+body.cinema-skin .nav-item.on .ico { color: var(--c-primary); transform: none; }
+body.cinema-skin .nav-item .n {
+  font-family: var(--cin-mono);
+  font-size: 10px;
+  letter-spacing: var(--ls-wide);
+}
+body.cinema-skin .sidebar .sb-foot {
+  border-top: 1px solid var(--c-line);
+  background: var(--c-bg);
+}
+
+/* 侧栏分面筛选 */
+body.cinema-skin .facet-item {
+  border-radius: var(--r-ctl);
+  font-size: 12px;
+  color: var(--c-text-2);
+}
+body.cinema-skin .facet-item.on {
+  background: var(--c-primary-soft);
+  color: var(--c-primary-h);
+  font-weight: 600;
+  box-shadow: inset 2px 0 0 var(--c-primary);
+}
+body.cinema-skin .facet-item.on .fn { color: var(--c-primary); }
+body.cinema-skin .facet-item .fn { font-family: var(--cin-mono); font-size: 10px; }
+
+/* ---------- 视图容器 ---------- */
+body.cinema-skin .view { background: var(--c-bg); }
+
+/* 页头 / 工具栏 / 筛选条：只留一条发丝线，靠留白分层 */
+body.cinema-skin .page-head {
+  padding: var(--sp-4) var(--gutter-x) var(--sp-3);
+  min-height: 60px;
+  border-bottom: 1px solid var(--c-line);
+  background: transparent;
+  gap: var(--sp-3);
+}
+body.cinema-skin .ph-main { gap: 10px; align-items: baseline; }
+body.cinema-skin .ph-actions { gap: var(--sp-2); }
+
+body.cinema-skin .toolbar {
+  padding: var(--sp-4) var(--gutter-x);
+  min-height: 56px;
+  gap: 10px;
+  border-bottom: 1px solid var(--c-line);
+  background: transparent;
+}
+body.cinema-skin .toolbar .tb-title { margin-right: 2px; }
+body.cinema-skin .filter-bar {
+  padding: 10px var(--gutter-x);
+  border-bottom: 1px solid var(--c-line);
+  background: transparent;
+}
+body.cinema-skin .filter-bar .fb-label {
+  font-family: var(--cin-mono);
+  font-size: 10px;
+  letter-spacing: var(--ls-wide);
+}
+
+body.cinema-skin .view-body {
+  padding: var(--sp-5) var(--gutter-x) var(--sp-8);
+  gap: var(--sp-5);
+}
+body.cinema-skin .view-body.tight { padding: var(--sp-4) var(--gutter-x) var(--sp-6); }
+body.cinema-skin .view-body.block-scroll { padding-bottom: var(--sp-10); }
+
+body.cinema-skin .drawer {
+  border-left: 1px solid var(--c-line);
+  box-shadow: var(--sh-4);
+}
+body.cinema-skin .drawer-head {
+  padding: var(--sp-4) var(--sp-5);
+  border-bottom: 1px solid var(--c-line);
+  background: var(--c-bg);
+}
+
+/* ============================================================
+   3. 通用控件
+   ============================================================ */
+
+body.cinema-skin .btn {
+  height: 34px;
+  padding: 0 var(--sp-4);
+  border-radius: var(--r-ctl);
+  border: 1px solid var(--c-line-strong);
+  background: var(--c-surface-2);
+  color: var(--c-text);
+  font-size: 13px;
+  font-weight: 500;
+  letter-spacing: 0;
+  transition: background var(--t-fast), border-color var(--t-fast),
+              color var(--t-fast), transform var(--t-fast);
+}
+body.cinema-skin .btn:hover:not(:disabled) {
+  background: var(--c-surface-3);
+  border-color: var(--c-text-3);
+}
+body.cinema-skin .btn:active:not(:disabled) { transform: translateY(1px); }
+
+body.cinema-skin .btn.primary {
+  background: var(--c-primary);
+  border-color: var(--c-primary);
+  color: #fff;
+  font-weight: 600;
+  box-shadow: 0 2px 10px rgba(224, 53, 90, .18);
+}
+body.cinema-skin .btn.primary:hover:not(:disabled) {
+  background: var(--c-primary-h);
+  border-color: var(--c-primary-h);
+}
+body.cinema-skin .btn.ghost {
+  background: transparent;
+  border-color: transparent;
+  color: var(--c-text-2);
+}
+body.cinema-skin .btn.ghost:hover:not(:disabled) {
+  background: var(--c-surface-2);
+  color: var(--c-text);
+}
+body.cinema-skin .btn.outline { background: transparent; }
+body.cinema-skin .btn.danger {
+  background: var(--c-err-soft);
+  border-color: transparent;
+  color: var(--c-err);
+}
+body.cinema-skin .btn.danger:hover:not(:disabled) {
+  background: var(--c-err);
+  border-color: var(--c-err);
+  color: #fff;
+}
+body.cinema-skin .btn.tiny { height: 28px; padding: 0 10px; font-size: 12px; }
+body.cinema-skin .btn.large { height: 42px; padding: 0 var(--sp-5); font-size: 14px; }
+body.cinema-skin .btn.icon { width: 34px; padding: 0; letter-spacing: 0; }
+body.cinema-skin .btn.icon.tiny { width: 28px; }
+/* 纯图标动作统一圆形（与发现页卡片上的播放 / 详情浮钮同一语汇） */
+body.cinema-skin .btn.icon,
+body.cinema-skin .btn.round { border-radius: 50%; }
+body.cinema-skin .btn.active {
+  background: var(--c-primary-soft-strong);
+  border-color: var(--c-primary);
+  color: var(--c-primary-h);
+}
+body.cinema-skin .btn.icon.active {
+  background: var(--c-primary);
+  border-color: var(--c-primary);
+  color: #fff;
+}
+
+body.cinema-skin .btn-group { gap: 0; }
+body.cinema-skin .btn-group .btn { border-radius: 0; margin-left: -1px; }
+body.cinema-skin .btn-group .btn:first-child {
+  border-radius: var(--r-ctl) 0 0 var(--r-ctl);
+  margin-left: 0;
+}
+body.cinema-skin .btn-group .btn:last-child {
+  border-radius: 0 var(--r-ctl) var(--r-ctl) 0;
+}
+
+/* ---------- 表单 ---------- */
+body.cinema-skin .input,
+body.cinema-skin input[type='text'],
+body.cinema-skin input[type='search'],
+body.cinema-skin input[type='number'],
+body.cinema-skin input[type='password'],
+body.cinema-skin select,
+body.cinema-skin textarea {
+  height: 34px;
+  padding: 0 10px;
+  border-radius: var(--r-ctl);
+  border: 1px solid var(--c-line);
+  background: var(--c-surface-2);
+  color: var(--c-text);
+  font-size: 13px;
+}
+body.cinema-skin textarea { height: auto; padding: 8px 10px; }
+body.cinema-skin .input:hover,
+body.cinema-skin input:hover:not(:disabled),
+body.cinema-skin select:hover,
+body.cinema-skin textarea:hover { border-color: var(--c-line-strong); }
+body.cinema-skin .input:focus,
+body.cinema-skin input:focus,
+body.cinema-skin select:focus,
+body.cinema-skin textarea:focus {
+  outline: none;
+  border-color: var(--c-primary);
+  box-shadow: 0 0 0 3px var(--c-primary-soft);
+}
+body.cinema-skin .field > label { font-size: 12px; color: var(--c-text-2); }
+body.cinema-skin .field .hint { font-size: 11px; color: var(--c-text-3); }
+body.cinema-skin .field-row { grid-template-columns: 150px 1fr; gap: var(--sp-4); }
+body.cinema-skin .field-row > label { font-size: 13px; }
+
+/* 开关：胶囊 + 品牌色 */
+body.cinema-skin .toggle .track { width: 36px; height: 20px; }
+body.cinema-skin .toggle .track::after { width: 16px; height: 16px; }
+body.cinema-skin .toggle input:checked + .track::after { transform: translateX(16px); }
+
+/* ---------- 徽章 / 标签 ---------- */
+body.cinema-skin .badge {
+  height: 20px;
+  padding: 0 8px;
+  border-radius: var(--r-xs);
+  background: var(--c-surface-3);
+  color: var(--c-text-2);
+  font-family: var(--cin-mono);
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: var(--ls-wide);
+}
+body.cinema-skin .badge.primary { background: var(--c-primary-soft); color: var(--c-primary-h); }
+body.cinema-skin .badge.ok { background: var(--c-ok-soft); color: var(--c-ok); }
+body.cinema-skin .badge.warn { background: var(--c-warn-soft); color: var(--c-warn); }
+body.cinema-skin .badge.err { background: var(--c-err-soft); color: var(--c-err); }
+body.cinema-skin .badge.solid { background: var(--c-primary); color: #fff; }
+/* 系统徽标不要彩虹渐变：全站一个强调色 */
+body.cinema-skin .badge.sys { background: var(--c-primary); color: #fff; }
+
+body.cinema-skin .chip {
+  height: 28px;
+  padding: 0 12px;
+  border-radius: var(--r-full);
+  border: 1px solid var(--c-line);
+  background: transparent;
+  color: var(--c-text-2);
+  font-size: 12px;
+  transition: background var(--t-fast), border-color var(--t-fast), color var(--t-fast);
+}
+body.cinema-skin .chip:hover {
+  background: var(--c-surface-2);
+  border-color: var(--c-line-strong);
+  color: var(--c-text);
+}
+body.cinema-skin .chip.on {
+  background: var(--c-primary);
+  border-color: var(--c-primary);
+  color: #fff;
+  font-weight: 500;
+  box-shadow: none;
+}
+body.cinema-skin .chip .x { opacity: .7; }
+
+/* ---------- 面板 / 卡片容器 ---------- */
+body.cinema-skin .panel {
+  border-radius: var(--r-lg);
+  border: 1px solid var(--c-line);
+  background: var(--c-surface);
+}
+body.cinema-skin .panel-head {
+  padding: var(--sp-3) var(--sp-4);
+  border-bottom: 1px solid var(--c-line);
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0;
+}
+body.cinema-skin .panel-head .sub {
+  font-family: var(--cin-mono);
+  font-size: 10.5px;
+  letter-spacing: var(--ls-wide);
+}
+body.cinema-skin .panel-body { padding: var(--sp-4); gap: var(--sp-3); }
+body.cinema-skin .panel-foot { padding: var(--sp-3) var(--sp-4); }
+
+/* 工作台容器：直角改圆角，和卡片同族 */
+body.cinema-skin .fcard,
+body.cinema-skin .arch-box,
+body.cinema-skin .tbl {
+  border-radius: var(--r-lg);
+  border: 1px solid var(--c-line);
+}
+
+/* ---------- 统计卡 ---------- */
+body.cinema-skin .stat-card {
+  padding: var(--sp-4);
+  border-radius: var(--r-lg);
+  background: var(--c-surface);
+  border: 1px solid var(--c-line);
+  transition: border-color var(--t-fast), transform var(--t-fast), box-shadow var(--t-fast);
+}
+body.cinema-skin .stat-card:hover {
+  border-color: var(--c-line-strong);
+  transform: translateY(-2px);
+  box-shadow: var(--sh-2);
+}
+body.cinema-skin .stat-value {
+  font-family: var(--cin-serif);
+  font-size: var(--fs-2xl);
+  font-weight: 400;
+  letter-spacing: var(--ls-tight);
+}
+body.cinema-skin .stat-label {
+  font-family: var(--cin-mono);
+  font-size: 10.5px;
+  letter-spacing: var(--ls-wide);
+  color: var(--c-text-3);
+  margin-top: 4px;
+}
+
+/* ---------- 模态 / 抽屉 / Toast ---------- */
+body.cinema-skin .modal-card,
+body.cinema-skin .confirm-box,
+body.cinema-skin .modal {
+  border-radius: var(--r-modal);
+  border: 1px solid var(--c-line-strong);
+  box-shadow: var(--sh-4);
+}
+body.cinema-skin .modal-mask,
+body.cinema-skin .drawer-mask { backdrop-filter: blur(6px); }
+body.cinema-skin .modal-head {
+  padding: var(--sp-4);
+  font-size: 15px;
+  font-weight: 600;
+}
+body.cinema-skin .toast {
+  border-radius: var(--r-full);
+  padding: 9px var(--sp-4);
+  background: var(--c-surface-3);
+  border: 1px solid var(--c-line-strong);
+  font-size: 13px;
+}
+
+/* ---------- 标签页 / 分段控件 ---------- */
+body.cinema-skin .tabs { border-bottom: 1px solid var(--c-line); gap: 2px; }
+body.cinema-skin .tabs .tab {
+  padding: 9px 12px;
+  border-radius: 0;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: var(--c-text-2);
+  font-size: 13px;
+}
+body.cinema-skin .tabs .tab:hover { background: transparent; color: var(--c-text); }
+body.cinema-skin .tabs .tab.on {
+  color: var(--c-text);
+  font-weight: 600;
+  background: transparent;
+  border-bottom-color: var(--c-primary);
+}
+/* 分段控件（统计页 / 排序切换）：胶囊容器 + 实心选中 */
+body.cinema-skin .seg,
+body.cinema-skin .sort-tabs {
+  background: var(--c-surface-2);
+  border: 1px solid var(--c-line);
+  border-radius: var(--r-full);
+  padding: 3px;
+  gap: 2px;
+}
+body.cinema-skin .seg button,
+body.cinema-skin .sort-tabs button {
+  border-radius: var(--r-full);
+  color: var(--c-text-3);
+  font-size: 12px;
+  font-weight: 500;
+  padding: 5px 12px;
+  transition: background var(--t-fast), color var(--t-fast);
+}
+body.cinema-skin .seg button:hover,
+body.cinema-skin .sort-tabs button:hover { color: var(--c-text); }
+body.cinema-skin .seg button.on,
+body.cinema-skin .sort-tabs button.on {
+  background: var(--c-primary);
+  color: #fff;
+  font-weight: 600;
+}
+
+/* ---------- 分页 ---------- */
+body.cinema-skin .pager { gap: 6px; padding: var(--sp-5) 0 var(--sp-2); }
+body.cinema-skin .pager .pinfo {
+  font-family: var(--cin-mono);
+  font-size: 10.5px;
+  letter-spacing: var(--ls-wide);
+}
+
+/* ---------- 骨架 / 空态 / 加载 / 进度 ---------- */
+body.cinema-skin .skeleton { border-radius: var(--r-sm); background: var(--c-surface-2); }
+body.cinema-skin .skeleton.poster { border-radius: var(--r-card); }
+body.cinema-skin .skeleton.text { border-radius: var(--r-full); }
+
+body.cinema-skin .empty { gap: var(--sp-3); padding: var(--sp-10) var(--sp-4); }
+body.cinema-skin .empty .icon { font-size: 34px; opacity: .28; }
+body.cinema-skin .empty .title {
+  font-family: var(--cin-serif);
+  font-size: 19px;
+  font-weight: 400;
+  color: var(--c-text);
+  letter-spacing: var(--ls-tight);
+}
+body.cinema-skin .empty .desc { font-size: 13px; color: var(--c-text-3); max-width: 400px; }
+
+body.cinema-skin .progress { height: 4px; background: var(--c-surface-3); }
+body.cinema-skin .divider { background: var(--c-line); }
+
+/* ============================================================
+   4. 影片卡片 / 横向行 / 列表
+   ============================================================ */
+
+body.cinema-skin .card-grid { gap: 28px 22px; }
+body.cinema-skin .card-grid.dense { gap: var(--sp-3); }
+
+body.cinema-skin .card {
+  border-radius: var(--r-card);
+  background: var(--c-surface);
+  border: 1px solid var(--c-line);
+  box-shadow: var(--sh-1);
+  transition: transform var(--t-base), box-shadow var(--t-base), border-color var(--t-base);
+}
+body.cinema-skin .card:hover {
+  transform: translateY(-3px);
+  box-shadow: var(--sh-3);
+  border-color: var(--c-line-strong);
+}
+body.cinema-skin .card.selected {
+  border-color: var(--c-primary);
+  box-shadow: 0 0 0 2px var(--c-primary-soft);
+}
+body.cinema-skin .card .thumb {
+  border-radius: var(--r-card) var(--r-card) 0 0;
+}
+body.cinema-skin .card .thumb img { transition: transform var(--t-slow), opacity var(--t-base); }
+body.cinema-skin .card:hover .thumb img { transform: scale(1.04); }
+
+/* 文案区：必须能收缩，窄屏横版卡片里文字不顶出卡片 */
+body.cinema-skin .card .meta {
+  min-width: 0;
+  overflow: hidden;
+  padding: 10px 12px 12px;
+  gap: 5px;
+}
+body.cinema-skin .card .title {
+  font-family: var(--cin-serif);
+  font-weight: 400;
+  font-size: 14px;
+  line-height: 1.38;
+  letter-spacing: 0;
+  overflow-wrap: anywhere;
+}
+body.cinema-skin .card .sub {
+  font-family: var(--cin-mono);
+  font-size: 10px;
+  letter-spacing: var(--ls-wide);
+  color: var(--c-text-3);
+}
+body.cinema-skin .card .sub .cd { font-family: var(--cin-mono); color: var(--c-text-2); }
+
+/* 角标：去色，唯一的彩色留给品牌红 */
+body.cinema-skin .card .tag {
+  border-radius: var(--r-xs);
+  padding: 2px 6px;
+  background: rgba(8, 10, 15, .78);
+  border: 1px solid var(--c-line);
+  color: var(--c-text-2);
+  font-family: var(--cin-mono);
+  font-size: 9px;
+  font-weight: 500;
+  letter-spacing: var(--ls-wide);
+}
+body.cinema-skin .card .tag.sub,
+body.cinema-skin .card .tag.unc,
+body.cinema-skin .card .tag.hd,
+body.cinema-skin .card .tag.embed { background: rgba(8, 10, 15, .78); color: var(--c-text-2); }
+
+/* 封面浮钮：移到右下角，做成放映机控制键 */
+body.cinema-skin .card .play-fab {
+  left: auto; right: 10px; top: auto; bottom: 10px;
+  transform: none;
+  width: 34px; height: 34px;
+  border-radius: 50%;
+  background: rgba(8, 10, 14, .74);
+  border: 1px solid rgba(255, 255, 255, .28);
+  font-size: 12px;
+  opacity: 0;
+}
+body.cinema-skin .card:hover .play-fab { opacity: 1; transform: none; }
+body.cinema-skin .card .play-fab:hover {
+  background: var(--c-primary);
+  border-color: var(--c-primary);
+}
+/* 收藏心是社交动作，保留圆形底板 */
+body.cinema-skin .card .fav {
+  border-radius: 50%;
+  background: rgba(8, 10, 15, .68);
+}
+body.cinema-skin .card .pick { border-radius: var(--r-xs); }
+body.cinema-skin .card .atc-fab { border-radius: var(--r-xs); }
+body.cinema-skin .card .watch-bar { height: 2px; }
+
+body.cinema-skin .rail { gap: var(--sp-4); }
+body.cinema-skin .lrow {
+  border-radius: var(--r-sm);
+  border-bottom: 1px solid var(--c-line);
+}
+body.cinema-skin .lrow:hover { background: var(--c-surface-2); }
+body.cinema-skin .lthumb { border-radius: var(--r-xs); }
+
+/* ============================================================
+   5. 页面专属：只调「页面语言」，不碰布局与交互
+   ============================================================ */
+
+/* ---------- 首页 ---------- */
+body.cinema-skin .block { margin-top: 30px; }
+body.cinema-skin .block-title {
+  font-family: var(--cin-sans);
+  font-size: 16px;
+  font-weight: 650;
+  letter-spacing: 0;
+}
+/* 原来的蓝色发光圆点换成一段品牌色短线：更克制，也和眉标体系一致 */
+body.cinema-skin .block-title .dot {
+  width: 14px; height: 2px;
+  border-radius: 0;
+  background: var(--c-primary);
+  box-shadow: none;
+}
+body.cinema-skin .block-actions .link,
+body.cinema-skin .link {
+  color: var(--c-text-2);
+  font-family: var(--cin-mono);
+  font-size: 10.5px;
+  font-weight: 500;
+  letter-spacing: var(--ls-wide);
+  padding: 4px 6px;
+  border-radius: var(--r-xs);
+  transition: color var(--t-fast), background var(--t-fast);
+}
+body.cinema-skin .block-actions .link { color: var(--c-text-2); }
+body.cinema-skin .block-actions .link:hover,
+body.cinema-skin .link:hover {
+  color: var(--c-primary);
+  background: transparent;
+  text-decoration: none;
+}
+body.cinema-skin .block-actions { gap: 2px; }
+
+/* ---------- 详情抽屉 ---------- */
+body.cinema-skin .dh-title {
+  font-family: var(--cin-serif);
+  font-weight: 400;
+  letter-spacing: var(--ls-tight);
+}
+body.cinema-skin .dd-layout-switch .ll { border-radius: var(--r-xs); }
+body.cinema-skin .dd-name {
+  font-family: var(--cin-serif);
+  font-weight: 400;
+  letter-spacing: var(--ls-tight);
+}
+body.cinema-skin .dd-sub,
+body.cinema-skin .dd-code {
+  font-family: var(--cin-mono);
+  letter-spacing: var(--ls-caps);
+}
+body.cinema-skin .dd-hero-info .dhi-title {
+  font-family: var(--cin-serif);
+  font-weight: 400;
+  letter-spacing: var(--ls-tight);
+}
+body.cinema-skin .dhi-meta,
+body.cinema-skin .dhi-chip {
+  font-family: var(--cin-mono);
+  letter-spacing: var(--ls-wide);
+}
+body.cinema-skin .dhi-chip { border-radius: var(--r-full); }
+body.cinema-skin .dd-sec-t {
+  font-family: var(--cin-mono);
+  font-size: 10px;
+  letter-spacing: var(--ls-caps);
+  text-transform: uppercase;
+  color: var(--c-text-3);
+}
+body.cinema-skin .dd-tabs .tab {
+  border-radius: 0;
+  font-family: var(--cin-mono);
+  font-size: 11px;
+  letter-spacing: var(--ls-wide);
+}
+body.cinema-skin .dd-pane { border-radius: var(--r-lg); }
+body.cinema-skin .rail-title { font-family: var(--cin-serif); font-weight: 400; }
+body.cinema-skin .rail-sub { font-family: var(--cin-mono); letter-spacing: var(--ls-wide); }
+body.cinema-skin .sim { border-radius: var(--r-sm); }
+
+/* ---------- 设置 / 维护：左侧竖排导航 ---------- */
+body.cinema-skin .set-rail,
+body.cinema-skin .maint-rail {
+  background: transparent;
+  border-right: 1px solid var(--c-line);
+  padding: var(--sp-4) 10px;
+  gap: 2px;
+}
+body.cinema-skin .set-rail .rail-item,
+body.cinema-skin .maint-rail .rail-item {
+  border-radius: var(--r-ctl);
+  color: var(--c-text-2);
+  font-size: 12.5px;
+  padding: 8px 10px;
+  transition: background var(--t-fast), color var(--t-fast);
+}
+body.cinema-skin .set-rail .rail-item:hover,
+body.cinema-skin .maint-rail .rail-item:hover {
+  background: var(--c-surface-2);
+  color: var(--c-text);
+}
+body.cinema-skin .set-rail .rail-item.on,
+body.cinema-skin .maint-rail .rail-item.on {
+  background: var(--c-primary-soft);
+  color: var(--c-primary-h);
+  font-weight: 600;
+  box-shadow: inset 2px 0 0 var(--c-primary);
+}
+body.cinema-skin .set-rail .rail-group,
+body.cinema-skin .maint-rail .rail-group {
+  font-family: var(--cin-mono);
+  font-size: 9.5px;
+  letter-spacing: var(--ls-caps);
+  text-transform: uppercase;
+  color: var(--c-text-3);
+  padding: var(--sp-3) 10px 4px;
+}
+
+/* ---------- AI 中心 ---------- */
+body.cinema-skin .aic-head h2 { font-family: var(--cin-serif); font-weight: 400; letter-spacing: var(--ls-tight); }
+body.cinema-skin .aic-nav-item {
+  border-radius: var(--r-ctl);
+  color: var(--c-text-2);
+}
+body.cinema-skin .aic-nav-item:hover { background: var(--c-surface-2); color: var(--c-text); }
+body.cinema-skin .aic-nav-item.on {
+  background: var(--c-primary-soft);
+  color: var(--c-primary-h);
+  box-shadow: inset 2px 0 0 var(--c-primary);
+}
+
+/* ---------- 演员墙 ---------- */
+body.cinema-skin .wall { gap: var(--sp-4); }
+body.cinema-skin .actress-card,
+body.cinema-skin .a-card { border-radius: var(--r-lg); }
+
+/* ---------- 排行榜 / 列表行 ---------- */
+/* 排行榜是「一张榜单」而不是一摞卡片：用发丝线分行，不做逐行描边 */
+body.cinema-skin .rk-row {
+  border-radius: var(--r-sm);
+  border: 0;
+  border-bottom: 1px solid var(--c-line);
+  background: transparent;
+}
+body.cinema-skin .rk-row:last-child { border-bottom: 0; }
+body.cinema-skin .rk-row:hover {
+  border-color: var(--c-line-strong);
+  background: var(--c-surface-2);
+}
+body.cinema-skin .rk-title { font-family: var(--cin-serif); font-weight: 400; }
+body.cinema-skin .rk-sub { font-family: var(--cin-mono); letter-spacing: var(--ls-wide); }
+body.cinema-skin .rk-val { font-family: var(--cin-mono); font-weight: 500; }
+
+/* ---------- 片单卡片 ---------- */
+body.cinema-skin .coll-card {
+  border-radius: var(--r-lg);
+  border: 1px solid var(--c-line);
+  background: var(--c-surface);
+  transition: transform var(--t-base), box-shadow var(--t-base), border-color var(--t-base);
+}
+body.cinema-skin .coll-card:hover {
+  transform: translateY(-3px);
+  box-shadow: var(--sh-3);
+  border-color: var(--c-line-strong);
+}
+
+/* ---------- 标记墙 ---------- */
+body.cinema-skin .mk-card {
+  border-radius: var(--r-lg);
+  border: 1px solid var(--c-line);
+  background: var(--c-surface);
+}
+body.cinema-skin .mk-card:hover { border-color: var(--c-line-strong); box-shadow: var(--sh-3); }
+body.cinema-skin .mk-n {
+  font-family: var(--cin-mono);
+  font-size: 10px;
+  letter-spacing: var(--ls-wide);
+}
+
+/* ---------- 年度回顾 ---------- */
+body.cinema-skin .yr-title {
+  font-family: var(--cin-serif);
+  font-weight: 400;
+  letter-spacing: var(--ls-tight);
+}
+body.cinema-skin .yr-h2 { font-family: var(--cin-sans); font-size: 15px; font-weight: 650; }
+body.cinema-skin .yr-card {
+  border-radius: var(--r-lg);
+  border: 1px solid var(--c-line);
+  background: var(--c-surface);
+}
+body.cinema-skin .yr-num { font-family: var(--cin-serif); font-weight: 400; }
+body.cinema-skin .yr-lab {
+  font-family: var(--cin-mono);
+  font-size: 10px;
+  letter-spacing: var(--ls-wide);
+  color: var(--c-text-3);
+}
+body.cinema-skin .yr-year {
+  border-radius: var(--r-full);
+  font-family: var(--cin-mono);
+  font-size: 11px;
+  letter-spacing: var(--ls-wide);
+}
+body.cinema-skin .yr-year.sel {
+  background: var(--c-primary);
+  border-color: var(--c-primary);
+  color: #fff;
+}
+
+/* ---------- 划卡（Swipe） ---------- */
+body.cinema-skin .sw-card { border-radius: var(--r-xl); box-shadow: var(--sh-3); }
+body.cinema-skin .sw-progress { border-radius: 0; }
+
+/* ---------- 移动端导航 ---------- */
+body.cinema-skin .mn-panel { border-radius: 0; }
+body.cinema-skin .mn-item { border-radius: var(--r-ctl); }
+body.cinema-skin .mn-item.on {
+  background: var(--c-primary-soft);
+  color: var(--c-primary-h);
+  box-shadow: inset 2px 0 0 var(--c-primary);
+}
+body.cinema-skin .mn-group-title {
+  font-family: var(--cin-mono);
+  font-size: 9.5px;
+  letter-spacing: var(--ls-caps);
+  text-transform: uppercase;
+}
+
+/* ============================================================
+   5.5 公共组件规范（跨页面共享类名）
+   ============================================================ */
+/* 徽章：数据感小标签，语义色只做淡底，不再用实心胶囊 */
+body.cinema-skin .badge {
+  border-radius: 2px;
+  font-family: var(--cin-mono);
+  font-size: 9.5px;
+  font-weight: 500;
+  letter-spacing: .04em;
+  border: 1px solid var(--c-line);
+  background: var(--c-surface-2);
+  color: var(--c-text-2);
+}
+body.cinema-skin .badge.primary { background: var(--c-primary-soft); border-color: var(--c-primary-line); color: var(--c-primary); }
+body.cinema-skin .badge.ok { background: var(--c-ok-soft); border-color: transparent; color: var(--c-ok); }
+body.cinema-skin .badge.warn { background: var(--c-warn-soft); border-color: transparent; color: var(--c-warn); }
+body.cinema-skin .badge.err { background: var(--c-err-soft); border-color: transparent; color: var(--c-err); }
+body.cinema-skin .badge.accent { background: var(--c-accent-soft); border-color: transparent; color: var(--c-accent); }
+/* 标签（排行 / 观看历史）：直角淡底 */
+body.cinema-skin .tag.dur,
+body.cinema-skin .tag.done,
+body.cinema-skin .tag.method {
+  border-radius: 2px;
+  font-family: var(--cin-mono);
+  font-size: 9.5px;
+}
+/* 分页器 */
+body.cinema-skin .pager .btn { border-radius: 2px; }
+body.cinema-skin .pager .btn.active {
+  background: var(--c-primary);
+  border-color: var(--c-primary);
+  color: #fff;
+}
+body.cinema-skin .pinfo {
+  font-family: var(--cin-mono);
+  font-size: 10px;
+  color: var(--c-text-3);
+}
+/* Toast：直角深底，左侧状态色条 */
+body.cinema-skin .toast { border-radius: 2px; border-left: 2px solid var(--c-text-3); }
+body.cinema-skin .toast.ok { border-left-color: var(--c-ok); }
+body.cinema-skin .toast.err { border-left-color: var(--c-err); }
+/* 表格：工作台语言 */
+body.cinema-skin .tbl-wrap { overflow-x: auto; }
+body.cinema-skin table.tbl { border-radius: 0; border: 1px solid var(--c-line); }
+body.cinema-skin table.tbl th {
+  background: var(--c-surface-2);
+  font-family: var(--cin-mono);
+  font-size: 10px;
+  letter-spacing: .04em;
+  color: var(--c-text-2);
+}
+body.cinema-skin table.tbl td { border-bottom: 1px solid var(--c-line); }
+body.cinema-skin table.tbl tr:hover td { background: var(--c-surface-2); }
+/* 维护中心的输入类 */
+body.cinema-skin .inp {
+  border-radius: 2px;
+  border: 1px solid var(--c-line);
+  background: var(--c-surface-2);
+  color: var(--c-text);
+}
+
+/* ============================================================
+   5.6 页面族覆盖（各页面私有前缀）
+   ============================================================ */
+/* 片单 */
+body.cinema-skin .coll-card {
+  border-radius: var(--r-md);
+  background: var(--c-surface);
+  border: 1px solid var(--c-line);
+  box-shadow: var(--sh-1);
+}
+body.cinema-skin .cc-name { font-family: var(--cin-serif); font-weight: 400; }
+body.cinema-skin .cc-meta { font-family: var(--cin-mono); font-size: 10px; }
+/* 排行 */
+body.cinema-skin .rk-row {
+  border-radius: 0;
+  border-bottom: 1px solid var(--c-line);
+  background: transparent;
+}
+body.cinema-skin .rk-title { font-family: var(--cin-serif); font-weight: 400; }
+body.cinema-skin .rk-no,
+body.cinema-skin .rk-val { font-family: var(--cin-mono); font-variant-numeric: tabular-nums; }
+body.cinema-skin .rk-row.gold,
+body.cinema-skin .rk-row.silver,
+body.cinema-skin .rk-row.bronze { background: transparent; }
+/* 演员 */
+body.cinema-skin .a-card {
+  border-radius: var(--r-md);
+  background: var(--c-surface);
+  border: 1px solid var(--c-line);
+  box-shadow: var(--sh-1);
+}
+body.cinema-skin .a-name { font-family: var(--cin-serif); font-weight: 400; }
+body.cinema-skin .a-sub { font-family: var(--cin-mono); font-size: 10px; }
+/* AI 中心 */
+body.cinema-skin .aic { background: var(--c-bg); }
+body.cinema-skin .aic-nav-item { border-radius: 2px; }
+body.cinema-skin .aic-nav-item.on { box-shadow: inset 2px 0 0 var(--c-primary); }
+/* 分类导航在窄屏横向滚动，不撑破布局 */
+body.cinema-skin .aic-nav {
+  overflow-x: auto;
+  scrollbar-width: none;
+  min-width: 0;
+}
+body.cinema-skin .aic-nav::-webkit-scrollbar { display: none; }
+/* 统计页的日历热力在窄屏横向滚动 */
+body.cinema-skin .cal-grid { overflow-x: auto; }
+body.cinema-skin .aic-tbl {
+  border-radius: 0;
+  border: 1px solid var(--c-line);
+  /* 表格保住可读宽度，靠容器横向滚动而不是把列压成竖排 */
+  min-width: 560px;
+}
+/* 窄屏下宽表格放进可滚动的主区，不撑破布局 */
+body.cinema-skin .aic-main { overflow-x: auto; min-width: 0; }
+body.cinema-skin .aic-badge,
+body.cinema-skin .aic-tag { border-radius: 2px; font-family: var(--cin-mono); }
+body.cinema-skin .aic-card {
+  border-radius: 0;
+  border: 1px solid var(--c-line);
+  background: var(--c-surface);
+}
+body.cinema-skin .aic-dialog { border-radius: 8px; box-shadow: var(--sh-4); }
+/* 维护中心 */
+body.cinema-skin .rail-item { border-radius: 2px; }
+body.cinema-skin .rail-item.on { box-shadow: inset 2px 0 0 var(--c-primary); }
+/* 维护中心的少量累积溢出直接裁掉（9px 级别，肉眼无感） */
+body.cinema-skin .maint-shell { overflow-x: clip; min-width: 0; }
+/* 兜底：页面级裁掉残余溢出。横向滚动都发生在内部滚动容器（.rail/.track/.tbl-wrap），
+   不受影响；只裁掉那些真正把布局撑破的元素。 */
+body.cinema-skin .view { overflow-x: clip; }
+body.cinema-skin .mt-tab { border-radius: 2px; }
+body.cinema-skin .mt-row { border-radius: 0; }
+body.cinema-skin .stat-card {
+  border-radius: 0;
+  border: 1px solid var(--c-line);
+  background: var(--c-surface);
+}
+/* 标记 */
+body.cinema-skin .mk-card {
+  border-radius: var(--r-md);
+  background: var(--c-surface);
+  border: 1px solid var(--c-line);
+  box-shadow: var(--sh-1);
+}
+body.cinema-skin .mk-code,
+body.cinema-skin .mk-time { font-family: var(--cin-mono); }
+body.cinema-skin .mk-tag { border-radius: 2px; }
+/* 划动 */
+body.cinema-skin .sw-card {
+  border-radius: 8px;
+  box-shadow: var(--sh-4);
+  border: 1px solid var(--c-line);
+}
+/* 播放器浮层 */
+body.cinema-skin .pl { border-radius: 0; background: var(--c-bg-sunken); }
+body.cinema-skin .pl-toolbar { border-bottom: 1px solid var(--c-line); }
+body.cinema-skin .pl-side { border-left: 1px solid var(--c-line); }
+body.cinema-skin .pl-item { border-radius: 2px; }
+body.cinema-skin .pl-item.on { box-shadow: inset 2px 0 0 var(--c-primary); }
+body.cinema-skin .pl-code { font-family: var(--cin-mono); }
+body.cinema-skin .pl-name { font-family: var(--cin-serif); font-weight: 400; }
+
+/* ================= 强调色减负 =================
+   玫红只承担三件事：主行动、选中态、观看进度。
+   卡片上的来源标签、操作角标、状态圆点与 AI 悬浮球一律回到中性，
+   否则首屏十几处红点互相抢戏，画面反而变廉价。 */
+body.cinema-skin .card .tag.src {
+  color: var(--c-text-2);
+  border-color: var(--c-line);
+}
+body.cinema-skin .card .act {
+  color: var(--c-text-2);
+  /* 浮在封面上的角标：深色主题用近黑半透明压住画面 */
+  background: rgba(8, 10, 15, .78);
+  border-color: var(--c-line);
+}
+/* 浅色主题换成浅底深字，否则会变成「黑底暗字」几乎读不出来 */
+[data-theme='light'] body.cinema-skin .card .act {
+  background: rgba(255, 255, 255, .94);
+  border-color: var(--c-line);
+  color: var(--c-text);
+}
+/* 浮在封面上的角标（来源 / 画质等）必须用实底压住图片：
+   meta 区里的标签在卡片浅底上，仍用 6% 的淡底就够，两者不能共用一条规则。 */
+[data-theme='light'] body.cinema-skin .card .bl-tags .tag {
+  background: rgba(255, 255, 255, .96);
+  border-color: var(--c-line);
+  color: var(--c-text);
+}
+/* 番号从封面移到信息区：等宽、加一档字重，检索时一眼能定位 */
+body.cinema-skin .card .sub .cd {
+  flex: none;
+  font-weight: 600;
+  letter-spacing: .02em;
+  color: var(--c-text-2);
+}
+body.cinema-skin .card .src-dot.ok { color: var(--c-ok, #2fb87a); }
+body.cinema-skin .asst-fab {
+  background: var(--c-surface-2);
+  color: var(--c-text-2);
+  border-color: var(--c-line);
+  box-shadow: var(--sh-2);
+}
+
+/* ================= 借鉴优秀软件：克制与大图优先 =================
+   依据：Linear/Raycast 的「crowding is the amateur tell」、
+   Infuse/Swiftfin 的「大图 + 干净排版 + 界面退场」、
+   Netflix 的「一排只讲一件事」。做法不是加装饰，而是删常驻信息。 */
+/* 卡片降噪：只收起装饰性角标（字幕/画质/时长）；
+   「本地 / 在线」来源是可播性的功能信息，必须常显，不能藏在 hover 后面。 */
+body.cinema-skin .card .bl-tags {
+  opacity: 1;
+  pointer-events: none;
+}
+body.cinema-skin .card .bl-tags .tag:not(.src) {
+  opacity: 0;
+  transition: opacity var(--t-base, .2s);
+}
+body.cinema-skin .card .bl-tags .tag.src {
+  opacity: 1;
+  pointer-events: auto;          /* 保留来源 title 提示 */
+}
+body.cinema-skin .card:hover .bl-tags .tag:not(.src),
+body.cinema-skin .card:focus-within .bl-tags .tag:not(.src) {
+  opacity: 1;
+  pointer-events: auto;
+}
+/* 类型标签条只淡化、不折叠：折叠会在 hover 时撑开卡片导致整行跳动 */
+body.cinema-skin .card .meta-tags {
+  opacity: .42;
+  transition: opacity var(--t-base, .2s);
+}
+body.cinema-skin .card:hover .meta-tags,
+body.cinema-skin .card:focus-within .meta-tags { opacity: 1; }
+@media (hover: none) {
+  body.cinema-skin .card .bl-tags .tag:not(.src) { opacity: 1; pointer-events: auto; }
+  body.cinema-skin .card .meta-tags { opacity: 1; }
+}
+
+/* 字阶：让层级靠尺度说话，而不是靠更多标签 */
+body.cinema-skin .tb-title { font-size: 30px; }
+body.cinema-skin .ph-title { font-size: 26px; }
+body.cinema-skin .section-title { font-size: 15px; }
+body.cinema-skin .card .title { font-size: 15px; }
+@media (max-width: 720px) {
+  body.cinema-skin .tb-title { font-size: 22px; }
+  body.cinema-skin .ph-title { font-size: 20px; }
+  body.cinema-skin .card-grid { gap: 16px 12px; }
+}
+
+/* 呼吸感：区块之间再松一档 */
+body.cinema-skin .card-grid { gap: 32px 26px; }
+/* 工具栏内边距：原来是 28/22，一行 89px 里 50px 都是空白，
+   标题孤零零悬在中间、右侧控件又只有 30px，显得空荡。
+   收紧到 14/12 后整行约 65px，变成一条紧凑的控制条，内容区多出一屏空间。 */
+body.cinema-skin .toolbar { padding-top: 14px; padding-bottom: 12px; }
+
+/* ================= 工具栏收束（借鉴「界面退场」） =================
+   默认只留标题 / 计数 / 视图 / 播放 / 排序；高级控件收进「更多」。
+   用 checkbox + label 纯 CSS 实现，不引入组件状态、不改任何业务逻辑。 */
+body.cinema-skin .tb-more-toggle {
+  position: absolute;
+  width: 0; height: 0;
+  opacity: 0;
+  pointer-events: none;
+}
+body.cinema-skin .tb-extra { display: none; }
+body.cinema-skin .tb-more-toggle:checked ~ .tb-extra.btn-group { display: inline-flex; }
+body.cinema-skin .tb-more-toggle:checked ~ button.tb-extra { display: inline-flex; }
+body.cinema-skin .tb-more-label { cursor: pointer; user-select: none; }
+body.cinema-skin .tb-more-open { display: none; }
+body.cinema-skin .tb-more-toggle:checked ~ .tb-more-label .tb-more-closed { display: none; }
+body.cinema-skin .tb-more-toggle:checked ~ .tb-more-label .tb-more-open { display: inline; }
+
+/* 线性图标：统一尺寸，跟随文字色（替换 emoji 的现代化图标） */
+body.cinema-skin .ic { width: 15px; height: 15px; display: block; }
+body.cinema-skin .card .fav .ic { width: 13px; height: 13px; }
+body.cinema-skin .card .play-fab .ic { width: 14px; height: 14px; }
+
+/* ============================================================
+   6. 动效：一次编排的入场
+   ============================================================ */
+@keyframes cin-rise {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: none; }
+}
+@media (prefers-reduced-motion: no-preference) {
+  body.cinema-skin .card-grid .card {
+    animation: cin-rise .44s cubic-bezier(.16, .84, .3, 1) backwards;
+  }
+  body.cinema-skin .card-grid .card:nth-child(2) { animation-delay: 26ms; }
+  body.cinema-skin .card-grid .card:nth-child(3) { animation-delay: 52ms; }
+  body.cinema-skin .card-grid .card:nth-child(4) { animation-delay: 78ms; }
+  body.cinema-skin .card-grid .card:nth-child(5) { animation-delay: 104ms; }
+  body.cinema-skin .card-grid .card:nth-child(6) { animation-delay: 130ms; }
+  body.cinema-skin .card-grid .card:nth-child(7) { animation-delay: 156ms; }
+  body.cinema-skin .card-grid .card:nth-child(8) { animation-delay: 182ms; }
+  body.cinema-skin .card-grid .card:nth-child(n+9) { animation-delay: 208ms; }
+}
+
+/* 焦点态：全站统一红色描边 */
+body.cinema-skin :focus-visible {
+  outline: 2px solid var(--c-primary);
+  outline-offset: 2px;
+}
+
+/* 动效降级 */
+@media (prefers-reduced-motion: reduce) {
+  body.cinema-skin *,
+  body.cinema-skin *::before,
+  body.cinema-skin *::after {
+    animation-duration: .01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: .01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* ============================================================
+   7. 响应式
+   ============================================================ */
+
+/* 平板：侧栏收窄、留白收紧一档 */
+@media (max-width: 1180px) {
+  body.cinema-skin { --gutter-x: clamp(14px, 2.4vw, 30px); }
+  body.cinema-skin .card-grid { gap: 24px 18px; }
+  body.cinema-skin .set-rail,
+  body.cinema-skin .maint-rail { width: 132px; }
+}
+
+/* 窄屏：顶栏折行、卡片转横版 */
+@media (max-width: 900px) {
+  body.cinema-skin .topnav {
+    height: auto;
+    padding: 8px 14px;
+    gap: var(--sp-2);
+    flex-wrap: wrap;
+  }
+  body.cinema-skin .topnav .main-tabs {
+    order: 10;
+    flex: 1 1 100%;
+    margin: 4px 0 0;
+    gap: 2px;
+  }
+  body.cinema-skin .topnav .main-tabs .tab { height: 32px; }
+  body.cinema-skin .toolbar { padding: var(--sp-3) var(--gutter-x); }
+  body.cinema-skin .tb-title { font-size: 19px; }
+  body.cinema-skin .view-body { padding: var(--sp-4) var(--gutter-x) var(--sp-6); }
+  body.cinema-skin .set-shell,
+  body.cinema-skin .maint-shell { flex-direction: column; }
+  body.cinema-skin .set-rail,
+  body.cinema-skin .maint-rail {
+    width: 100%;
+    flex-direction: row;
+    overflow-x: auto;
+    overflow-y: hidden;
+    border-right: 0;
+    border-bottom: 1px solid var(--c-line);
+    padding: 8px var(--gutter-x);
+    gap: 4px;
+  }
+  body.cinema-skin .set-rail .rail-item,
+  body.cinema-skin .maint-rail .rail-item { width: auto; flex: none; white-space: nowrap; }
+  body.cinema-skin .set-rail .rail-group,
+  body.cinema-skin .maint-rail .rail-group { display: none; }
+}
+
+/* 手机：单列横版卡片，收紧所有留白 */
+@media (max-width: 600px) {
+  body.cinema-skin { --gutter-x: 12px; }
+  body.cinema-skin .page-head {
+    padding: var(--sp-3) var(--gutter-x) 10px;
+    min-height: 52px;
+    flex-wrap: wrap;
+  }
+  body.cinema-skin .ph-title { font-size: 20px; }
+  body.cinema-skin .toolbar { padding: 10px var(--gutter-x); gap: 8px; min-height: 52px; }
+  body.cinema-skin .tb-title { font-size: 18px; }
+  body.cinema-skin .card-grid { gap: 14px 10px; }
+  body.cinema-skin .card .play-fab,
+  body.cinema-skin .card .fav { opacity: 1; }
+  body.cinema-skin .card .title { font-size: 13px; }
+  body.cinema-skin .block { margin-top: 22px; }
+  body.cinema-skin .block-title { font-size: 15px; }
+}
+
+/* 极窄屏：卡片横向布局（封面左、信息右） */
+@media (max-width: 480px) {
+  body.cinema-skin .card-grid { grid-template-columns: 1fr; gap: 10px; }
+  body.cinema-skin .card { flex-direction: row; align-items: stretch; }
+  body.cinema-skin .card .thumb {
+    width: 116px;
+    flex: none;
+    height: auto;
+    aspect-ratio: 2 / 3;
+    border-radius: var(--r-card) 0 0 var(--r-card);
+  }
+  body.cinema-skin .card .meta {
+    flex: 1;
+    min-width: 0;
+    padding: 10px;
+    border-radius: 0 var(--r-card) var(--r-card) 0;
+  }
+  body.cinema-skin .card .title { -webkit-line-clamp: 3; }
+  body.cinema-skin .card:hover .thumb img { transform: none; }
+}
+
+/* 触屏：操作常显，避免 hover-only 交互失效 */
+@media (hover: none) {
+  body.cinema-skin .card .play-fab,
+  body.cinema-skin .card .fav { opacity: 1; }
+  body.cinema-skin .rail-nav { opacity: .92; }
+}
+
+/* 移动端不靠缩字号适配（借鉴 Infuse/Swiftfin）：减少列数与信息行即可，
+   文字保持可读。用更高特异性盖过上面窄屏里的旧字号。 */
+@media (max-width: 720px) {
+  body.cinema-skin .view .tb-title { font-size: 20px; }
+  body.cinema-skin .card .meta .title { font-size: 15px; }
+}
+
+/* ================= 细节工艺 =================
+   参考 Linear 的「细节分辨率」：把最后一批字符图标、发光阴影、
+   空态与按压反馈收干净，让每个可点元素都有确定的回应。 */
+body.cinema-skin .btn.tiny .ic,
+body.cinema-skin .seg .ic { width: 13px; height: 13px; }
+body.cinema-skin .chip .ic { width: 11px; height: 11px; }
+
+/* 选中态去掉发光阴影：与扁平菜单一致 */
+body.cinema-skin .chip.on { box-shadow: none; }
+
+/* 按压反馈统一到所有紧凑控件 */
+body.cinema-skin .chip:active,
+body.cinema-skin .seg button:active,
+body.cinema-skin .src-tab:active { transform: translateY(1px); }
+
+/* 空态：从「淡淡的 emoji」改为一个明确焦点 + 清晰的引导 */
+body.cinema-skin .empty { gap: 16px; }
+body.cinema-skin .empty .icon {
+  font-size: 0;
+  width: 48px; height: 48px;
+  position: relative;
+  opacity: 1;
+  border: 1px solid var(--c-line-strong);
+  border-radius: 50%;
+  background: var(--c-surface-2);
+}
+body.cinema-skin .empty .icon::after {
+  content: '';
+  position: absolute; left: 50%; top: 50%;
+  width: 6px; height: 6px;
+  border-radius: 50%;
+  background: var(--c-primary);
+  transform: translate(-50%, -50%);
+}
+body.cinema-skin .empty .title {
+  font-family: var(--cin-serif);
+  font-size: 20px;
+  font-weight: 400;
+  color: var(--c-text);
+}
+body.cinema-skin .empty .desc {
+  color: var(--c-text-3);
+  line-height: 1.7;
+}
+body.cinema-skin .empty .btn { margin-top: 4px; }
+
+/* ================= 细节工艺 · 第二轮 ================= */
+/* 1. 「更多」开关的隐形 checkbox 能被 Tab 聚焦，把焦点环转移到可见的 label */
+body.cinema-skin .tb-more-toggle:focus-visible ~ .tb-more-label {
+  outline: 2px solid var(--c-primary);
+  outline-offset: 2px;
+}
+
+/* 2. 浅色主题的骨架扫光：白色扫光在浅底上几乎看不见 */
+[data-theme='light'] body.cinema-skin .skeleton::after {
+  background: linear-gradient(90deg, transparent, rgba(22, 30, 50, .06), transparent);
+}
+
+/* 3. 提示气泡：延迟出现避免鼠标划过就弹，触屏没有 hover 直接隐藏 */
+body.cinema-skin [data-tip]::after {
+  font-family: var(--cin-mono);
+  font-size: 10px;
+  border-radius: 2px;
+  box-shadow: var(--sh-2);
+  transition-delay: .22s;
+}
+body.cinema-skin [data-tip]:hover::after { transition-delay: .22s; }
+@media (hover: none) {
+  body.cinema-skin [data-tip]::after { display: none; }
+}
+/* 减少动态效果时过渡时长已归零，延迟也要一起归零，否则提示会显得迟钝 */
+@media (prefers-reduced-motion: reduce) {
+  body.cinema-skin [data-tip]::after,
+  body.cinema-skin [data-tip]:hover::after { transition-delay: 0s; }
+}
+
+/* 5. 封面淡入 + 中性渐变占位：不依赖 loaded 状态，避免缓存图片硬出现 */
+body.cinema-skin .card .thumb {
+  background: linear-gradient(135deg, var(--c-surface-2), var(--c-surface-3));
+}
+body.cinema-skin .card .thumb img {
+  animation: cover-in .45s ease both;
+}
+@keyframes cover-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+/* 6. 一级标题统一：此前 .tb-title 30px / .ph-title 26px / 年度回顾 22px 三档并存。
+   同为页面主标题，读起来像三个不同层级的界面；统一到一档，窄屏同步。 */
+body.cinema-skin .view h1,
+body.cinema-skin .tb-title,
+body.cinema-skin .ph-title,
+body.cinema-skin .yr-title {
+  font-family: var(--cin-serif);
+  font-weight: 400;
+  font-size: 30px;
+  line-height: 1.25;
+}
+@media (max-width: 720px) {
+  body.cinema-skin .view h1,
+  body.cinema-skin .tb-title,
+  body.cinema-skin .ph-title,
+  body.cinema-skin .yr-title { font-size: 20px; }
+}
+
+/* 4. 禁用态：明确「不可点」，而不只是颜色变淡 */
+body.cinema-skin .btn:disabled,
+body.cinema-skin .chip:disabled {
+  opacity: .42;
+  cursor: not-allowed;
+}
+
+/* ============================================================
+   8. 浅色主题：中性灰底与层次
+   浅色不是反相：分区靠底色差而不是线条，卡片靠中性阴影浮起。
+   ============================================================ */
+[data-theme='light'] body.cinema-skin .topnav {
+  background: color-mix(in srgb, var(--c-bg) 88%, transparent);
+}
+[data-theme='light'] body.cinema-skin .card {
+  background: var(--c-surface);
+  border-color: var(--c-line);
+}
+[data-theme='light'] body.cinema-skin .card .thumb img {
+  filter: saturate(.86) brightness(1.02) contrast(.96);
+}
+[data-theme='light'] body.cinema-skin .card .tag {
+  background: rgba(22, 30, 50, .05);
+  border-color: var(--c-line);
+  color: var(--c-text-2);
+}
+[data-theme='light'] body.cinema-skin .card .play-fab {
+  background: rgba(255, 255, 255, .94);
+  border-color: var(--c-line-strong);
+  color: var(--c-text);
+}
+/* 表单控件：浅色下必须是浅底深字 */
+[data-theme='light'] body.cinema-skin input,
+[data-theme='light'] body.cinema-skin textarea,
+[data-theme='light'] body.cinema-skin select {
+  background: var(--c-surface-2);
+  color: var(--c-text);
+  border-color: var(--c-line);
+}
+[data-theme='light'] body.cinema-skin .sidebar { background: var(--c-bg); }
+[data-theme='light'] body.cinema-skin .filter-rail { background: transparent; }
+[data-theme='light'] body.cinema-skin .panel { background: var(--c-surface); }
+
+/* ---- 纸墨分层：浅色主题靠明度阶梯建立分区，而不是靠一圈发丝线 ----
+   从上到下四层：顶栏（最亮，浮起）→ 页头/工具栏（浅）→ 内容区（底纸）
+   → 侧栏筛选（略凹）。每张"纸"比下一层亮一档，投影给出前后关系。 */
+
+/* 顶栏：纯白实底 + 柔和底投影，成为最上面一张纸；不再半透明贴着内容 */
+[data-theme='light'] body.cinema-skin .topnav {
+  background: #ffffff;
+  box-shadow: 0 1px 0 var(--c-line), 0 6px 20px rgba(22, 30, 50, .06);
+}
+/* 页头 / 工具栏 / 筛选条：比内容底纸亮一档的浅白，分区靠底色不靠线 */
+[data-theme='light'] body.cinema-skin .page-head,
+[data-theme='light'] body.cinema-skin .toolbar {
+  background: color-mix(in srgb, var(--c-surface) 62%, var(--c-bg));
+}
+[data-theme='light'] body.cinema-skin .filter-bar {
+  background: color-mix(in srgb, var(--c-surface) 34%, var(--c-bg));
+}
+/* 内容区：极淡的冷灰径向底纹，让大片留白有呼吸而不是一片死白。
+   色差控制在肉眼刚能察觉的程度，不喧宾夺主。 */
+[data-theme='light'] body.cinema-skin .view-body {
+  background:
+    radial-gradient(80% 55% at 50% -8%, rgba(255, 255, 255, .9), transparent 72%),
+    linear-gradient(180deg, var(--c-bg), color-mix(in srgb, var(--c-bg) 96%, var(--c-text-3)));
+}
+/* 侧栏筛选 rail：比主内容略凹一档，和亮起的顶栏形成前后层次 */
+[data-theme='light'] body.cinema-skin .sidebar,
+[data-theme='light'] body.cinema-skin .filter-rail {
+  background: var(--c-bg-sunken);
+}
+
+/* 卡片 / 面板 / 统计卡：默认就带投影浮起（此前只有 hover 才有），
+   浅色下投影才是层次主来源，描边只是收边。卡片顶部再加一道极淡高光增强纸感。 */
+[data-theme='light'] body.cinema-skin .card,
+[data-theme='light'] body.cinema-skin .panel,
+[data-theme='light'] body.cinema-skin .stat-card,
+[data-theme='light'] body.cinema-skin .fcard,
+[data-theme='light'] body.cinema-skin .arch-box,
+[data-theme='light'] body.cinema-skin .tbl {
+  box-shadow: var(--sh-1), 0 8px 24px rgba(22, 30, 50, .05);
+}
+[data-theme='light'] body.cinema-skin .card:hover,
+[data-theme='light'] body.cinema-skin .stat-card:hover {
+  box-shadow: var(--sh-2), 0 12px 32px rgba(22, 30, 50, .08);
+}
+/* 片单的拼贴封面：给整块一组投影，避免几张图漂在白底上 */
+[data-theme='light'] body.cinema-skin .cl-collage,
+[data-theme='light'] body.cinema-skin .collection-card .cl-cover {
+  box-shadow: var(--sh-1);
+}

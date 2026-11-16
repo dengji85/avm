@@ -1,5 +1,8 @@
 <script setup>
+import { computed } from 'vue'
 import { state, NAV_TABS, NAV_MORE, NAV_ICONS } from '../state.js'
+
+const tabs = computed(() => NAV_TABS)
 
 function go(id) {
   state.view = id
@@ -20,7 +23,7 @@ function go(id) {
         <div class="mn-section">
           <div class="mn-group-title">{{ $t('navGroup.core') }}</div>
           <button
-            v-for="t in NAV_TABS"
+            v-for="t in tabs"
             :key="t.id"
             class="mn-item"
             :class="{ on: state.view === t.id }"

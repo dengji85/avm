@@ -112,7 +112,7 @@ function playQueue(movies) {
 </script>
 
 <template>
-  <section class="view">
+  <section class="view cinema">
     <div class="view-body home tight">
       <PageHead
         :title="$t('view.home')"

@@ -11,7 +11,8 @@ const saved = loadPrefs()
 /** 全局响应式状态 */
 export const state = reactive({
   // ---- 路由 / 视图 ----
-  view: 'home',
+  // 发现页已是事实首页（全屏海报 + 内容架），默认落这里；经典首页保留在「更多」菜单
+  view: 'discover',
 
   // 运行环境能力（来自 /server/info）：容器 / NAS 无桌面环境时，
   // 「用系统播放器」「在文件夹中显示」等入口据此隐藏。
@@ -222,10 +223,11 @@ export function clearPlayQueue() {
 /* ---------------- URL hash 路由（刷新/分享/前进后退 保持当前视图） ----------------
  * 规则：#/<view>                普通视图
  *       #/maintenance/<tab>     维护中心并定位到指定子 tab
- * 仅在合法视图 id 内生效，非法 hash 退回默认 home。
+ * 仅在合法视图 id 内生效，非法 hash 不改动当前视图（默认发现页）。
  */
-const VALID_VIEWS = ['home', 'gallery', 'stats', 'maintenance', 'actress', 'ai',
-  'collections', 'rankings', 'markers', 'swipe', 'settings', 'recent']
+const VALID_VIEWS = ['gallery', 'stats', 'maintenance', 'actress', 'ai',
+  'collections', 'rankings', 'markers', 'swipe', 'settings', 'recent',
+  'discover', 'yearReview']
 // 与 MaintenanceView 的 TABS 一一对应：白名单不全的话，切到未列出的子标签时
 // hash 不会更新，刷新/分享就回不到那一页。
 const VALID_MAINT = ['overview', 'missing', 'storage', 'sources', 'ad', 'subtitle',
@@ -235,13 +237,20 @@ function parseHash() {
   const raw = (location.hash || '').replace(/^#\/?/, '')
   if (!raw) return null
   const [view, sub] = raw.split('/')
+  // 旧版「沉浸空间」已下线：遗留书签与分享链接统一回落到影片库
+  if (view === 'immersive') return { view: 'gallery', sub: null }
   if (!VALID_VIEWS.includes(view)) return null
   return { view, sub }
 }
 
 function applyHashToState() {
   const r = parseHash()
-  if (!r) return
+  if (!r) {
+    // hash 非空但非法（如已下线的旧首页 #/home）：视图保持默认发现页，
+    // 同时把 URL 规范回默认视图，避免地址栏与实际页面不一致、分享出死链
+    if ((location.hash || '').replace(/^#\/?/, '')) location.hash = stateToHash()
+    return
+  }
   state.view = r.view
   if (r.view === 'maintenance' && r.sub && VALID_MAINT.includes(r.sub)) {
     state.maintTab = r.sub
@@ -277,6 +286,19 @@ export function applyTheme() {
   el.style.colorScheme = state.theme === 'light' ? 'light' : 'dark'
 }
 watch(() => [state.theme, state.density], applyTheme)
+
+/** 切换深/浅主题：顶栏与发现页共用同一入口，避免两处各写一份 */
+export function toggleTheme() {
+  state.theme = state.theme === 'dark' ? 'light' : 'dark'
+}
+
+/** 搜索跳转：写入关键词、回到第一页、切到影片库。顶栏与发现页共用。 */
+export function goSearch(q) {
+  const text = (q || '').trim()
+  if (text) state.q = text
+  state.page = 1
+  if (state.view !== 'gallery') state.view = 'gallery'
+}
 
 /** 重置全部筛选条件 */
 export function resetFilters() {
@@ -380,11 +402,13 @@ export const NAV_ICONS = {
   ext: 'M10 3a2 2 0 0 1 2 2v1h3.5a1.5 1.5 0 0 1 1.5 1.5V11h1a2 2 0 1 1 0 4h-1v3.5a1.5 1.5 0 0 1-1.5 1.5H12v-1a2 2 0 1 0-4 0v1H4.5A1.5 1.5 0 0 1 3 18.5V15H2a2 2 0 1 1 0-4h1V7.5A1.5 1.5 0 0 1 4.5 6H8V5a2 2 0 0 1 2-2z',
   // 标记墙：书签
   markers: 'M6 2h12a1 1 0 0 1 1 1v18l-7-4-7 4V3a1 1 0 0 1 1-1z',
+  // 推荐首页：取景框
+  discover: 'M4 7h3v2H6v3H4V7zm13-3h3v5h-2V6h-1V4zM4 17h2v3h3v2H4v-5zm14 0h2v5h-5v-2h3v-3zM8 9h8v6H8V9z',
 }
 
-/* 顶部主导航（Tab）：核心内容用文字，最近观看用图标，其余收进「更多」hover 菜单 */
+/* 顶部主导航（Tab）：发现页已是事实首页，排第一；最近观看用图标，其余收进「更多」 */
 export const NAV_TABS = [
-  { id: 'home', label: 'nav.home', icon: 'home', text: true },
+  { id: 'discover', label: 'nav.discover', icon: 'discover', text: true },
   { id: 'gallery', label: 'nav.gallery', icon: 'gallery', text: true },
   { id: 'collections', label: 'nav.collections', icon: 'collections', text: true },
   // 最近观看：图标（省空间）
@@ -422,7 +446,7 @@ export const NAV_SECONDARY = [
 /* 侧边栏分组导航（Sidebar.vue 使用，注意字段为 id/label/icon） */
 export const NAV_GROUPS = [
   { title: 'navGroup.browse', items: [
-    { id: 'home', label: 'nav.home', icon: 'gallery' },
+    { id: 'discover', label: 'nav.discover', icon: 'discover' },
     { id: 'gallery', label: 'nav.gallery', icon: 'gallery' },
     { id: 'actress', label: 'nav.actress', icon: 'actress' },
     { id: 'recent', label: 'nav.recent', icon: 'recent' },
@@ -436,6 +460,8 @@ export const NAV_GROUPS = [
     { id: 'settings', label: 'nav.settings', icon: 'settings' },
   ] },
 ]
+
+
 
 
 

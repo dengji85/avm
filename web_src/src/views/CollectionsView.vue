@@ -480,6 +480,9 @@ onBeforeUnmount(() => { window.removeEventListener('avm-toast', onPlaylistToast)
   grid-template-columns: repeat(auto-fill, minmax(228px, 1fr));
   gap: var(--sp-4);
   align-content: start;
+  /* 卡片按自身内容高度收缩：否则同一行里内容少的片单会被拉到最高卡片的高度，
+     封面下方留出一大块白底（浅色主题下尤其像坏掉的空白） */
+  align-items: start;
 }
 .coll-card {
   position: relative;
@@ -488,6 +491,7 @@ onBeforeUnmount(() => { window.removeEventListener('avm-toast', onPlaylistToast)
   border: 1px solid var(--c-line);
   overflow: hidden;
   cursor: pointer;
+  box-shadow: var(--sh-1);
   transition: transform var(--t-base), border-color var(--t-base), box-shadow var(--t-base);
 }
 .coll-card:hover { transform: translateY(-3px); border-color: var(--c-line-strong); box-shadow: var(--sh-2); }

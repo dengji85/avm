@@ -3827,6 +3827,52 @@ def recommend_movies(conn: sqlite3.Connection, limit: int = 30, seed: int = None
     items = scored[:max(1, int(limit or 30))]
     for it in items:
         it.pop("_k", None)
+
+    # 前端发现页要靠这些字段判断「能否自动播放片段」与展示标签，
+    # 打分用的轻量查询没带它们，这里对结果集一次性补齐，避免每部单独查库。
+    if items:
+        ids = [int(it["id"]) for it in items]
+        code_by_id = {int(it["id"]): (it.get("code") or "") for it in items}
+        ph = ",".join("?" for _ in ids)
+        extra: Dict[int, Dict[str, Any]] = {}
+        for r in query_all(conn, f"""
+            SELECT m.id,
+                   (SELECT COUNT(*) FROM movie_files f
+                      WHERE f.movie_id=m.id AND COALESCE(f.missing,0)=0
+                        AND COALESCE(f.kind,'local')<>'online') AS local_cnt,
+                   EXISTS(SELECT 1 FROM movie_files f WHERE f.movie_id=m.id
+                        AND COALESCE(f.missing,0)=0 AND COALESCE(f.kind,'local')<>'online'
+                        AND COALESCE(f.strm_url,'')<>'') AS has_strm,
+                   (SELECT COUNT(*) FROM movie_sources ms WHERE ms.movie_id=m.id) AS src_cnt,
+                   EXISTS(SELECT 1 FROM movie_sources ms WHERE ms.movie_id=m.id
+                        AND ms.available=1 AND ms.play_url<>''
+                        AND ms.status NOT IN ('invalid','unsupported')) AS online_ok,
+                   COALESCE(m.has_code,1) AS has_code
+              FROM movies m WHERE m.id IN ({ph})""", ids):
+            eid = int(r["id"])
+            local = int(r["local_cnt"] or 0) > 0
+            online = bool(r["online_ok"])
+            src = int(r["src_cnt"] or 0)
+            if local and src:
+                state = "hybrid"
+            elif local:
+                state = "local"
+            elif src and online:
+                state = "online"
+            elif src:
+                state = "page"
+            else:
+                state = "empty"
+            extra[eid] = {
+                "local_playable": local, "online_playable": online,
+                "has_strm": bool(r["has_strm"]), "source_state": state,
+                "display_code": code_by_id.get(eid, "") if int(r["has_code"]) else "",
+                "actresses": [aname[aid] for aid in amap.get(eid, []) if aid in aname][:8],
+                "genres": [gname[gid] for gid in gmap.get(eid, []) if gid in gname][:8],
+                "tags": [],
+            }
+        for it in items:
+            it.update(extra.get(int(it["id"]), {}))
     return {"items": items, "has_history": has_history,
             "total": len(scored), "explore": exp}
 

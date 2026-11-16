@@ -122,7 +122,7 @@ async function play(e) {
         referrerpolicy="no-referrer"
         alt=""
         @load="(e) => { loaded = true }"
-        @error="(e) => { loaded = true; coverFallback(e) }"
+        @error="(e) => { loaded = true; coverFallback(e); e.target.classList.add('is-fallback') }"
       />
       <div v-if="!loaded" class="skeleton abs"></div>
 
@@ -132,7 +132,7 @@ async function play(e) {
       </div>
       <div v-else-if="progressFinished" class="done-badge" title="已看完">✓</div>
 
-      <!-- 左上：多选 / 番号 -->
+      <!-- 左上：多选（番号移到卡片信息区，不再压在封面上） -->
       <input
         v-if="selectable"
         class="pick"
@@ -140,15 +140,13 @@ async function play(e) {
         :checked="selected"
         @click="pick"
       />
-      <div class="tl" v-show="!state.selMode && !selected">
-        <span v-if="m.code" class="tag code">{{ m.code }}</span>
-      </div>
 
       <!-- 右上：收藏 + 加片单 -->
       <div class="tr">
         <AddToCollectionBtn :movie-id="m.id" variant="card" />
         <button class="fav" :class="{ on: m.favorite }" @click="fav" :data-tip="m.favorite ? '取消收藏' : '收藏'">
-          {{ m.favorite ? '♥' : '♡' }}
+          <svg v-if="m.favorite" class="ic" viewBox="0 0 24 24" fill="currentColor"><path d="M12 21C7.2 16.6 3 13.2 3 9.3 3 6.6 5.1 4.5 7.8 4.5c1.7 0 3.2.9 4.2 2.3 1-1.4 2.5-2.3 4.2-2.3 2.7 0 4.8 2.1 4.8 4.8 0 3.9-4.2 7.3-9 11.7z"/></svg>
+  <svg v-else class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M12 21C7.2 16.6 3 13.2 3 9.3 3 6.6 5.1 4.5 7.8 4.5c1.7 0 3.2.9 4.2 2.3 1-1.4 2.5-2.3 4.2-2.3 2.7 0 4.8 2.1 4.8 4.8 0 3.9-4.2 7.3-9 11.7z"/></svg>
         </button>
       </div>
 
@@ -157,7 +155,7 @@ async function play(e) {
         class="play-fab"
         @click="play"
         :data-tip="state.playerMode === 'external' ? $t('player.external') : $t('player.playBtn')"
-      >▶</button>
+      ><svg class="ic" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5.5v13l10.5-6.5z"/></svg></button>
 
       <!-- 底部标记 -->
       <div class="bl-tags">
@@ -188,6 +186,7 @@ async function play(e) {
         <span v-if="tagOverflow > 0" class="tag more">+{{ tagOverflow }}</span>
       </div>
       <div class="sub">
+        <span v-if="m.code" class="cd" :title="m.code">{{ m.code }}</span>
         <span v-if="m.rating" class="rate">★ {{ m.rating }}</span>
         <span v-if="m.studio" class="ellipsis">{{ m.studio }}</span>
         <span v-else-if="m.site_count" class="dim">{{ $t('card.siteCount', { n: m.site_count }) }}</span>

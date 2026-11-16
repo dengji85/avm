@@ -219,7 +219,7 @@ async function finish(scan = true) {
 }
 
 function enterGallery() { state.onboarded = true; state.view = 'gallery' }
-function enterApp() { state.onboarded = true; state.view = 'home' }
+function enterApp() { state.onboarded = true; state.view = 'discover' }
 function backToDir() { step.value = 2; phase.value = 'ready' }
 function retry() { runAndCheck() }
 

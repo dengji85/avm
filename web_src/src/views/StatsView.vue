@@ -1595,10 +1595,10 @@ function insightText(it) {
 .fv { font-size: 20px; font-weight: 800; line-height: 1.1; }
 .fl { font-size: 11px; color: var(--c-text-3); }
 .fcard.gold .fv { color: var(--c-gold); }
-.fcard.accent .fv { color: var(--c-accent); }
+.fcard.accent .fv { color: var(--c-data); }
 .fcard.ok .fv { color: #2fae6a; }
 .fcard.gold .fi { color: var(--c-gold); }
-.fcard.accent .fi { color: var(--c-accent); }
+.fcard.accent .fi { color: var(--c-data); }
 .fcard.ok .fi { color: #2fae6a; }
 
 /* 收藏质量 */
@@ -1615,23 +1615,23 @@ function insightText(it) {
   display: grid; grid-template-columns: minmax(72px, auto) minmax(0, 1fr) minmax(0, 2.4fr) 56px; align-items: center; gap: 12px;
   min-height: 40px;
   border: 0; background: none; color: var(--c-text); font: inherit; text-align: left; cursor: pointer;
-  padding: 4px 8px; border-radius: 10px; min-width: 0;
+  padding: 4px 8px; border-radius: var(--r-sm); min-width: 0;
   transition: background .12s;
 }
 .bar-row:hover { background: var(--c-surface-2); }
 .rank { color: var(--c-primary); font-weight: 700; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; color: var(--c-text-1); }
 .track { height: 8px; background: var(--c-surface-2); border-radius: 99px; overflow: hidden; }
-.track i { display: block; height: 100%; background: linear-gradient(90deg, var(--c-primary), var(--c-accent)); border-radius: 99px; transition: width .4s; }
-.track i.disk { background: linear-gradient(90deg, var(--c-primary), color-mix(in srgb, var(--c-primary) 55%, var(--c-accent))); }
-.track i.disk2 { background: linear-gradient(90deg, var(--c-accent), color-mix(in srgb, var(--c-accent) 55%, var(--c-primary))); }
+.track i { display: block; height: 100%; background: linear-gradient(90deg, var(--c-primary), var(--c-data)); border-radius: 99px; transition: width .4s; }
+.track i.disk { background: linear-gradient(90deg, var(--c-primary), color-mix(in srgb, var(--c-primary) 55%, var(--c-data))); }
+.track i.disk2 { background: linear-gradient(90deg, var(--c-data), color-mix(in srgb, var(--c-data) 55%, var(--c-primary))); }
 .track i.ok { background: linear-gradient(90deg, #2fae6a, #4cd295); }
 .track i.warn { background: linear-gradient(90deg, #e0a32e, #f3c45a); }
 .val { text-align: right; font-variant-numeric: tabular-nums; color: var(--c-text-2); white-space: nowrap; }
 .file-ext {
   font-size: 11px; font-weight: 700; letter-spacing: .4px; text-align: center;
-  padding: 3px 8px; border-radius: 6px; color: var(--c-accent);
-  background: color-mix(in srgb, var(--c-accent) 16%, transparent);
+  padding: 3px 8px; border-radius: 6px; color: var(--c-data);
+  background: color-mix(in srgb, var(--c-data) 16%, transparent);
   white-space: nowrap;
 }
 .file-row { cursor: pointer; }
@@ -1653,14 +1653,14 @@ function insightText(it) {
 .legend { display: flex; gap: 14px; font-size: 12px; color: var(--c-text-3); }
 .legend .lg::before { content: ''; display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: 5px; vertical-align: -1px; }
 .legend .lg.count::before { background: var(--c-primary); }
-.legend .lg.mins::before { background: var(--c-accent); }
+.legend .lg.mins::before { background: var(--c-data); }
 .year-trend { display: flex; flex-direction: column; gap: 10px; }
 .yt-row { display: grid; grid-template-columns: 48px 1fr 150px; align-items: center; gap: 10px; }
 .yt-year { font-weight: 700; color: var(--c-text-2); font-variant-numeric: tabular-nums; }
 .yt-bars { display: flex; flex-direction: column; gap: 5px; }
 .track.sm { height: 7px; }
 .track.sm i.count { background: var(--c-primary); }
-.track.sm i.mins { background: var(--c-accent); }
+.track.sm i.mins { background: var(--c-data); }
 .yt-val { text-align: right; font-size: 12px; color: var(--c-text-3); }
 
 /* 趣味榜单 */
@@ -1680,7 +1680,7 @@ function insightText(it) {
 .tc { color: var(--c-primary); font-weight: 600; }
 
 /* 一览表 */
-.tbl { display: flex; flex-direction: column; border-radius: 10px; min-width: 0; }
+.tbl { display: flex; flex-direction: column; border-radius: var(--r-sm); min-width: 0; }
 .trow { display: grid; grid-template-columns: minmax(0, 1fr) 60px 70px 60px 110px; align-items: center; gap: 10px; padding: 8px 10px; border-bottom: 1px solid var(--c-line); cursor: pointer; font-size: 13px; min-width: 0; background: none; color: inherit; font: inherit; text-align: left; width: 100%; border-left: 0; border-right: 0; border-top: 0; }
 .trow:hover { background: var(--c-surface-2); }
 .trow.th { background: var(--c-surface); font-weight: 700; color: var(--c-text-2); cursor: default; border-bottom: 2px solid var(--c-line); }
@@ -1691,7 +1691,7 @@ function insightText(it) {
 .c-rating, .c-runtime, .c-year { text-align: right; }
 .pill { display: inline-block; padding: 1px 7px; border-radius: 99px; font-size: 11px; font-weight: 600; }
 .pill.gold { background: rgba(240,180,40,.16); color: var(--c-gold); }
-.pill.accent { background: rgba(120,120,255,.16); color: var(--c-accent); }
+.pill.accent { background: var(--c-accent-soft); color: var(--c-accent); }
 .pill.ok { background: rgba(47,174,106,.16); color: #2fae6a; }
 .pill.muted { background: var(--c-surface-2); color: var(--c-text-3); }
 
@@ -1732,7 +1732,7 @@ function insightText(it) {
 .wl-tbl .c-method { text-align: right; }
 .wl-tbl .pill { display: inline-block; padding: 1px 9px; border-radius: 99px; font-size: 11px; font-weight: 600; }
 .wl-tbl .pill.ok { background: rgba(47,174,106,.16); color: #2fae6a; }
-.wl-tbl .pill.accent { background: rgba(120,120,255,.16); color: var(--c-accent); }
+.wl-tbl .pill.accent { background: var(--c-accent-soft); color: var(--c-accent); }
 .wl-tbl .pill.muted { background: var(--c-surface-2); color: var(--c-text-3); }
 .wl-tbl .trow.no-src .c-movie { color: var(--c-text-3); }
 .wl-tbl .pill.nosrc { background: var(--c-surface-2); color: var(--c-text-3); border: 1px solid var(--c-line); }
@@ -1765,10 +1765,10 @@ function insightText(it) {
 .cal-cell { width: 12px; height: 12px; border-radius: 2px; background: var(--c-bg-hover, rgba(255, 255, 255, .06)); }
 .cal-cell.out { opacity: .35; }
 .cal-cell.future { opacity: .18; }
-.cal-cell.lv1 { background: color-mix(in srgb, var(--c-accent) 22%, transparent); }
-.cal-cell.lv2 { background: color-mix(in srgb, var(--c-accent) 45%, transparent); }
-.cal-cell.lv3 { background: color-mix(in srgb, var(--c-accent) 70%, transparent); }
-.cal-cell.lv4 { background: var(--c-accent); }
+.cal-cell.lv1 { background: color-mix(in srgb, var(--c-data) 22%, transparent); }
+.cal-cell.lv2 { background: color-mix(in srgb, var(--c-data) 45%, transparent); }
+.cal-cell.lv3 { background: color-mix(in srgb, var(--c-data) 70%, transparent); }
+.cal-cell.lv4 { background: var(--c-data); }
 .cal-foot { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-3); margin-top: var(--sp-2); flex-wrap: wrap; }
 .cal-legend { display: inline-flex; align-items: center; gap: 3px; }
 .cal-legend .cal-cell { display: inline-block; }
@@ -1778,14 +1778,14 @@ function insightText(it) {
 .taste-radar { width: 100%; height: auto; max-width: 340px; }
 .radar-ring { fill: none; stroke: var(--c-border); stroke-width: 1; opacity: .55; }
 .radar-axis { stroke: var(--c-border); stroke-width: 1; opacity: .4; }
-.radar-area { fill: color-mix(in srgb, var(--c-accent) 26%, transparent); stroke: var(--c-accent); stroke-width: 2; }
-.radar-dot { fill: var(--c-accent); }
+.radar-area { fill: color-mix(in srgb, var(--c-data) 26%, transparent); stroke: var(--c-data); stroke-width: 2; }
+.radar-dot { fill: var(--c-data); }
 .radar-label { font-size: 11px; fill: var(--c-text-2); }
 .taste-dims { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 7px; }
 .taste-dims li { display: grid; grid-template-columns: 76px 1fr 104px; align-items: center; gap: 8px; font-size: var(--fs-xs); }
 .td-name { color: var(--c-text-2); }
 .td-bar { display: block; height: 6px; border-radius: 3px; background: var(--c-bg-hover); overflow: hidden; }
-.td-bar i { display: block; height: 100%; background: var(--c-accent); border-radius: 3px; }
+.td-bar i { display: block; height: 100%; background: var(--c-data); border-radius: 3px; }
 .td-val { color: var(--c-text-3); text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .wa-hours { display: flex; align-items: flex-end; gap: 3px; height: 160px; padding: 8px 4px 0; }
 .wa-hour { flex: 1; display: flex; flex-direction: column; align-items: center; height: 100%; justify-content: flex-end; gap: 4px; }
@@ -1794,7 +1794,7 @@ function insightText(it) {
 
 .wa-months { display: flex; align-items: flex-end; gap: 6px; height: 180px; padding: 8px 4px 0; }
 .wa-month { flex: 1; display: flex; flex-direction: column; align-items: center; height: 100%; justify-content: flex-end; gap: 4px; }
-.wa-month-bar { width: 70%; min-height: 2px; border-radius: 3px 3px 0 0; background: linear-gradient(180deg, var(--c-accent), color-mix(in srgb, var(--c-accent) 55%, #000)); cursor: default; }
+.wa-month-bar { width: 70%; min-height: 2px; border-radius: 3px 3px 0 0; background: linear-gradient(180deg, var(--c-data), color-mix(in srgb, var(--c-data) 55%, #000)); cursor: default; }
 .wa-month-label { font-size: 10px; color: var(--c-text-3); }
 
 .wa-pref { display: grid; grid-template-columns: 1fr; gap: var(--sp-4); }
@@ -1814,8 +1814,8 @@ function insightText(it) {
 /* 观看分析子页切换 */
 .wa-seg { display: flex; gap: var(--sp-2); margin-bottom: var(--sp-3); flex-wrap: wrap; }
 .wa-seg button { padding: 7px 16px; border-radius: 999px; border: 1px solid var(--c-border); background: var(--c-bg-soft); color: var(--c-text-2); font-size: var(--fs-sm); cursor: pointer; transition: .15s; }
-.wa-seg button:hover { border-color: var(--c-accent); }
-.wa-seg button.on { background: var(--c-accent); color: #fff; border-color: var(--c-accent); }
+.wa-seg button:hover { border-color: var(--c-data); }
+.wa-seg button.on { background: var(--c-data); color: #fff; border-color: var(--c-data); }
 
 /* 洞察卡片 */
 .wa-insights { display: flex; flex-direction: column; gap: var(--sp-2); }
@@ -1823,13 +1823,13 @@ function insightText(it) {
 .wa-insight-icon { font-size: 18px; line-height: 1.2; }
 .wa-insight.tone-ok { border-left-color: var(--c-ok); }
 .wa-insight.tone-warn { border-left-color: #e0a000; }
-.wa-insight.tone-accent { border-left-color: var(--c-accent); }
+.wa-insight.tone-accent { border-left-color: var(--c-data); }
 .wa-insight.tone-muted { border-left-color: var(--c-text-3); }
 
 /* 星期节律 */
 .wa-weekday { display: flex; align-items: flex-end; gap: 6px; height: 160px; padding: 8px 4px 0; }
 .wa-wd { flex: 1; display: flex; flex-direction: column; align-items: center; height: 100%; justify-content: flex-end; gap: 4px; }
-.wa-wd-bar { width: 60%; min-height: 2px; border-radius: 3px 3px 0 0; background: linear-gradient(180deg, var(--c-accent), color-mix(in srgb, var(--c-accent) 55%, #000)); }
+.wa-wd-bar { width: 60%; min-height: 2px; border-radius: 3px 3px 0 0; background: linear-gradient(180deg, var(--c-data), color-mix(in srgb, var(--c-data) 55%, #000)); }
 .wa-wd-label { font-size: 10px; color: var(--c-text-3); }
 
 /* 趋势 */

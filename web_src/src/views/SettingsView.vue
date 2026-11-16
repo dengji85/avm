@@ -43,9 +43,17 @@ const TABS = [
 const BASIC_TABS = ['library', 'scraper', 'ext', 'about']
 const visibleTabs = computed(() => basicOnly.value ? TABS.filter((x) => BASIC_TABS.includes(x[0])) : TABS)
 /* 左栏图标：让 9 组设置有稳定的视觉锚点，扫读比逐行读字快 */
+/* 分类图标：统一的线性 SVG path（stroke=currentColor），跟随选中态配色 */
 const TAB_ICONS = {
-  general: '⚙️', library: '📚', scraper: '🔎', subtitles: '💬', ingest: '🧩',
-  remote: '🌐', privacy: '🔒', ext: '🧰', about: 'ℹ️',
+  general: 'M4 7h16M4 12h16M4 17h16M9 5v4M15 10v4M8 15v4',
+  library: 'M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z',
+  scraper: 'M10.5 3a7.5 7.5 0 1 0 4.7 13.4l4.7 4.7 1.4-1.4-4.7-4.7A7.5 7.5 0 0 0 10.5 3zm0 2a5.5 5.5 0 1 1 0 11 5.5 5.5 0 0 1 0-11z',
+  subtitles: 'M4 5h16a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H9l-5 3V6a1 1 0 0 1 1-1zM7 10h6M7 13h9',
+  ingest: 'M10 3a2 2 0 0 1 2 2v1h3.5a1.5 1.5 0 0 1 1.5 1.5V11h1a2 2 0 1 1 0 4h-1v3.5a1.5 1.5 0 0 1-1.5 1.5H12v-1a2 2 0 1 0-4 0v1H4.5A1.5 1.5 0 0 1 3 18.5V15H2a2 2 0 1 1 0-4h1V7.5A1.5 1.5 0 0 1 4.5 6H8V5a2 2 0 0 1 2-2z',
+  remote: 'M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18zM3 12h18M12 3c2.5 2.5 3.5 5.5 3.5 9s-1 6.5-3.5 9c-2.5-2.5-3.5-5.5-3.5-9s1-6.5 3.5-9z',
+  privacy: 'M6 10V7a6 6 0 0 1 12 0v3M5 10h14a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1v-9a1 1 0 0 1 1-1zM12 15v2',
+  ext: 'M3 8h18v12H3zM8 8V6a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2M3 13h18M10 13v2h4v-2',
+  about: 'M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18zM12 11v6M12 7.5v.5',
 }
 const tab = ref('library')
 /* 本机回环访问：不展示浏览器插件配对 / 安装入口（本地环境没有配对场景） */
@@ -1560,7 +1568,8 @@ onMounted(async () => {
           role="tab"
           @click="tab = t[0]"
         >
-          <span class="t-ico">{{ TAB_ICONS[t[0]] }}</span><span class="rail-label">{{ $t(t[1]) }}</span>
+          <svg class="t-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path :d="TAB_ICONS[t[0]]" /></svg>
+          <span class="rail-label">{{ $t(t[1]) }}</span>
         </button>
       </aside>
 
@@ -1572,7 +1581,7 @@ onMounted(async () => {
           <div class="panel-body">
             <ul v-if="(cfg.library.paths || []).length" class="path-list">
               <li v-for="(p, i) in cfg.library.paths" :key="i">
-                <span class="pi">📁</span>
+                <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" /></svg>
                 <span class="pp ellipsis" :title="p">{{ p }}</span>
                 <button class="btn tiny ghost" @click="delPath(i)">{{ $t('settings.remove') }}</button>
               </li>
@@ -1587,7 +1596,8 @@ onMounted(async () => {
                 :class="['btn', 'tiny', (cfg.library.paths || []).includes(m.target) ? 'primary' : 'ghost']"
                 @click="addMount(m.target)"
               >
-                📁 {{ m.target }}
+                <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" /></svg>
+                {{ m.target }}
                 <span v-if="m.root && m.root !== '/' && prettyHostPath(m.root) !== m.target" class="muted">
                   ← {{ prettyHostPath(m.root) }}
                 </span>
@@ -2467,7 +2477,7 @@ onMounted(async () => {
               <span class="hint">{{ $t('settings.tokenRotateHint') }}</span>
             </div>
             <div class="fw-tip" v-else-if="!confirmAct && serverInfo.token_env_locked">
-              <div class="fw-tip-title">🔒 {{ $t('settings.tokenEnvLocked') }}</div>
+              <div class="fw-tip-title">{{ $t('settings.tokenEnvLocked') }}</div>
               <div class="fw-tip-body">{{ $t('settings.tokenEnvLockedHint') }}</div>
             </div>
 
@@ -2484,7 +2494,7 @@ onMounted(async () => {
                   <div class="muted sm center">{{ $t('settings.scanHint') }}</div>
                 </div>
                 <div class="qr-off" v-else>
-                  <div class="qr-off-title">🔒 {{ $t('settings.qrUnavailable') }}</div>
+                  <div class="qr-off-title">{{ $t('settings.qrUnavailable') }}</div>
                   <div class="muted sm">{{ $t('settings.qrNeedLogin') }}</div>
                 </div>
                 <div class="lan-urls">
@@ -2977,7 +2987,8 @@ onMounted(async () => {
             </div>
             <ul class="dir-list">
               <li v-for="d in browser.dirs" :key="d.path" @click="browse(d.path)">
-                <span>📁</span><span class="ellipsis">{{ d.name }}</span>
+                <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" /></svg>
+                <span class="ellipsis">{{ d.name }}</span>
               </li>
               <li v-if="!browser.dirs.length" class="muted nohover">{{ $t('settings.noSubDir') }}</li>
             </ul>
@@ -3013,7 +3024,7 @@ onMounted(async () => {
   background: var(--c-primary-soft); color: var(--c-primary-h);
   font-weight: 600; box-shadow: inset 2px 0 0 var(--c-primary);
 }
-.rail-item .t-ico { width: 18px; text-align: center; flex: none; }
+.rail-item .t-ico { width: 18px; height: 18px; display: block; flex: none; }
 .rail-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .set-shell .view-body { min-width: 0; }
 /* 窄屏：左栏转成横向滚动条 */

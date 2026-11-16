@@ -21,7 +21,8 @@
 
   --c-text:          #f1f3f8;   /* 主文本 */
   --c-text-2:        #b6bed0;   /* 次文本 */
-  --c-text-3:        #6b7690;   /* 弱化/占位 */
+  --c-text-3:        #7d89a4;   /* 弱化/占位（对 --c-surface 对比度 ≥ 5:1） */
+  --c-paper:         #f2ede3;   /* 展示字色：与衬线体搭配的暖白 */
 
   /* ---------- 色板：品牌与语义 ---------- */
   --c-primary:       #e0355a;   /* 品牌主色（玫红） */
@@ -32,8 +33,11 @@
   /* 选中态底色：14% 叠在深灰上几乎看不出来，单独给一档更实的 */
   --c-primary-soft-strong: rgba(224, 53, 90, .26);
 
-  --c-accent:        #4d8dff;   /* 信息/链接 */
-  --c-accent-soft:   rgba(77, 141, 255, .14);
+  --c-accent:        #e0355a;   /* 信息/链接：与品牌主色同源，全站只保留一个强调色 */
+  --c-accent-soft:   rgba(224, 53, 90, .14);
+  /* 数据色：仅用于统计页的数据编码（图表/热力/进度），与交互强调色区分 */
+  --c-data:          #4d8dff;
+  --c-data-soft:     rgba(77, 141, 255, .16);
 
   --c-ok:            #2fb87a;
   --c-ok-soft:       rgba(47, 184, 122, .14);
@@ -50,13 +54,40 @@
 
   --c-gold:          #f5c451;   /* 评分星 */
 
-  /* ---------- 圆角 ---------- */
-  --r-xs: 4px;
+  /* ---------- 字体族 ----------
+     与「发现页」同一套栈，全部走本地字体，离线可用：
+       --c-serif  展示字（页面标题、区块标题、影片名）
+       --c-sans   界面正文
+       --c-mono   元信息、编号、计数、角标
+     变量必须先定义：未定义时 var() 会让整条 font 声明失效并退回浏览器默认字体。 */
+  --c-sans: 'Avenir Next', 'Futura', 'Inter', -apple-system, BlinkMacSystemFont,
+            'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
+  --c-serif: 'Didot', 'Bodoni MT', 'Playfair Display', Georgia,
+             'Songti SC', 'Noto Serif CJK SC', serif;
+  --c-mono: 'IBM Plex Mono', 'JetBrains Mono', ui-monospace, SFMono-Regular,
+            Menlo, Consolas, monospace;
+
+  /* 字距档位：展示字收紧、小字号标签放开 */
+  --ls-tight: -.01em;
+  --ls-wide: .06em;
+  --ls-caps: .22em;
+
+  /* ---------- 圆角 ----------
+     与发现页对齐的分级（按角色，不按页面）：
+       内容载体（卡片 / 封面 / 相框）→ 6px，有实体感
+       矩形控件（按钮 / 输入框 / 下拉）→ 6px
+       胶囊（标签 / 筛选项 / 搜索）→ 全圆
+       纯图标动作 → 50% 圆
+       浮层（弹窗 / 抽屉）→ 10px，明确「浮在内容之上」 */
+  --r-xs: 3px;
   --r-sm: 6px;
-  --r-md: 10px;
-  --r-lg: 14px;
-  --r-xl: 20px;
+  --r-md: 6px;
+  --r-lg: 10px;
+  --r-xl: 14px;
   --r-full: 999px;
+  --r-ctl: 6px;
+  --r-card: 6px;
+  --r-modal: 10px;
 
   /* ---------- 间距（4pt 栅格） ---------- */
   --sp-1: 4px;
@@ -71,17 +102,17 @@
   /* ---------- 字号 ---------- */
   --fs-xs: 11px;
   --fs-sm: 12px;
-  --fs-md: 13px;
-  --fs-lg: 15px;
-  --fs-xl: 18px;
-  --fs-2xl: 24px;
-  --fs-3xl: 32px;
+  --fs-md: 14px;
+  --fs-lg: 16px;
+  --fs-xl: 20px;
+  --fs-2xl: 28px;
+  --fs-3xl: 34px;
 
-  /* ---------- 阴影 ---------- */
-  --sh-1: 0 1px 2px rgba(0, 0, 0, .30);
-  --sh-2: 0 4px 12px rgba(0, 0, 0, .40);
-  --sh-3: 0 12px 32px rgba(0, 0, 0, .52);
-  --sh-4: 0 24px 64px rgba(0, 0, 0, .62);
+  /* ---------- 阴影（柔和分层：卡片有实体感，浮层才用重阴影） ---------- */
+  --sh-1: 0 1px 2px rgba(0, 0, 0, .26);
+  --sh-2: 0 4px 14px rgba(0, 0, 0, .32);
+  --sh-3: 0 14px 36px rgba(0, 0, 0, .42);
+  --sh-4: 0 28px 70px rgba(0, 0, 0, .55);
   --sh-glow: 0 0 0 3px var(--c-primary-soft);
 
   /* ---------- 动效 ---------- */
@@ -158,22 +189,28 @@
 [data-theme='light'] {
   color-scheme: light;
 
-  --c-bg:            #eef0f5;
-  --c-bg-sunken:     #e3e6ec;
+  /* 中性浅灰底：暖纸底大面积铺开偏黄发闷，和玫红叠也浑。
+     换成微冷的浅灰，干净通透；关键是底色与纯白卡片拉开明度差，
+     卡片才浮得起来，留白才有层次而不是一片糊。 */
+  --c-bg:            #f3f4f6;
+  --c-bg-sunken:     #e9ebee;
   --c-surface:       #ffffff;
-  --c-surface-2:     #f4f5f9;
-  --c-surface-3:     #e9ecf2;
-  --c-overlay:       rgba(20, 24, 33, .48);
+  --c-surface-2:     #f7f8fa;
+  --c-surface-3:     #eceef1;
+  --c-overlay:       rgba(22, 27, 38, .38);
 
-  --c-line:          #d4d8e2;
-  --c-line-strong:   #bec4d1;
+  --c-line:          #e2e5ea;
+  --c-line-strong:   #cbd0d8;
 
-  --c-text:          #171922;
-  --c-text-2:        #303647;
-  --c-text-3:        #5b6375;
+  --c-text:          #1c1f27;
+  --c-text-2:        #494f5d;
+  --c-text-3:        #737a89;
+  --c-paper:         #1c1f27;
 
   /* 浅色主题选中态：玫红 14% 加白底也很淡，同样给一档更实的 */
   --c-primary-soft-strong: rgba(224, 53, 90, .18);
+  --c-data:          #1f6ad0;
+  --c-data-soft:     rgba(31, 106, 208, .14);
 
   /* 补充语义色在浅底上要压深一档，否则对比度不足 */
   --c-info:          #1f6ad0;
@@ -181,10 +218,12 @@
   --c-violet:        #8e44ad;
   --c-violet-soft:   rgba(142, 68, 173, .12);
 
-  --sh-1: 0 1px 2px rgba(20, 24, 33, .06);
-  --sh-2: 0 4px 12px rgba(20, 24, 33, .10);
-  --sh-3: 0 12px 32px rgba(20, 24, 33, .14);
-  --sh-4: 0 24px 64px rgba(20, 24, 33, .18);
+  /* 阴影：中性冷灰。浅底上卡片必须靠阴影浮起，不能只靠描边——
+     描边在浅色下几乎看不见，投影才是层次的主要来源。 */
+  --sh-1: 0 1px 2px rgba(22, 30, 50, .08), 0 2px 6px rgba(22, 30, 50, .05);
+  --sh-2: 0 4px 12px rgba(22, 30, 50, .10), 0 10px 28px rgba(22, 30, 50, .06);
+  --sh-3: 0 14px 34px rgba(22, 30, 50, .14);
+  --sh-4: 0 26px 64px rgba(22, 30, 50, .20);
 }
 
 /* 紧凑密度（通过 <html data-density="compact">） */

@@ -68,6 +68,7 @@ import MaintenanceView from './views/MaintenanceView.vue'
 import SettingsView from './views/SettingsView.vue'
 import AiCenterView from './views/AiCenterView.vue'
 import YearReviewView from './views/YearReviewView.vue'
+import DiscoverView from './views/DiscoverView.vue'
 import OnboardingView from './views/OnboardingView.vue'
 import GuidePanel from './components/GuidePanel.vue'
 
@@ -86,7 +87,11 @@ const VIEWS = {
   settings: SettingsView,
   ai: AiCenterView,
   yearReview: YearReviewView,
+  discover: DiscoverView,
 }
+
+/* 推荐首页是全屏布局：视图内自带悬浮在海报之上的菜单，隐藏经典导航与 AI 悬浮球 */
+const fullBleed = computed(() => state.view === 'discover')
 
 const tasks = useTasks()
 
@@ -228,14 +233,14 @@ function onFilterChange() { /* 由各视图自行响应 state 变化 */ }
   <div class="app">
     <!-- 后端离线常驻横幅：服务未启动 / 连接被拒时显示，恢复后自动消失 -->
     <div v-if="serverOffline" class="offline-banner" role="alert">
-      ⚠ {{ $t('guide.serverOffline') }}
+      <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3L2 21h20L12 3zM12 9v5M12 17.5v.5"/></svg> {{ $t('guide.serverOffline') }}
     </div>
-    <TopNav />
-    <MobileNav />
+    <TopNav v-if="!fullBleed" />
+    <MobileNav v-if="!fullBleed" />
 
     <!-- 未设置快速解锁码：提醒一次（被长令牌卡过两次再提醒一次） -->
     <div v-if="pinTip" class="pin-tip">
-      <span class="pin-tip-ic">🔒</span>
+      <span class="pin-tip-ic"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6 10V7a6 6 0 0 1 12 0v3M5 10h14a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1v-9a1 1 0 0 1 1-1z"/></svg></span>
       <div class="pin-tip-body">
         <b>{{ $t('privacy.tipTitle') }}</b>
         <span>{{ pinTipNag ? $t('privacy.tipNag') : $t('privacy.tipDesc') }}</span>
@@ -246,7 +251,7 @@ function onFilterChange() { /* 由各视图自行响应 state 变化 */ }
 
     <!-- 发现新版本：每 24h 静默检查一次，「下次再说」按版本号记忆 -->
     <div v-if="updateInfo" class="pin-tip upd-tip" role="status">
-      <span class="pin-tip-ic">⬆</span>
+      <span class="pin-tip-ic"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M6 11l6-6 6 6"/></svg></span>
       <div class="pin-tip-body">
         <b>{{ $t('update.newVersion', { v: updateInfo.latest }) }}</b>
         <span>{{ $t('update.current', { v: updateInfo.current }) }}</span>
@@ -274,7 +279,7 @@ function onFilterChange() { /* 由各视图自行响应 state 变化 */ }
 
     <DetailDrawer />
     <!-- AI 助手浮窗：全局单例，任意页面都能弹出，层级高于抽屉与播放层 -->
-    <AiWorkbench />
+    <AiWorkbench v-if="!fullBleed" />
     <ToastLayer />
     <ConfirmDialog />
     <TokenGate ref="tokenGate" />

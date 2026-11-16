@@ -26,8 +26,34 @@ function goLibrarySettings() {
 const cont = ref([])
 const contLoading = ref(false)
 
-/* 视图模式：grid | list | waterfall */
-const viewMode = ref('grid')
+/* 视图模式：shelf（内容架，默认）| grid | list | waterfall
+   内容架是展示方式的增量：仍用同一批 items，分页/多选/筛选逻辑不变，
+   网格等三种旧模式随时可切回。 */
+const viewMode = ref('shelf')
+
+/* 内容架：按维度把当前结果分成横向内容行，不额外发请求 */
+const shelfRows = computed(() => {
+  const list = items.value || []
+  if (!list.length) return []
+  const rows = []
+  const add = (key, title, arr) => {
+    if (!arr || !arr.length) return
+    // 「全部影片」是兜底行，保留完整结果；其它维度行截断，避免同一批片重复铺满 DOM
+    rows.push({ key, title, items: key === 'all' ? arr : arr.slice(0, 16) })
+  }
+  add('top', t('discover.topRated'), list
+    .filter((m) => Number(m.rating) >= 4.3)
+    .sort((a, b) => Number(b.rating) - Number(a.rating)))
+  add('recent', t('discover.recentlyAdded'), [...list]
+    .sort((a, b) => String(b.release_date || '').localeCompare(String(a.release_date || ''))))
+  const count = {}
+  list.forEach((m) => (m.genres || []).forEach((g) => { count[g] = (count[g] || 0) + 1 }))
+  Object.keys(count).sort((a, b) => count[b] - count[a]).slice(0, 2).forEach((g) => {
+    add('g-' + g, g, list.filter((m) => (m.genres || []).includes(g)))
+  })
+  add('all', t('view.allMovies'), list)
+  return rows
+})
 
 /* 来源视图段：全部 / 我有的 / 在线收藏 / 双源 / 待补链 —— 本质是 sourceState 筛选预设 */
 const SRC_TABS = computed(() => {
@@ -109,6 +135,9 @@ const showFilter = ref(false)
 /* 移动端沉浸式：向下浏览隐藏顶栏/工具栏；向上滑（哪怕一点）即显示，滚到顶部强制显示 */
 const navHidden = ref(false)
 const showTop = ref(false) // 无限滚动后回到顶部
+/* 滚动时压缩工具栏：让标题/来源切换那一排变矮，把高度让给内容。
+   阈值 hysteresis 防止在临界点反复切。 */
+const headCompact = ref(false)
 let vbEl = null
 let mqMobile = null
 let lastScrollTop = 0
@@ -116,6 +145,8 @@ function onViewScroll() {
   if (!vbEl) return
   const st = vbEl.scrollTop
   showTop.value = st > 900
+  if (!headCompact.value && st > 90) headCompact.value = true
+  else if (headCompact.value && st < 40) headCompact.value = false
   if (!mqMobile || !mqMobile.matches) { navHidden.value = false; return }
   if (st <= 80) {
     // 接近顶部：始终显示
@@ -310,7 +341,7 @@ watch(
 </script>
 
 <template>
-  <section class="view gallery-layout">
+  <section class="view gallery-layout cinema">
     <!-- 手机端：筛选收起为按钮，点击展开 -->
     <button class="btn filter-toggle" :class="{ active: showFilter }" @click="showFilter = !showFilter">
       {{ showFilter ? '收起筛选 ▲' : '筛选条件 ▼' }}
@@ -326,51 +357,79 @@ watch(
     </aside>
 
     <!-- 主区 -->
-    <div class="gallery-main">
+    <div class="gallery-main" :class="{ 'head-compact': headCompact }">
       <!-- 工具栏 -->
       <div class="toolbar">
         <h1 class="tb-title">{{ $t('view.gallery') }}</h1>
         <button v-if="state.returnFromFilter" class="btn tiny back-detail" @click="returnToDetail" data-tip="返回你刚才看的详情">
-          ← 返回《{{ state.returnFromFilter.title }}》
+          返回《{{ state.returnFromFilter.title }}》
         </button>
         <span class="tb-sub tabular" v-if="!loading">{{ total }} 部</span>
         <span v-else class="spinner"></span>
 
         <div class="spacer"></div>
 
+        <!-- 纯 CSS 展开开关：不引入组件状态，也不改任何筛选/播放逻辑 -->
+        <input id="tb-more" type="checkbox" class="tb-more-toggle" />
+
         <!-- 多条件逻辑 -->
-        <div class="btn-group" v-if="state.actress.length > 1 || state.genre.length > 1">
+        <div class="btn-group tb-extra" v-if="state.actress.length > 1 || state.genre.length > 1">
           <button class="btn tiny" :class="{ active: state.multiOp === 'OR' }" @click="state.multiOp = 'OR'" data-tip="任一匹配">任一</button>
           <button class="btn tiny" :class="{ active: state.multiOp === 'AND' }" @click="state.multiOp = 'AND'" :data-tip="$t('view.andMatch')">{{ $t('common.all') }}</button>
         </div>
 
         <div class="seg">
-          <button :class="{ on: viewMode === 'grid' }" @click="viewMode = 'grid'" data-tip="网格">▦</button>
-          <button :class="{ on: viewMode === 'waterfall' }" @click="viewMode = 'waterfall'" :data-tip="$t('view.waterfall')">▤</button>
-          <button :class="{ on: viewMode === 'list' }" @click="viewMode = 'list'" data-tip="列表">☰</button>
-          <button class="play-mode-btn" :class="{ on: state.playQueue.open }" @click="playFiltered" :title="$t('gallery.playFiltered')">▶</button>
+          <button :class="{ on: viewMode === 'shelf' }" @click="viewMode = 'shelf'" data-tip="内容架">
+            <svg class="ic" viewBox="0 0 24 24" fill="currentColor"><path d="M3 5h7v6H3zM12 5h9v6h-9zM3 13h9v6H3zM14 13h7v6h-7z"/></svg>
+          </button>
+          <button :class="{ on: viewMode === 'grid' }" @click="viewMode = 'grid'" data-tip="网格">
+            <svg class="ic" viewBox="0 0 24 24" fill="currentColor"><path d="M3 3h7v7H3zM14 3h7v7h-7zM3 14h7v7H3zM14 14h7v7h-7z"/></svg>
+          </button>
+          <button :class="{ on: viewMode === 'waterfall' }" @click="viewMode = 'waterfall'" :data-tip="$t('view.waterfall')">
+            <svg class="ic" viewBox="0 0 24 24" fill="currentColor"><path d="M3 3h7v5H3zM14 3h7v9h-7zM3 10h7v11H3zM14 14h7v7h-7z"/></svg>
+          </button>
+          <button :class="{ on: viewMode === 'list' }" @click="viewMode = 'list'" data-tip="列表">
+            <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 6h16M4 12h16M4 18h16"/></svg>
+          </button>
+          <button class="play-mode-btn" :class="{ on: state.playQueue.open }" @click="playFiltered" :title="$t('gallery.playFiltered')">
+            <svg class="ic" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5.5v13l10.5-6.5z"/></svg>
+          </button>
         </div>
         <button class="btn tiny" :disabled="playingAll" @click="playFiltered" :title="$t('gallery.playAllTip')">
-          {{ playingAll ? '…' : '▶ ' + $t('gallery.playAll') }}
+          <svg class="ic" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5.5v13l10.5-6.5z"/></svg>
+          {{ playingAll ? '…' : $t('gallery.playAll') }}
         </button>
 
         <select class="sort-sel" v-model="state.sort">
           <option v-for="[v, t] in SORTS" :key="v" :value="v">{{ $t(t) }}</option>
         </select>
 
-        <!-- 卡片尺寸 -->
-        <div class="btn-group">
-          <button class="btn tiny icon" :class="{ active: state.cardSize === 'dense' }" @click="state.cardSize = 'dense'" data-tip="小图">▪</button>
-          <button class="btn tiny icon" :class="{ active: state.cardSize === 'normal' }" @click="state.cardSize = 'normal'" data-tip="中图">◼</button>
-          <button class="btn tiny icon" :class="{ active: state.cardSize === 'large' }" @click="state.cardSize = 'large'" data-tip="大图">⬛</button>
+        <!-- 卡片尺寸：用线条密度表达，而不是三个大小的字符方块 -->
+        <div class="btn-group tb-extra">
+          <button class="btn tiny icon" :class="{ active: state.cardSize === 'dense' }" @click="state.cardSize = 'dense'" data-tip="小图">
+            <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M4 5h16M4 10h16M4 15h16M4 20h16"/></svg>
+          </button>
+          <button class="btn tiny icon" :class="{ active: state.cardSize === 'normal' }" @click="state.cardSize = 'normal'" data-tip="中图">
+            <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round"><path d="M4 6h16M4 12h16M4 18h16"/></svg>
+          </button>
+          <button class="btn tiny icon" :class="{ active: state.cardSize === 'large' }" @click="state.cardSize = 'large'" data-tip="大图">
+            <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.8" stroke-linecap="round"><path d="M4 8h16M4 16h16"/></svg>
+          </button>
         </div>
 
-        <button class="btn tiny" :class="{ active: state.selMode }" @click="toggleSelMode">
+        <button class="btn tiny tb-extra" :class="{ active: state.selMode }" @click="toggleSelMode">
           {{ state.selMode ? '退出多选' : '多选' }}
         </button>
-        <button v-if="state.selMode" class="btn tiny" @click="selectPage">选中已加载</button>
+        <button v-if="state.selMode" class="btn tiny tb-extra" @click="selectPage">选中已加载</button>
 
-        <button class="btn tiny icon" @click="load()" data-tip="刷新">⟳</button>
+        <button class="btn tiny icon tb-extra" @click="load()" data-tip="刷新">
+          <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 11a8 8 0 1 0-2.3 5.7M20 5v6h-6"/></svg>
+        </button>
+
+        <label for="tb-more" class="btn tiny tb-more-label">
+          <span class="tb-more-closed">{{ $t('view.more') }}</span>
+          <span class="tb-more-open">{{ $t('view.less') }}</span>
+        </label>
       </div>
 
       <!-- 来源视图段：收藏者的「我有的 / 我知道在哪」切换 -->
@@ -390,7 +449,8 @@ watch(
       <div v-if="activeChips.length" class="filter-bar">
         <span class="fb-label">{{ $t('view.filter') }}</span>
         <button v-for="(c, i) in activeChips" :key="i" class="chip on" @click="removeChip(c)">
-          {{ c.label }} <span class="x">✕</span>
+          {{ c.label }}
+          <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
         </button>
         <button class="btn tiny ghost" @click="resetFilters">{{ $t('view.clearAll') }}</button>
       </div>
@@ -421,9 +481,28 @@ watch(
             {{ $t('view.allMovies') }} <span class="count">{{ total }}</span>
           </div>
 
+          <!-- 内容架：按维度横向分行。空结果时落到下面的 MovieGrid 空态 -->
+          <div v-if="viewMode === 'shelf' && items.length" class="shelf">
+            <section v-for="row in shelfRows" :key="row.key" class="shelf-row">
+              <div class="shelf-row__head">
+                <h3 class="shelf-row__title">{{ row.title }}</h3>
+                <span class="shelf-row__count tabular">{{ row.items.length }}</span>
+              </div>
+              <div class="shelf-row__track">
+                <MovieCard
+                  v-for="m in row.items"
+                  :key="row.key + '-' + m.id"
+                  :movie="m"
+                  :selectable="state.selMode"
+                  @open="openDetail"
+                />
+              </div>
+            </section>
+          </div>
+
           <!-- 网格 / 瀑布流 -->
           <MovieGrid
-            v-if="viewMode !== 'list'"
+            v-else-if="viewMode !== 'list'"
             :items="items"
             :loading="loading"
             :mode="viewMode === 'waterfall' ? 'waterfall' : 'grid'"
@@ -509,7 +588,66 @@ watch(
 }
 .gallery-main { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; overflow: hidden; position: relative; }
 
+/* 滚动时压缩顶部工具栏，把高度让给内容区（.view-body 占剩余高度）。
+   只动 padding / 字号 / 高度，不隐藏按钮，布局不跳动。 */
+.gallery-main > .toolbar,
+.gallery-main > .src-tabs,
+.gallery-main > .filter-bar {
+  transition: padding .22s var(--ease), min-height .22s var(--ease);
+}
+.gallery-main.head-compact > .toolbar {
+  padding-top: 8px !important;
+  padding-bottom: 6px !important;
+  min-height: 0 !important;
+}
+.gallery-main.head-compact > .toolbar .tb-title {
+  font-size: var(--fs-xl) !important;
+  transition: font-size .22s var(--ease);
+}
+.gallery-main.head-compact > .src-tabs {
+  padding-top: 2px !important;
+  padding-bottom: 4px !important;
+}
+.gallery-main.head-compact > .filter-bar {
+  padding-top: 4px !important;
+  padding-bottom: 4px !important;
+}
+
 /* 无限滚动：底部哨兵与状态行 */
+/* 内容架：横向滚动的内容行，一行只讲一个维度 */
+.shelf { display: flex; flex-direction: column; gap: 34px; padding-bottom: 8px; }
+.shelf-row__head { display: flex; align-items: baseline; gap: 12px; margin-bottom: 14px; }
+.shelf-row__title {
+  margin: 0;
+  font: 400 20px/1.2 var(--cin-serif, Georgia, serif);
+  letter-spacing: .01em;
+  color: var(--c-text);
+}
+.shelf-row__count {
+  font: 500 11px/1 var(--cin-mono, monospace);
+  color: var(--c-text-3);
+}
+.shelf-row__track {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: 168px;
+  gap: 14px;
+  overflow-x: auto;
+  scroll-snap-type: x proximity;
+  padding-bottom: 12px;
+  scrollbar-width: none;
+}
+.shelf-row__track::-webkit-scrollbar { display: none; }
+.shelf-row__track .card { scroll-snap-align: start; }
+/* 内容架的卡片只留标题 + 一行元信息：海报才是主角 */
+.shelf-row__track .card .meta-tags,
+.shelf-row__track .card .meta-act { display: none; }
+@media (max-width: 720px) {
+  .shelf { gap: 26px; }
+  .shelf-row__track { grid-auto-columns: 132px; gap: 10px; }
+  .shelf-row__title { font-size: 17px; }
+}
+
 .lib-sentinel { height: 1px; }
 .lib-foot {
   display: flex; align-items: center; justify-content: center; gap: 8px;

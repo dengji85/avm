@@ -1,6 +1,6 @@
 <script setup>
 import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
-import { state, NAV_TABS, NAV_MORE, NAV_ICONS } from '../state.js'
+import { state, NAV_TABS, NAV_MORE, NAV_ICONS, goSearch, toggleTheme } from '../state.js'
 import { useTasks, pct, etaSec, phaseLabel, fmtDur, fetchScrapeLogs } from '../composables/useTasks.js'
 import { aiStatus, aiSearchIntent, getSession, logout } from '../api.js'
 import { toast, fmtAgo } from '../utils.js'
@@ -64,10 +64,8 @@ async function submit() {
     state.q = text
     semanticActive.value = false
   }
-  state.page = 1
-  // 首页（或其它视图）里回车搜索：自动切到影片库展示结果。
-  // 原先只更新 state.q、不切视图，停在首页看不到任何变化，表现为「搜索框没反应」。
-  if (state.view !== 'gallery') state.view = 'gallery'
+  // 首页（或其它视图）里回车搜索：统一跳到影片库展示结果（goSearch 内部会重置页码并切视图）
+  goSearch()
   emit('search')
 }
 function clearKw() {
@@ -108,8 +106,6 @@ onMounted(() => {
   refreshSession()
 })
 onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
-
-function toggleTheme() { state.theme = state.theme === 'dark' ? 'light' : 'dark' }
 
 // 任务中心「前往维护中心」：切到维护视图并关闭任务面板，避免浮层遮挡
 function goMaintenance() {
@@ -174,7 +170,7 @@ async function setScrapeFilter(taskId, f) {
   <header class="topnav">
     <button class="btn ghost icon only-mobile" @click="state.mobileNavOpen = !state.mobileNavOpen" :data-tip="$t('nav.menu')">☰</button>
 
-    <div class="brand" @click="state.view = 'home'">
+    <div class="brand" @click="state.view = 'discover'">
       <img class="logo" :src="logoUrl" :alt="$t('nav.brand')" />
       <span class="brand-text">{{ $t('nav.brand') }}</span>
     </div>
@@ -228,7 +224,7 @@ async function setScrapeFilter(taskId, f) {
           :data-tip="$t('tasks.center')"
         >
           <span v-if="anyRunning" class="spinner"></span>
-          <span v-else class="ico">🗂</span>
+          <span v-else class="ico"><svg class="ic" viewBox="0 0 24 24" fill="currentColor"><path d="M4 5h6l2 2h8a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1z"/></svg></span>
           <span v-if="anyRunning" class="pctn">{{ overallPct }}%</span>
         </button>
 
@@ -415,7 +411,7 @@ async function setScrapeFilter(taskId, f) {
       <button class="btn ghost icon" @click="state.guideOpen = true" :data-tip="$t('guide.help')">?</button>
       <button v-if="canLogout" class="btn ghost icon" @click="doLogout" :data-tip="$t('nav.logout')">⎋</button>
       <button class="btn ghost icon" @click="toggleTheme" :data-tip="state.theme === 'dark' ? $t('nav.themeLight') : $t('nav.themeDark')">{{ themeIcon }}</button>
-      <button class="btn ghost icon" :class="{ active: state.view === 'settings' }" @click="state.view = 'settings'" :data-tip="$t('nav.settings')">⚙</button>
+      <button class="btn ghost icon" :class="{ active: state.view === 'settings' }" @click="state.view = 'settings'" :data-tip="$t('nav.settings')"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></button>
     </div>
   </header>
 

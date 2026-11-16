@@ -9,9 +9,12 @@ import './styles/ui.css'
 import './styles/layout.css'
 import './styles/assistant.css'
 import './styles.css'
+// 影院皮肤：经典界面沿用「发现页」的视觉语言（纯样式层，不影响逻辑）
+import './styles/cinema.css'
 
 // 挂载前用缓存的后缀同步定标题，避免刷新时闪过 index.html 的默认标题
 applySiteTitleFromCache()
+document.body.classList.add('cinema-skin')
 
 const app = createApp(App)
 app.config.globalProperties.$t = t
