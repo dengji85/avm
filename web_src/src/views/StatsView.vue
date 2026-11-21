@@ -59,8 +59,9 @@ function wlChangePage(delta) {
   wlPage.value = next
   loadWatchLog(true)
 }
-// 进入 watchlog tab 时首次加载
-watch(activeTab, (v) => { if (v === 'watchlog' && !wlItems.value.length) loadWatchLog(false) })
+// 观看明细在「活跃」标签页里：切到该页且还没有数据时自动查询一次
+// （此前监听的是已不存在的 watchlog 标签，导致进页面是空的，必须手动点筛选才出数据）
+watch(activeTab, (v) => { if (v === 'activity' && !wlItems.value.length) loadWatchLog(false) })
 
 /* 概览 */
 const overview = reactive({

@@ -1,8 +1,9 @@
 <script setup>
 import { ref, computed, onMounted, watch } from 'vue'
 import { state } from '../state.js'
-import { listActresses, toggleActressFav, toggleActressFollow, avatarUrl, fillAvatarsGfriends } from '../api.js'
-import { toast, avatarFallback, debounce, AVATAR_PLACEHOLDER } from '../utils.js'
+import { listActresses, toggleActressFav, avatarUrl, fillAvatarsGfriends, subTargets, subTargetFromLibrary, subTargetDelete } from '../api.js'
+import { toast, avatarFallback, debounce, AVATAR_PLACEHOLDER, confirmDialog } from '../utils.js'
+import { t } from '../i18n/index.js'
 
 const all = ref([])          // 后端一次性返回，前端做过滤/分页
 const loading = ref(false)
@@ -70,10 +71,24 @@ async function fav(a, e) {
 
 async function follow(a, e) {
   e.stopPropagation()
+  const tid = subMap.value[a.name]
   try {
-    const r = await toggleActressFollow(a.id || a.name)
-    a.followed = r && r.followed != null ? r.followed : !a.followed
-    toast(a.followed ? '已关注' : '已取消关注', 'ok')
+    if (tid) {
+      const ok = await confirmDialog(t('actress.unsubscribeTitle'),
+        t('actress.unsubscribeDesc', { name: a.name }), { danger: true })
+      if (!ok) return
+      await subTargetDelete(tid)
+      const m = { ...subMap.value }
+      delete m[a.name]
+      subMap.value = m
+      a.followed = 0
+      toast(t('actress.unsubscribed'), 'ok')
+    } else {
+      const r = await subTargetFromLibrary({ kind: 'actress', name: a.name })
+      subMap.value = { ...subMap.value, [a.name]: (r && r.item && r.item.id) || 0 }
+      a.followed = 1
+      toast(t('actress.subscribedTip'), 'ok')
+    }
   } catch (err) { toast(err.message, 'err') }
 }
 
@@ -87,6 +102,20 @@ function browse(a, e) {
 }
 
 const pageCount = computed(() => Math.max(1, Math.ceil(total.value / pageSize)))
+
+/* 订阅状态：关注并入订阅，墙上按钮直接建/删订阅目标 */
+const subMap = ref({})   // 女优名 → 订阅目标 id
+
+async function loadSubs() {
+  try {
+    const r = await subTargets()
+    const m = {}
+    for (const x of ((r && r.items) || [])) {
+      if (x.kind === 'actress') m[x.name] = x.id
+    }
+    subMap.value = m
+  } catch (e) { subMap.value = {} }
+}
 
 /* 批量从 gfriends 补全无头像女优 */
 const filling = ref(false)
@@ -103,7 +132,7 @@ async function fillAvatars() {
   }
 }
 
-onMounted(load)
+onMounted(() => { load(); loadSubs() })
 </script>
 
 <template>
@@ -120,7 +149,7 @@ onMounted(load)
         <option v-for="[v, t] in SORTS" :key="v" :value="v">{{ $t(t) }}</option>
       </select>
       <button class="btn tiny" :class="{ active: onlyFav }" @click="onlyFav = !onlyFav">♥ 收藏</button>
-      <button class="btn tiny" :class="{ active: onlyFollow }" @click="onlyFollow = !onlyFollow">关注</button>
+      <button class="btn tiny" :class="{ active: onlyFollow }" @click="onlyFollow = !onlyFollow">订阅</button>
       <button class="btn tiny primary" :disabled="filling" @click="fillAvatars" :title="$t('actress.fillAvatarsTip')">
         {{ filling ? '…' : '批量补头像' }}
       </button>
@@ -147,7 +176,7 @@ onMounted(load)
             <button class="a-fav" :class="{ on: a.favorite }" @click="fav(a, $event)" :data-tip="a.favorite ? '取消收藏' : '收藏'">
               {{ a.favorite ? '♥' : '♡' }}
             </button>
-            <span v-if="a.followed" class="a-follow">关注中</span>
+            <span v-if="a.followed" class="a-follow">已订阅</span>
           </div>
           <div class="a-name ellipsis">{{ a.name }}</div>
           <div class="a-sub">
@@ -155,7 +184,7 @@ onMounted(load)
           </div>
           <div class="a-acts">
             <button class="btn tiny ghost" @click="browse(a, $event)">看作品</button>
-            <button class="btn tiny ghost" @click="follow(a, $event)">{{ a.followed ? '已关注' : '关注' }}</button>
+            <button class="btn tiny ghost" @click="follow(a, $event)">{{ a.followed ? '已订阅' : '订阅' }}</button>
           </div>
         </article>
       </div>

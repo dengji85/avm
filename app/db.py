@@ -619,6 +619,104 @@ def _migrate(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_marker_tag ON movie_marker_tag(tag_id)")
     conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_markers_primary "
                  "ON movie_markers(movie_id) WHERE is_primary = 1")
+    # 订阅（女优 / 系列）新片提醒：目标 / 发现 / 归属 / 规则 四张表。
+    # 设计见 docs/订阅新片提醒设计.md 第 5 节；全部幂等，可重复执行。
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS subscription_targets ("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "kind TEXT NOT NULL DEFAULT 'actress', "
+        "name TEXT NOT NULL DEFAULT '', "
+        "site TEXT NOT NULL DEFAULT '', "
+        "site_id TEXT NOT NULL DEFAULT '', "
+        "page_url TEXT NOT NULL DEFAULT '', "
+        "cover TEXT NOT NULL DEFAULT '', "
+        "enabled INTEGER NOT NULL DEFAULT 1, "
+        "baseline_at TEXT NOT NULL DEFAULT '', "
+        "baseline_code TEXT NOT NULL DEFAULT '', "
+        "last_scan_at TEXT NOT NULL DEFAULT '', "
+        "last_status TEXT NOT NULL DEFAULT '', "
+        "etag TEXT NOT NULL DEFAULT '', "
+        "last_modified TEXT NOT NULL DEFAULT '', "
+        "created_at TEXT DEFAULT (datetime('now','localtime')))")
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_sub_target_site "
+                 "ON subscription_targets(kind, site, site_id) WHERE site_id <> ''")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_sub_target_kind "
+                 "ON subscription_targets(kind, enabled)")
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS subscription_findings ("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "code TEXT NOT NULL DEFAULT '', "
+        "code_norm TEXT NOT NULL DEFAULT '', "
+        "title TEXT NOT NULL DEFAULT '', "
+        "release_date TEXT NOT NULL DEFAULT '', "
+        "cover TEXT NOT NULL DEFAULT '', "
+        "page_url TEXT NOT NULL DEFAULT '', "
+        "site TEXT NOT NULL DEFAULT '', "
+        "site_id TEXT NOT NULL DEFAULT '', "
+        "meta_json TEXT NOT NULL DEFAULT '', "
+        "status TEXT NOT NULL DEFAULT 'new', "
+        "first_seen_at TEXT DEFAULT (datetime('now','localtime')), "
+        "read_at TEXT NOT NULL DEFAULT '', "
+        "ignored_at TEXT NOT NULL DEFAULT '')")
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_sub_finding_code "
+                 "ON subscription_findings(code_norm)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_sub_finding_date "
+                 "ON subscription_findings(release_date DESC)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_sub_finding_seen "
+                 "ON subscription_findings(first_seen_at DESC)")
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS subscription_finding_targets ("
+        "finding_id INTEGER NOT NULL REFERENCES subscription_findings(id) ON DELETE CASCADE, "
+        "target_id INTEGER NOT NULL REFERENCES subscription_targets(id) ON DELETE CASCADE, "
+        "first_seen_at TEXT DEFAULT (datetime('now','localtime')), "
+        "PRIMARY KEY (finding_id, target_id))")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_sub_ft_target "
+                 "ON subscription_finding_targets(target_id)")
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS subscription_rules ("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "target_id INTEGER REFERENCES subscription_targets(id) ON DELETE CASCADE, "
+        "rule_type TEXT NOT NULL, "
+        "op TEXT NOT NULL DEFAULT 'exclude', "
+        "value TEXT NOT NULL DEFAULT '', "
+        "enabled INTEGER NOT NULL DEFAULT 1, "
+        "created_at TEXT DEFAULT (datetime('now','localtime')))")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_sub_rule_target "
+                 "ON subscription_rules(target_id)")
+    # 订阅域的轻量键值（当前只存「新片列表上次查看时间」，用于顶部徽章清零）
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS subscription_state ("
+        "key TEXT PRIMARY KEY, "
+        "value TEXT NOT NULL DEFAULT '')")
+    # 在线资源探测结果：'' 未探测 / ok 有作品页 / none 站点明确没有
+    sf_cols = {r[1] for r in conn.execute("PRAGMA table_info(subscription_findings)").fetchall()}
+    for col in ("probe_site", "probe_status", "probe_kind", "probe_at"):
+        if col not in sf_cols:
+            conn.execute("ALTER TABLE subscription_findings ADD COLUMN %s "
+                         "TEXT NOT NULL DEFAULT ''" % col)
+    # 二次确认：同一条发现在不同轮扫描里被反复看到才算「确认」，压掉站点偶发脏数据。
+    # 存量数据默认 2（视为已确认），只有新进来的才从 1 开始等下一轮。
+    if "confirm_count" not in sf_cols:
+        conn.execute("ALTER TABLE subscription_findings ADD COLUMN confirm_count "
+                     "INTEGER NOT NULL DEFAULT 2")
+    # 系列别名：系列名换写法（●○～、全角半角）时，记住「名字 → 站内系列页」的对应，
+    # 下次直接命中，不用再走切词搜索。
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS subscription_series_alias ("
+        "site TEXT NOT NULL DEFAULT '', "
+        "name_norm TEXT NOT NULL DEFAULT '', "
+        "site_id TEXT NOT NULL DEFAULT '', "
+        "page_url TEXT NOT NULL DEFAULT '', "
+        "updated_at TEXT DEFAULT (datetime('now','localtime')), "
+        "PRIMARY KEY (site, name_norm))")
+    # 老数据的探测结论只可能来自资料站（当时只探 JavBus 这类直达资料页），补成 meta，
+    # 让「有在线资源 / 仅有资料页」的区分对历史记录也成立。
+    conn.execute("UPDATE subscription_findings SET probe_kind = 'meta' "
+                 "WHERE probe_status = 'ok' AND probe_kind = ''")
+    # 现在探测只问在线观看站（123av / Jable）：资料页结论（meta）不再有意义，
+    # 清空后按新规则重探。幂等——新结果不会再写 meta。
+    conn.execute("UPDATE subscription_findings SET probe_site = '', probe_status = '', "
+                 "probe_kind = '', probe_at = '' WHERE probe_kind = 'meta'")
     conn.commit()
 
 

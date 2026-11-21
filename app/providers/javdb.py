@@ -14,7 +14,7 @@ from __future__ import annotations
 import re
 from typing import Any, Dict, List, Optional
 
-from .base import BaseProvider
+from .base import BaseProvider, NetBlocked, NetError
 from bs4 import BeautifulSoup
 
 DEFAULT_BASE_URL = "https://javdb.com"
@@ -228,3 +228,69 @@ class JavDBProvider(BaseProvider):
         if not (meta.get("title") or meta.get("cover")):
             return None
         return self.normalize(meta, self.name)
+
+    # ------------------------------------------------------ 列表页（订阅）
+    # 演员页 /actors/{id}?page=N、系列页 /series/{id}?page=N，条目与搜索卡同构：
+    #   <a class="box" href="/v/xxxx">
+    #     <div class="cover"><img src="..."></div>
+    #     <div class="video-title"><strong>ABC-123 标题</strong></div>
+    #     <div class="meta">2026-01-01</div>
+    # 同样只依赖 a.box + 文本里的番号/日期，不绑定更深的 class 层级。
+    def list_url(self, target: Dict[str, Any], page: int = 1) -> str:
+        sid = str(target.get("site_id") or "").strip()
+        if not sid:
+            # 从库导入的目标只有搜索页地址（/search?q=...&f=...），
+            # 翻页追加 page 参数，避免重复抓第一页。
+            url = str(target.get("page_url") or "").strip()
+            if not url or page <= 1:
+                return url
+            return "%s%spage=%d" % (url, "&" if "?" in url else "?", int(page))
+        seg = "actors" if (target.get("kind") or "actress") == "actress" else "series"
+        base = "%s/%s/%s" % (self.base_url, seg, sid)
+        return base if page <= 1 else "%s?page=%d" % (base, int(page))
+
+    def parse_list(self, html: str, target: Dict[str, Any]) -> List[Dict[str, Any]]:
+        if not html:
+            raise NetError("列表页为空")
+        low = html.lower()
+        if "cf-browser-verification" in low or "just a moment" in low:
+            raise NetBlocked("Cloudflare 人机验证页（需填 cf_clearance Cookie）")
+        soup = BeautifulSoup(html, "html.parser")
+        boxes = soup.select("a.box")
+        if not boxes:
+            if not soup.select_one(".movie-panel") and not soup.select_one("h2.title"):
+                raise NetError("列表页结构无法识别（可能改版或被拦截）")
+            return []
+        out: List[Dict[str, Any]] = []
+        for box in boxes:
+            href = str(box.get("href") or "").strip()
+            strong = box.select_one(".video-title strong")
+            title = strong.get_text(" ", strip=True) if strong else box.get_text(" ", strip=True)
+            code = _code_from_list_text(title)
+            if not code:
+                continue
+            img = box.select_one(".cover img") or box.select_one("img")
+            cover = str((img.get("src") or img.get("data-src") or "") if img else "").strip()
+            date = ""
+            for meta_el in box.select(".meta"):
+                m = re.search(r"\d{4}-\d{2}-\d{2}", meta_el.get_text(" ", strip=True))
+                if m:
+                    date = m.group(0)
+                    break
+            page_url = href if href.startswith("http") else self.base_url + href
+            out.append({
+                "code": code,
+                "site_id": href.rstrip("/").rsplit("/", 1)[-1] if href else code,
+                "title": title or code,
+                "release_date": date,
+                "cover": cover,
+                "page_url": page_url,
+                "site": self.name,
+            })
+        return out
+
+
+def _code_from_list_text(text: str) -> str:
+    """从列表标题里取番号：标题以「字母-数字」开头（如 ABC-123 标题）。"""
+    m = re.search(r"([A-Za-z][A-Za-z0-9]*-\d{2,})", text or "")
+    return m.group(1).upper() if m else ""

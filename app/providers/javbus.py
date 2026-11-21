@@ -18,8 +18,9 @@ from __future__ import annotations
 
 import re
 from typing import Any, Dict, List, Optional
+from urllib.parse import quote, urljoin
 
-from .base import BaseProvider, detect_blocker
+from .base import BaseProvider, NetBlocked, NetError, detect_blocker
 from bs4 import BeautifulSoup
 
 DEFAULT_BASE_URL = "https://www.javbus.com"
@@ -36,6 +37,46 @@ INFO_MAP = {
     "演員": "actresses", "女優": "actresses", "出演者": "actresses",
     "類別": "genres", "ジャンル": "genres", "标签": "genres", "ジャンル": "genres",
 }
+
+
+def _name_key(s: str) -> str:
+    """女優名归一：去空白与 JavBus 在名字后附带的「有碼 / 無碼 / 歐美」标签。"""
+    s = re.sub(r"\s+", "", str(s or ""))
+    return re.sub(r"(有碼|無碼|歐美|日本|中国|中國|韓國|韩国|台灣|台湾)$", "", s)
+
+
+_PAREN_TAIL_RE = re.compile(r"\s*[（(][^（）()]*[）)]\s*$")
+# JavBus 搜索对装饰符号不友好：带 ●○～ 的整串会直接 404（如系列名）。
+# 关键词过长（含假名长串）也会 404，所以带符号的系列名要退化成分段关键词。
+_SERIES_NOISE_RE = re.compile(r"[●○◯〇◎◇◆■□▲△▼▽★☆※～〜~]")
+
+
+def _series_queries(name: str) -> List[str]:
+    """系列搜索关键词候选（按可信度排序）。
+
+    例：「人妻痴●電車～さわられた○○～」整串搜会 404，按符号切段后
+    「さわられた」这类最具区分度的片段才能命中。
+    """
+    raw = str(name or "").strip()
+    base = _PAREN_TAIL_RE.sub("", raw).strip()
+    if not base:
+        return [raw] if raw else []
+    if not _SERIES_NOISE_RE.search(base):
+        return [base]
+    parts = [p.strip() for p in _SERIES_NOISE_RE.split(base) if len(p.strip()) >= 2]
+    parts.sort(key=len, reverse=True)
+    out: List[str] = []
+    for p in parts + [_SERIES_NOISE_RE.sub("", base).strip()]:
+        if p and p not in out:
+            out.append(p)
+    return out or [base]
+
+
+def _norm_series(text: str) -> str:
+    """系列名比对用：去掉符号、空格与「有碼/無碼」标签。"""
+    s = _PAREN_TAIL_RE.sub("", str(text or "")).strip()
+    s = _SERIES_NOISE_RE.sub("", s)
+    return _name_key(s)
 
 
 def _best_cover(url: str, base_url: str = "") -> str:
@@ -265,3 +306,170 @@ class JavBusProvider(BaseProvider):
         if not (meta.get("title") or meta.get("cover")):
             return None
         return self.normalize(meta, self.name)
+
+    def parse_detail(self, code: str, html: str) -> Optional[Dict[str, Any]]:
+        """从**已有**的详情页 HTML 解析元数据（类型 / 女优 / 时长 / 大封面）。
+
+        订阅「在线资源探测」本来就要把作品页整页取回来，这里复用它，
+        不额外发请求；解析失败返回 None。
+        """
+        try:
+            return self._parse(code, html)
+        except Exception:
+            return None
+
+    # ------------------------------------------------------ 列表页（订阅）
+    # 演员页 /series 页的条目结构与搜索页一致，都是 a.movie-box：
+    #   <a class="movie-box" href="/ABC-123">
+    #     <div class="photo-frame"><img src="..." title="标题"></div>
+    #     <div class="photo-info"><span>ABC-123 <date>2026-01-01</date></span></div>
+    # 站点结构可能随改版漂移，因此这里只依赖 a.movie-box 与文本里的番号/日期，
+    # 不绑定具体 class 层级；解析不出条目时由调用层写 parse_error，不静默成功。
+    def list_url(self, target: Dict[str, Any], page: int = 1) -> str:
+        sid = str(target.get("site_id") or "").strip()
+        if not sid:
+            # 从库导入的目标只有搜索页地址（如 /searchstar/{name}），
+            # 翻页沿用站点的「地址 + /页码」形式，否则第二页会重复抓首页。
+            url = str(target.get("page_url") or "").strip()
+            if not url or page <= 1:
+                return url
+            return "%s/%d" % (url.rstrip("/"), int(page))
+        seg = "star" if (target.get("kind") or "actress") == "actress" else "series"
+        base = "%s/%s/%s" % (self.base_url, seg, sid)
+        return base if page <= 1 else "%s/%d" % (base, int(page))
+
+    def normalize_list_target(self, target: Dict[str, Any]) -> Optional[Dict[str, str]]:
+        """系列搜索地址纠偏：库里系列名常带「（厂商）」或 ●○～，整串搜会 403/404。"""
+        if (target.get("kind") or "") != "series":
+            return None
+        name = str(target.get("name") or "")
+        cur = str(target.get("page_url") or "")
+        if "/search/" not in cur:
+            return None
+        cands = _series_queries(name)
+        if not cands:
+            return None
+        url = "%s/search/%s" % (self.base_url, quote(cands[0], safe=""))
+        if url == cur:
+            return None
+        return {"page_url": url, "site_id": ""}
+
+    def resolve_list_target(self, target: Dict[str, Any], html: str) -> Optional[Dict[str, str]]:
+        """把「女優搜索页」解析成真正的女優作品页。
+
+        /searchstar/{名字} 只返回女優搜索结果（.avatar-box），不是作品列表；
+        真正的作品列表在 /star/{id}。按名字精确匹配（忽略空格与「有碼/無碼」标签），
+        只有一个候选时直接采用。返回 {"page_url", "site_id"}，无需重定向则返回 None。
+        """
+        if (target.get("kind") or "actress") == "series":
+            return self._resolve_series(target, html)
+        if (target.get("kind") or "actress") != "actress":
+            return None
+        cur = str(target.get("page_url") or "").lower()
+        if "searchstar" not in cur:
+            return None
+        soup = BeautifulSoup(html or "", "html.parser")
+        links = soup.select("#waterfall a[href*='/star/']") or soup.select("a[href*='/star/']")
+        if not links:
+            return None
+        want = _name_key(str(target.get("name") or ""))
+        href = ""
+        for a in links:
+            if want and _name_key(a.get_text(" ", strip=True)) == want:
+                href = str(a.get("href") or "")
+                break
+        if not href and len(links) == 1:
+            href = str(links[0].get("href") or "")
+        if not href:
+            return None
+        full = urljoin(self.base_url + "/", href)
+        m = re.search(r"/star/([^/?#]+)", full)
+        return {"page_url": full, "site_id": m.group(1) if m else ""}
+
+    def _resolve_series(self, target: Dict[str, Any], html: str) -> Optional[Dict[str, str]]:
+        """系列搜索页 → 真正的系列页（``/series/<id>``）。
+
+        JavBus 的搜索结果最多 10~30 条且没有系列链接，系列页才是完整作品列表
+        （还带翻页）。所以拿搜索命中的作品详情页反查系列 id，并用系列名做比对，
+        避免把「同名不同系列」的作品算进来。
+        """
+        if str(target.get("site_id") or "").strip():
+            return None
+        if "/search" not in str(target.get("page_url") or ""):
+            return None
+        want = _norm_series(str(target.get("name") or ""))
+        if not want:
+            return None
+        seen: set = set()
+        detail_fetches = 0
+        for q in _series_queries(str(target.get("name") or ""))[:2]:
+            url = "%s/search/%s" % (self.base_url, quote(q, safe=""))
+            page = html if url == str(target.get("page_url") or "") else (self.http_get(url) or "")
+            if not page:
+                continue
+            boxes = BeautifulSoup(page, "html.parser").select("a.movie-box")[:3]
+            for box in boxes:
+                href = str(box.get("href") or "")
+                if not href or href in seen or detail_fetches >= 4:
+                    continue
+                seen.add(href)
+                detail_fetches += 1
+                detail = self.http_get(urljoin(self.base_url + "/", href)) or ""
+                if not detail:
+                    continue
+                for a in BeautifulSoup(detail, "html.parser").select("a[href*='/series/']"):
+                    text = a.get_text(" ", strip=True)
+                    if not text or _norm_series(text) != want:
+                        continue
+                    full = urljoin(self.base_url + "/", str(a.get("href") or ""))
+                    m = re.search(r"/series/([^/?#]+)", full)
+                    if m:
+                        return {"page_url": full, "site_id": m.group(1)}
+        return None
+
+    def parse_list(self, html: str, target: Dict[str, Any]) -> List[Dict[str, Any]]:
+        if not html:
+            raise NetError("列表页为空")
+        blocker = detect_blocker(html)
+        if blocker:
+            raise NetBlocked(blocker)
+        soup = BeautifulSoup(html, "html.parser")
+        boxes = soup.select("a.movie-box")
+        if not boxes:
+            # 没有条目既可能是「真的没有作品」，也可能是改版 / 被拦截。
+            # 详情页特征（h3 / #cover）都没有时按拦截处理，避免把失败当空。
+            if not soup.select_one("h3") and not soup.select_one("#cover"):
+                raise NetError("列表页结构无法识别（可能改版或被拦截）")
+            return []
+        out: List[Dict[str, Any]] = []
+        for box in boxes:
+            href = str(box.get("href") or "").strip()
+            img = box.select_one("img")
+            info = box.select_one(".photo-info")
+            text = info.get_text(" ", strip=True) if info else box.get_text(" ", strip=True)
+            code = _code_from_list_text(text)
+            sid = href.rstrip("/").rsplit("/", 1)[-1] if href else code
+            if not code:
+                continue
+            m = re.search(r"\d{4}-\d{2}-\d{2}", text)
+            cover = ""
+            if img:
+                cover = str(img.get("src") or img.get("data-src") or "").strip()
+                if cover.startswith("/"):
+                    cover = self.base_url + cover
+            out.append({
+                "code": code,
+                "site_id": sid,
+                "title": str((img.get("title") if img else "") or "").strip() or code,
+                "release_date": m.group(0) if m else "",
+                "cover": cover,
+                "page_url": href if href.startswith("http") else self.base_url + href,
+                "site": self.name,
+            })
+        return out
+
+
+def _code_from_list_text(text: str) -> str:
+    """从列表条目文本里取番号：取行首的「字母-数字」组合。"""
+    m = re.search(r"([A-Za-z][A-Za-z0-9]*-\d{2,})", text or "")
+    return m.group(1).upper() if m else ""

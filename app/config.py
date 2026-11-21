@@ -73,13 +73,21 @@ DEFAULT_UA = (
 # lower=true 表示跳转前把 {code} 转为小写（JavBus / 123av 等路径用小写番号）。
 # 与前端 SettingsView 的 PRESET_SITES 保持一致。
 DEFAULT_ONLINE_SITES: List[Dict[str, Any]] = [
-    {"id": "preset_javbus", "name": "JavBus", "url": "https://javbus.com/{code}", "lower": True, "enabled": True},
-    {"id": "preset_javwiki", "name": "AV-Wiki", "url": "https://av-wiki.net/{code}/", "lower": False, "enabled": True},
-    {"id": "preset_javdb", "name": "JavDB", "url": "https://javdb.com/search?q={code}", "lower": True, "enabled": True},
+    # kind：meta=元数据查询站（有资料页不等于能看），watch=在线观看站
+    # 订阅「在线资源」探测只认 watch 站；meta 站命中只作弱提示
+    {"id": "preset_javbus", "name": "JavBus", "url": "https://javbus.com/{code}",
+     "lower": True, "kind": "meta", "enabled": True},
+    {"id": "preset_javwiki", "name": "AV-Wiki", "url": "https://av-wiki.net/{code}/",
+     "lower": False, "kind": "meta", "enabled": True},
+    {"id": "preset_javdb", "name": "JavDB", "url": "https://javdb.com/search?q={code}",
+     "lower": True, "kind": "meta", "enabled": True},
     {"id": "preset_javlibrary", "name": "JavLibrary",
-     "url": "https://www.javlibrary.com/cn/vl_searchbyid.php?keyword={code}", "lower": False, "enabled": True},
-    {"id": "preset_missav", "name": "123av", "url": "https://123av.com/cn/v/{code}", "lower": True, "enabled": True},
-    {"id": "preset_jable", "name": "Jable", "url": "https://jable.tv/videos/{code}/", "lower": True, "enabled": True},
+     "url": "https://www.javlibrary.com/cn/vl_searchbyid.php?keyword={code}",
+     "lower": False, "kind": "meta", "enabled": True},
+    {"id": "preset_missav", "name": "123av", "url": "https://123av.com/cn/v/{code}",
+     "lower": True, "kind": "watch", "enabled": True},
+    {"id": "preset_jable", "name": "Jable", "url": "https://jable.tv/videos/{code}/",
+     "lower": True, "kind": "watch", "enabled": True},
 ]
 
 DEFAULT_CONFIG: Dict[str, Any] = {
@@ -451,6 +459,44 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         # 主源失效时自动切到下一个可用来源
         "auto_failover": True,
     },
+    # 订阅（女优 / 系列）新片提醒。扫描只抓列表页，规则在读取时求值，
+    # 因此改规则立即生效、不需要重扫。详见 docs/订阅新片提醒设计.md。
+    "subscription": {
+        "enabled": True,
+        # 定时方式：interval = 按下面的间隔（分钟）跑；cron = 按 5 段表达式定点跑
+        "scan_mode": "interval",
+        # 5 段：分 时 日 月 周（例：0 8 * * * 每天 8:00；30 9 * * 1-5 工作日 9:30）
+        "scan_cron": "0 8 * * *",
+        # 关机 / 休眠错过计划时间后，服务启动时补扫一次（关掉则从启动时刻重新计时）
+        "catch_up_on_start": True,
+        # 定时扫描间隔与抖动（分钟）：避免整点集中请求站点
+        "scan_interval_minutes": 360,
+        "scan_jitter_minutes": 30,
+        # 扫描结束 / 服务启动后，延迟一小会儿再自动探测在线资源（观看站命中即标记）
+        "auto_probe": True,
+        "auto_probe_delay_seconds": 180,
+        "auto_probe_batch": 40,
+        # 单目标单轮最多处理条数与翻页上限（增量命中即停）
+        "max_items_per_target": 100,
+        "max_pages_per_target": 3,
+        # 历史补抓：手动触发时放宽翻页与条数（不看连续命中即停）
+        "backfill_pages": 12,
+        "backfill_items": 500,
+        # 在线资源结论的有效期（天）：过期后自动重探，手动检查立即重探
+        "probe_ttl_days": 7,
+        # 已读超过多少天自动归档（0 = 不自动归档）
+        "archive_read_days": 30,
+        # 连续命中多少条已知番号就停止翻页（增量扫描）
+        "known_streak_stop": 10,
+        # 日期缺失时：keep = 保留提醒 / exclude = 直接过滤
+        "unknown_date_policy": "keep",
+        # 资源提供者：本期只有 link（作品页 / 站点搜索页 / 库内来源）
+        "resource_providers": ["link"],
+        "resource_timeout": 8,
+        # 单站连续失败多少次后进入冷却
+        "site_cooldown_fails": 3,
+        "site_cooldown_minutes": 120,
+    },
     "ui": {
         "page_size": 60,
         "default_sort": "added_desc",
@@ -620,15 +666,19 @@ def ensure_dirs() -> None:
 
 
 def _migrate_online_sites(sites: Any) -> List[Dict[str, Any]]:
-    """补齐早期保存的预设站点缺失的 lower（番号大小写）字段。
+    """补齐早期保存的预设站点缺失的 lower（番号大小写）/ kind（站点类别）字段。
 
     最早一批预设没有 lower 字段，导致 JavBus / 123av / Jable 这类要求小写番号的
     站点被拼成大写番号、打开即 404。这里按 id 比对预设表只补缺失字段，
     不覆盖用户自定义的名称/链接/排序；非预设站点原样保留。
+
+    kind 缺省补 meta（元数据站）：宁可少探测，也不把陌生站点当成「有资源」的证据；
+    用户可在设置里改成「在线观看」。
     """
     if not isinstance(sites, list):
         return []
     preset_lower = {s["id"]: bool(s.get("lower")) for s in DEFAULT_ONLINE_SITES}
+    preset_kind = {s["id"]: s.get("kind") or "meta" for s in DEFAULT_ONLINE_SITES}
     out: List[Dict[str, Any]] = []
     for s in sites:
         if not isinstance(s, dict):
@@ -637,6 +687,8 @@ def _migrate_online_sites(sites: Any) -> List[Dict[str, Any]]:
         pid = item.get("id")
         if pid in preset_lower and "lower" not in item:
             item["lower"] = preset_lower[pid]
+        if not item.get("kind"):
+            item["kind"] = preset_kind.get(pid, "meta")
         out.append(item)
     return out
 

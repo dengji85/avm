@@ -1,8 +1,9 @@
 <script setup>
 import { ref, computed, onMounted, onBeforeUnmount, watch } from 'vue'
 import { state } from '../state.js'
-import { getActress, toggleActressFav, toggleActressFollow, updateActress, renameActress, mergeActress, fetchOneActressProfile, coverThumbUrl, avatarUrl } from '../api.js'
+import { getActress, toggleActressFav, updateActress, renameActress, mergeActress, fetchOneActressProfile, coverThumbUrl, avatarUrl, subTargets, subTargetFromLibrary, subTargetDelete } from '../api.js'
 import { toast, avatarFallback, fmtSize, confirmDialog } from '../utils.js'
+import { t } from '../i18n/index.js'
 import MovieGrid from '../components/MovieGrid.vue'
 import Pager from '../components/Pager.vue'
 
@@ -69,6 +70,7 @@ async function load() {
     info.value = r.info || {}
     movies.value = r.items || []
     total.value = Number(r.total) || movies.value.length
+    await loadSubscription()
   } catch (e) {
     toast(e.message, 'err')
     back()
@@ -104,12 +106,49 @@ async function fav() {
   } catch (e) { toast(e.message, 'err') }
 }
 
-async function follow() {
+/** 订阅状态：「订阅」= 新片提醒 + 关注（关注并入订阅），未订阅时点击即从库里建订阅目标 */
+const subTarget = ref(null)
+const subBusy = ref(false)
+
+async function loadSubscription() {
+  const n = (info.value && (info.value.name || name.value)) || ''
+  if (!n) { subTarget.value = null; return }
   try {
-    const r = await toggleActressFollow(info.value.id || name.value)
-    info.value.followed = r && r.followed != null ? r.followed : (info.value.followed ? 0 : 1)
-    toast(info.value.followed ? '已关注' : '已取消关注', 'ok')
-  } catch (e) { toast(e.message, 'err') }
+    const r = await subTargets()
+    subTarget.value = ((r && r.items) || [])
+      .find((x) => x.kind === 'actress' && x.name === n) || null
+  } catch (e) { subTarget.value = null }
+}
+
+async function subscribe() {
+  if (subBusy.value) return
+  const n = (info.value && (info.value.name || name.value)) || ''
+  if (!n) return
+  subBusy.value = true
+  try {
+    if (subTarget.value) {
+      const ok = await confirmDialog(t('actress.unsubscribeTitle'),
+        t('actress.unsubscribeDesc', { name: n }), { danger: true })
+      if (!ok) return
+      await subTargetDelete(subTarget.value.id)
+      subTarget.value = null
+      info.value.followed = 0
+      toast(t('actress.unsubscribed'), 'ok')
+    } else {
+      const r = await subTargetFromLibrary({ kind: 'actress', name: n })
+      subTarget.value = (r && r.item) || null
+      info.value.followed = 1
+      toast(t('actress.subscribedTip'), 'ok')
+    }
+  } catch (e) { toast(e.message, 'err') } finally { subBusy.value = false }
+}
+
+/** 单女优规则：跳订阅页规则 Tab 并预选该女优 */
+function openRules() {
+  if (!subTarget.value) return
+  state.subTab = 'rules'
+  state.subTarget = subTarget.value.id
+  state.view = 'subscriptions'
 }
 
 function startEdit() {
@@ -292,7 +331,10 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
 
           <div class="pf-acts" v-if="!editing">
             <button class="btn" :class="{ active: info.favorite }" @click="fav">{{ info.favorite ? '♥ 已收藏' : '♡ 收藏' }}</button>
-            <button class="btn" :class="{ active: info.followed }" @click="follow">{{ info.followed ? '已关注' : '关注' }}</button>
+            <button class="btn" :class="{ active: !!subTarget }" :disabled="subBusy" @click="subscribe">
+              {{ subTarget ? $t('actress.subscribed') : $t('actress.subscribe') }}
+            </button>
+            <button v-if="subTarget" class="btn ghost" @click="openRules">{{ $t('actress.rules') }}</button>
             <button class="btn ghost" @click="startEdit">编辑资料</button>
             <button class="btn ghost" @click="doRename">重命名</button>
             <button class="btn ghost danger" @click="doMerge">合并女优</button>

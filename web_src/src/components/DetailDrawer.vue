@@ -12,6 +12,7 @@ import {
   movieSources, setPrimarySource, deleteSource, addMovieSource,
   toggleSource, checkSource, refreshSource, probeSource,
   movieMarkers, updateMovieMarker, deleteMovieMarker,
+  subTargets, subTargetFromLibrary,
 } from '../api.js'
 import SubtitleSummary from './SubtitleSummary.vue'
 import AddToCollectionBtn from './AddToCollectionBtn.vue'
@@ -77,7 +78,56 @@ async function setMarkerPrimary(m) {
     toast(e.message, 'err')
   }
 }
-const pvLoading = ref(false)
+/* ---------- 订阅本片相关：女优 / 系列多选，从库里建订阅目标 ---------- */
+const subOpen = ref(false)
+const subBusy = ref(false)
+const subList = ref([])
+
+async function openSubscribe() {
+  if (!mv.value || subBusy.value) return
+  subOpen.value = true
+  subBusy.value = true
+  try {
+    const r = await subTargets()
+    const set = new Set(((r && r.items) || []).map((x) => x.kind + ':' + x.name))
+    const opts = (mv.value.actresses || []).map((a) => {
+      const subscribed = set.has('actress:' + a)
+      return { kind: 'actress', name: a, subscribed, checked: !subscribed }
+    })
+    const s = (mv.value.series || '').trim()
+    if (s) {
+      const subscribed = set.has('series:' + s)
+      opts.push({ kind: 'series', name: s, subscribed, checked: !subscribed })
+    }
+    subList.value = opts
+  } catch (e) {
+    toast(e.message, 'err')
+    subOpen.value = false
+  } finally {
+    subBusy.value = false
+  }
+}
+
+async function doSubscribe() {
+  const picks = subList.value.filter((x) => x.checked && !x.subscribed)
+  if (!picks.length) { subOpen.value = false; return }
+  subBusy.value = true
+  let ok = 0, fail = 0
+  for (const p of picks) {
+    try {
+      await subTargetFromLibrary({ kind: p.kind, name: p.name })
+      p.subscribed = true
+      ok += 1
+    } catch (e) {
+      fail += 1
+    }
+  }
+  subBusy.value = false
+  if (fail) toast(t('detail.subscribePart', { ok, fail }), 'err')
+  else if (ok) toast(t('detail.subscribeOk', { n: ok }), 'ok')
+  if (!fail) subOpen.value = false
+}
+
 const similar = ref([])
 const pendingAutoplay = ref(false)
 const localFiles = computed(() => (mv.value?.files || []).filter((f) => f.kind !== 'online'))
@@ -713,11 +763,20 @@ function close() {
 }
 
 /* ---------- 操作 ---------- */
+/* 标记按钮点完给一句反馈：触屏没有 hover，只看样式变化不知道自己点成了什么 */
+const FLAG_TOAST = {
+  favorite: { on: 'flag.favOn', off: 'flag.favOff' },
+  watchlist: { on: 'flag.watchOn', off: 'flag.watchOff' },
+  watched: { on: 'flag.watchedOn', off: 'flag.watchedOff' },
+}
+
 async function flip(field) {
   try {
     const r = await toggleFlag(id.value, field)
     const v = r && r.value != null ? r.value : !mv.value[field]
     mv.value[field] = v
+    const msg = FLAG_TOAST[field]
+    if (msg) toast(t(v ? msg.on : msg.off), 'ok')
     window.dispatchEvent(new CustomEvent('avm-reload-view'))
   } catch (e) { toast(e.message, 'err') }
 }
@@ -1336,7 +1395,7 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', onKey); stopSource
                     </button>
                     <button v-if="canExternal" class="btn" :disabled="!hasPlayable" @click="play">↗ {{ $t('player.external') }}</button>
                     <button class="btn icon" :class="{ active: !!castTo }" :disabled="!hasPlayable"
-                            :data-tip="castTo ? castTo : $t('detail.cast')" @click="openCast"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7h18v13H3zM8 3l4 4 4-4"/></svg></button>
+                            :title="castTo ? castTo : $t('detail.cast')" :aria-label="$t('detail.cast')" @click="openCast"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7h18v13H3zM8 3l4 4 4-4"/></svg></button>
                     <button v-if="castTo" class="btn ghost" @click="stopCast">{{ $t('detail.castStop') }}</button>
                     </div>
                   </div>
@@ -1344,11 +1403,16 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', onKey); stopSource
                   <div class="dd-g">
                     <span class="dd-g-lbl">{{ $t('detail.grpMark') }}</span>
                     <div class="dd-btns icons">
-                    <button class="btn icon" :class="{ active: mv.favorite }" @click="flip('favorite')" :data-tip="$t('flag.favorite')">{{ mv.favorite ? '♥' : '♡' }}</button>
-                    <button class="btn icon" :class="{ active: mv.watchlist }" @click="flip('watchlist')" :data-tip="$t('flag.watchlist')"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg></button>
-                    <button class="btn icon" :class="{ active: mv.watched }" @click="flip('watched')" :data-tip="$t('flag.watched')">{{ mv.watched ? '●' : '○' }}</button>
+                    <!-- 抽屉内容区是滚动容器，data-tip 的浮层会被裁掉；这里用原生 title 保证一定看得到 -->
+                    <button class="btn icon" :class="{ active: mv.favorite }" @click="flip('favorite')"
+                            :title="$t('flag.favorite')" :aria-label="$t('flag.favorite')" :aria-pressed="!!mv.favorite"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z" :fill="mv.favorite ? 'currentColor' : 'none'"/></svg></button>
+                    <button class="btn icon" :class="{ active: mv.watchlist }" @click="flip('watchlist')"
+                            :title="$t('flag.watchlist')" :aria-label="$t('flag.watchlist')" :aria-pressed="!!mv.watchlist"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg></button>
+                    <!-- 用 SVG 圆点而不是 ●/○：字符字形在字体里偏心，选中态看起来不居中 -->
+                    <button class="btn icon" :class="{ active: mv.watched }" @click="flip('watched')"
+                            :title="$t('flag.watched')" :aria-label="$t('flag.watched')" :aria-pressed="!!mv.watched"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="7.5" :fill="mv.watched ? 'currentColor' : 'none'"/></svg></button>
                     <AddToCollectionBtn :movie-id="id" variant="detail" />
-                    <button v-if="canReveal" class="btn icon" @click="openFolder" :data-tip="$t('detail.revealFolder')"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg></button>
+                    <button v-if="canReveal" class="btn icon" @click="openFolder" :title="$t('detail.revealFolder')" :aria-label="$t('detail.revealFolder')"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg></button>
                     </div>
                   </div>
 
@@ -1370,6 +1434,9 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', onKey); stopSource
                         <button v-for="s in moreSites" :key="s.id" class="sites-pop-item"
                                 :title="renderSiteUrl(s, (mv && mv.code) || '')" @click="openSite(s)">
                           <span class="i">↗</span> {{ s.name || s.url }}
+                          <span class="site-kind" :class="{ watch: s.kind === 'watch' }">
+                            {{ s.kind === 'watch' ? $t('settings.sitesKindWatch') : $t('settings.sitesKindMeta') }}
+                          </span>
                         </button>
                       </div>
                     </div>
@@ -1424,7 +1491,12 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', onKey); stopSource
             <div class="dd-extra">
 
               <!-- 关键信息 -->
-              <div class="dd-sec-t">{{ $t('detail.secInfo') }}</div>
+              <div class="dd-sec-t sec-head">
+                <span>{{ $t('detail.secInfo') }}</span>
+                <button class="btn tiny ghost" :disabled="subBusy" @click="openSubscribe">
+                  {{ $t('detail.subscribeEntry') }}
+                </button>
+              </div>
               <dl class="dd-facts">
                 <div v-if="mv.actresses && mv.actresses.length" class="dd-fact wide">
                   <dt>{{ $t('detail.fActress') }}</dt>
@@ -1491,12 +1563,12 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', onKey); stopSource
                 <div class="dd-fact wide">
                   <dt>{{ $t('detail.fFlags') }}</dt>
                   <dd class="chip-list dd-flags">
-                    <span v-if="mv.subtitle" class="badge ok">{{ $t('detail.subtitle') }}</span>
-                    <span v-if="mv.embed_sub_zh" class="badge ok" :title="$t('flag.embedZh')">{{ $t('flag.embedZh') }}</span>
-                    <span v-if="mv.uncensored" class="badge warn">{{ $t('detail.uncensored') }}</span>
-                    <span v-if="quality" class="badge accent">{{ quality }}</span>
-                    <span v-if="mv.vr" class="badge">VR</span>
-                    <span v-if="mv.leak" class="badge err">{{ $t('detail.leak') }}</span>
+                    <span v-if="mv.subtitle" class="badge ok" :title="$t('flag.subtitleHint')">{{ $t('detail.subtitle') }}</span>
+                    <span v-if="mv.embed_sub_zh" class="badge ok" :title="$t('flag.embedZhHint')">{{ $t('flag.embedZh') }}</span>
+                    <span v-if="mv.uncensored" class="badge warn" :title="$t('flag.uncensoredHint')">{{ $t('detail.uncensored') }}</span>
+                    <span v-if="quality" class="badge accent" :title="$t('flag.qualityHint')">{{ quality }}</span>
+                    <span v-if="mv.vr" class="badge" :title="$t('flag.vrHint')">VR</span>
+                    <span v-if="mv.leak" class="badge err" :title="$t('flag.leakHint')">{{ $t('detail.leak') }}</span>
                     <span v-for="sub in manualSubs" :key="sub.id" class="badge sub" :title="sub.path">
                       {{ $t('detail.subFile', { lang: sub.lang || '字幕' }) }}
                     </span>
@@ -2038,6 +2110,36 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', onKey); stopSource
       <div v-else-if="loading" class="dd-loading"><span class="spinner large"></span></div>
     </aside>
 
+    <!-- 订阅本片相关：女优 / 系列多选 -->
+    <Teleport to="body">
+      <div v-if="subOpen" class="subm-mask" @click.self="subOpen = false">
+        <div class="subm-box">
+          <div class="subm-head">
+            <b>{{ $t('detail.subscribeTitle') }}</b>
+            <button class="subm-x" @click="subOpen = false">×</button>
+          </div>
+          <p class="subm-hint">{{ $t('detail.subscribeHint') }}</p>
+          <div v-if="!subList.length" class="subm-empty">{{ $t('detail.subscribeNone') }}</div>
+          <div v-else class="subm-list">
+            <label v-for="(x, i) in subList" :key="x.kind + ':' + x.name" class="subm-row"
+                   :class="{ on: x.subscribed }">
+              <input type="checkbox" v-model="subList[i].checked" :disabled="x.subscribed" />
+              <span class="subm-kind">{{ x.kind === 'actress' ? $t('subscriptions.kinds.actress') : $t('subscriptions.kinds.series') }}</span>
+              <span class="subm-name ellipsis">{{ x.name }}</span>
+              <span v-if="x.subscribed" class="subm-tag">{{ $t('detail.subscribeAlready') }}</span>
+            </label>
+          </div>
+          <div class="subm-foot">
+            <button class="btn ghost" @click="subOpen = false">{{ $t('common.cancel') }}</button>
+            <button class="btn primary" :disabled="subBusy || !subList.some(x => x.checked && !x.subscribed)"
+                    @click="doSubscribe">
+              {{ $t('detail.subscribeDo') }}
+            </button>
+          </div>
+        </div>
+      </div>
+    </Teleport>
+
     <!-- 灯箱 -->
     <div v-if="lightboxSrc" class="lightbox" @click="closeLightbox">
       <!-- 沉浸式铺底：当前图片自身放大模糊，横向/纵向填满整屏，不再是大片纯黑 -->
@@ -2254,6 +2356,41 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', onKey); stopSource
   color: var(--c-text-3); text-transform: uppercase;
 }
 .dd-extra > .dd-sec-t:first-child { margin-top: 4px; padding-top: 0; border-top: none; }
+/* 分区标题带操作入口（如「订阅相关」）：左标题右按钮 */
+.dd-sec-t.sec-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+/* 订阅弹层：列本片女优与系列，已订阅置灰 */
+.subm-mask {
+  position: fixed; inset: 0; z-index: 140; background: rgba(0, 0, 0, .62);
+  display: flex; align-items: center; justify-content: center; padding: 20px;
+}
+.subm-box {
+  width: min(440px, 94vw); max-height: 80vh; overflow: auto;
+  background: var(--c-surface); border: 1px solid var(--c-line);
+  border-radius: var(--r-md); box-shadow: 0 18px 48px rgba(0, 0, 0, .45);
+  padding: 14px 16px;
+}
+.subm-head { display: flex; align-items: center; justify-content: space-between; }
+.subm-x {
+  border: none; background: transparent; color: var(--c-text-3);
+  font-size: 20px; line-height: 1; cursor: pointer; padding: 0 4px;
+}
+.subm-x:hover { color: var(--c-text); }
+.subm-hint { margin: 4px 0 10px; font-size: 12px; color: var(--c-text-3); }
+.subm-empty { padding: 18px 0; text-align: center; font-size: 12.5px; color: var(--c-text-3); }
+.subm-list { display: flex; flex-direction: column; gap: 4px; }
+.subm-row {
+  display: flex; align-items: center; gap: 8px; padding: 8px 10px;
+  border: 1px solid var(--c-line); border-radius: var(--r-sm);
+  background: var(--c-surface-1); cursor: pointer;
+}
+.subm-row.on { opacity: .6; cursor: default; }
+.subm-kind {
+  flex: 0 0 auto; font-size: 11px; padding: 1px 6px; border-radius: 999px;
+  background: var(--c-surface-2); color: var(--c-text-3);
+}
+.subm-name { flex: 1 1 auto; min-width: 0; font-size: 13px; }
+.subm-tag { flex: 0 0 auto; font-size: 11px; color: var(--c-primary); }
+.subm-foot { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
 /* 主操作按组平铺：每行一个组，左侧小标签对齐——所有功能一级可见，不搞层级 */
 /* 操作区：一块面板内的四组工具，按钮等高、标签右对齐，避免零散按钮的锯齿感 */
 .dd-actions {
@@ -2283,9 +2420,10 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', onKey); stopSource
 /* 图标按钮也占满单元格：与文字按钮同宽同高，形成整齐的按钮矩阵 */
 .dd-btns > .btn.icon { width: 30px; justify-self: start; padding: 0; font-size: 15px; }
 /* 纯图标行（收藏/想看/已看/片单/文件夹）：紧凑方块，不再撑成大方块 */
-/* 纯图标行用 flex：每个 32px，不被网格列宽推着换行 */
+/* 纯图标行用 flex：每个 32px，不被网格列宽推着换行。
+   高度也钉成 32：cinema 皮肤下图标按钮是正圆，32×30 会被压成椭圆 */
 .dd-btns.icons { display: flex; flex-wrap: wrap; gap: 6px; }
-.dd-btns.icons > .btn { width: 32px; flex: 0 0 32px; }
+.dd-btns.icons > .btn { width: 32px; height: 32px; flex: 0 0 32px; }
 /* 站点行：宽度随文字，短名字不会被拉成一格空格子 */
 .dd-btns.chips { display: flex; flex-wrap: wrap; }
 .dd-btns.chips > .btn { flex: 0 0 auto; width: auto; padding: 0 10px; }
@@ -2315,6 +2453,12 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', onKey); stopSource
   border: 0; background: transparent; color: var(--c-text); padding: 7px 8px; border-radius: var(--r-sm);
   cursor: pointer; font-size: 13px; }
 .sites-pop-item:hover { background: var(--c-surface-3); color: var(--c-primary); }
+/* 站点类别标签：观看站高亮，资料站弱化 */
+.sites-pop-item .site-kind {
+  margin-left: auto; font-size: 11px; color: var(--c-text-3);
+  border: 1px solid var(--c-line); border-radius: 999px; padding: 0 6px;
+}
+.sites-pop-item .site-kind.watch { color: var(--c-primary); border-color: var(--c-primary); }
 
 /* 徽章行的尾部 spacer：把「登记字幕」按钮推到行尾 */
 .chip-list .spacer { flex: 1 1 12px; }
@@ -2706,6 +2850,9 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', onKey); stopSource
   .lb-main { gap: 6px; }
   .lb-main img { height: calc(100vh - 140px); max-width: 94vw; }
   .lb-thumbs img { width: 64px; height: 38px; }
+  /* 触屏没有 hover，图标按钮放大到 40×40 更好点；桌面保持紧凑 */
+  .dd-actions .dd-btns.icons > .btn { width: 40px; height: 40px; flex: 0 0 40px; }
+  .dd-btns.icons > .btn .ic { width: 17px; height: 17px; }
 }
 
 @media (max-width: 760px) {

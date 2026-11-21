@@ -2,7 +2,7 @@
 import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
 import { state, NAV_TABS, NAV_MORE, NAV_ICONS, goSearch, toggleTheme } from '../state.js'
 import { useTasks, pct, etaSec, phaseLabel, fmtDur, fetchScrapeLogs } from '../composables/useTasks.js'
-import { aiStatus, aiSearchIntent, getSession, logout } from '../api.js'
+import { aiStatus, aiSearchIntent, getSession, logout, subUnread } from '../api.js'
 import { toast, fmtAgo } from '../utils.js'
 import { t } from '../i18n/index.js'
 import NavMenu from './NavMenu.vue'
@@ -100,12 +100,34 @@ async function doLogout() {
   setTimeout(() => window.location.reload(), 300)
 }
 
+/* 订阅未读角标：60s 轮询；页面隐藏时暂停，回到前台立即刷新一次 */
+const subBadge = ref(0)
+let subTimer = null
+async function refreshSubBadge() {
+  try {
+    const r = await subUnread()
+    subBadge.value = Number((r && r.count) || 0)
+  } catch (e) { /* 角标失败不打扰用户 */ }
+}
+function onSubVisible() { if (!document.hidden) refreshSubBadge() }
+function goSubscriptions() {
+  state.view = 'subscriptions'
+  state.taskPanelOpen = false
+}
+
 onMounted(() => {
   window.addEventListener('keydown', onKey)
+  document.addEventListener('visibilitychange', onSubVisible)
   refreshAi()
   refreshSession()
+  refreshSubBadge()
+  subTimer = setInterval(() => { if (!document.hidden) refreshSubBadge() }, 60000)
 })
-onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
+onBeforeUnmount(() => {
+  window.removeEventListener('keydown', onKey)
+  document.removeEventListener('visibilitychange', onSubVisible)
+  if (subTimer) clearInterval(subTimer)
+})
 
 // 任务中心「前往维护中心」：切到维护视图并关闭任务面板，避免浮层遮挡
 function goMaintenance() {
@@ -215,6 +237,12 @@ async function setScrapeFilter(taskId, f) {
     </div>
 
     <div class="actions">
+      <!-- 订阅新片：未读角标（60s 轮询，页面隐藏时暂停） -->
+      <button class="btn ghost sub-bell" @click="goSubscriptions" :data-tip="$t('nav.subscriptions')">
+        <svg class="ic" viewBox="0 0 24 24" fill="currentColor"><path :d="NAV_ICONS.bell" /></svg>
+        <span v-if="subBadge" class="sub-badge tabular">{{ subBadge > 99 ? '99+' : subBadge }}</span>
+      </button>
+
       <!-- 任务指示器 -->
       <div class="task-wrap">
         <button
@@ -251,7 +279,8 @@ async function setScrapeFilter(taskId, f) {
             >
               <!-- 顶部：名称 + 状态徽标 -->
               <div class="tp-top">
-                <span class="tp-name">
+                <span class="tp-name" :class="{ link: t.key === 'sub_update' }"
+                      @click="t.key === 'sub_update' && goSubscriptions()">
                   <span class="tp-dot" :class="{ live: t.running }"></span>
                   {{ t.label }}
                 </span>
@@ -289,7 +318,7 @@ async function setScrapeFilter(taskId, f) {
 
               <!-- 当前项：正在刮削/扫描哪个 -->
               <div v-if="t.running" class="tp-current ellipsis" :title="t.current || t.message">
-                <span class="tk">{{ t.key === 'scan' ? $t('tasks.scan') : $t('tasks.scrape') }}</span>
+                <span class="tk">{{ t.key === 'scan' ? $t('tasks.scan') : t.key === 'scrape' ? $t('tasks.scrape') : $t('tasks.subUpdate') }}</span>
                 {{ t.current || t.message || $t('tasks.processing') }}
               </div>
 
@@ -303,6 +332,9 @@ async function setScrapeFilter(taskId, f) {
                   :class="{ on: showScrapeLogs === t.key }"
                   @click="showScrapeLogs = showScrapeLogs === t.key ? null : t.key"
                 >{{ $t('tasks.detail') }} {{ t.logs.length }}</button>
+                <button v-if="t.key === 'sub_update'" class="btn tiny ghost" @click="goSubscriptions">
+                  {{ $t('tasks.goSubscriptions') }}
+                </button>
                 <button v-if="t.running" class="btn tiny ghost danger" @click="abort(t.key)">{{ $t('common.cancel') }}</button>
               </div>
 
@@ -491,6 +523,16 @@ async function setScrapeFilter(taskId, f) {
 .si.busy { position: absolute; right: 10px; top: 50%; transform: translateY(-50%); color: var(--c-accent); }
 
 .task-wrap { position: relative; }
+/* 订阅铃铛：有未读时角标叠在右上角 */
+.sub-bell { position: relative; gap: 6px; padding: 0 var(--sp-2); min-width: 32px; }
+.sub-bell .ic { width: 17px; height: 17px; }
+.sub-badge {
+  position: absolute; top: 2px; right: 2px;
+  min-width: 14px; height: 14px; padding: 0 3px;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: var(--c-primary); color: #fff; border-radius: 7px;
+  font-size: 10px; line-height: 1;
+}
 /* AI 助手入口：未启用时保持中性，启用后描边高亮 */
 .ai-launch { padding: 0 var(--sp-2); min-width: 32px; font-size: 15px; }
 .ai-launch.on { color: var(--c-primary); border-color: var(--c-primary); }
@@ -553,6 +595,9 @@ async function setScrapeFilter(taskId, f) {
 
 .tp-top { display: flex; align-items: center; justify-content: space-between; }
 .tp-name { display: flex; align-items: center; gap: 6px; font-size: var(--fs-md); font-weight: 600; }
+/* 订阅更新条目可点击跳到订阅页 */
+.tp-name.link { cursor: pointer; }
+.tp-name.link:hover { color: var(--c-primary-h, #4f8cff); }
 .tp-dot {
   width: 8px; height: 8px; border-radius: 50%;
   background: var(--c-text-3); flex: 0 0 auto;

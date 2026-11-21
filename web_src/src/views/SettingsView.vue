@@ -133,12 +133,12 @@ const cfg = reactive({
 /* 常见站点预设：首次进入或点「添加常见站点」时一次性补入。
    lower=true 表示跳转前把 {code} 转为小写（如 JavBus / 123av 的路径为小写番号）。 */
 const PRESET_SITES = [
-  { id: 'preset_javbus', name: 'JavBus', url: 'https://javbus.com/{code}', lower: true, enabled: true },
-  { id: 'preset_javwiki', name: 'AV-Wiki', url: 'https://av-wiki.net/{code}/', enabled: true },
-  { id: 'preset_javdb', name: 'JavDB', url: 'https://javdb.com/search?q={code}', lower: true, enabled: true },
-  { id: 'preset_javlibrary', name: 'JavLibrary', url: 'https://www.javlibrary.com/cn/vl_searchbyid.php?keyword={code}', enabled: true },
-  { id: 'preset_missav', name: '123av', url: 'https://123av.com/cn/v/{code}', lower: true, enabled: true },
-  { id: 'preset_jable', name: 'Jable', url: 'https://jable.tv/videos/{code}/', lower: true, enabled: true },
+  { id: 'preset_javbus', name: 'JavBus', url: 'https://javbus.com/{code}', lower: true, kind: 'meta', enabled: true },
+  { id: 'preset_javwiki', name: 'AV-Wiki', url: 'https://av-wiki.net/{code}/', kind: 'meta', enabled: true },
+  { id: 'preset_javdb', name: 'JavDB', url: 'https://javdb.com/search?q={code}', lower: true, kind: 'meta', enabled: true },
+  { id: 'preset_javlibrary', name: 'JavLibrary', url: 'https://www.javlibrary.com/cn/vl_searchbyid.php?keyword={code}', kind: 'meta', enabled: true },
+  { id: 'preset_missav', name: '123av', url: 'https://123av.com/cn/v/{code}', lower: true, kind: 'watch', enabled: true },
+  { id: 'preset_jable', name: 'Jable', url: 'https://jable.tv/videos/{code}/', lower: true, kind: 'watch', enabled: true },
 ]
 
 const providers = reactive({ available: [], active: [] })
@@ -1474,14 +1474,16 @@ async function saveWiki() {
 /* ---------------- 常用在线站点 ---------------- */
 const savingSites = ref(false)
 const editingSite = ref(null) // 正在编辑的站点（null=关闭弹窗）
-const draftSite = reactive({ id: '', name: '', url: '', enabled: true })
+const draftSite = reactive({ id: '', name: '', url: '', kind: 'meta', enabled: true })
 
 function openAddSite() {
-  Object.assign(draftSite, { id: '', name: '', url: '', enabled: true })
+  Object.assign(draftSite, { id: '', name: '', url: '', kind: 'meta', enabled: true })
   editingSite.value = 'new'
 }
 function openEditSite(s) {
-  Object.assign(draftSite, { id: s.id, name: s.name, url: s.url, enabled: !!s.enabled })
+  Object.assign(draftSite, {
+    id: s.id, name: s.name, url: s.url, kind: s.kind || 'meta', enabled: !!s.enabled,
+  })
   editingSite.value = s.id
 }
 function closeSiteEditor() { editingSite.value = null }
@@ -1492,11 +1494,12 @@ function saveSiteEditor() {
     toast(t('settings.sitesInvalid'), 'err')
     return
   }
+  const kind = draftSite.kind === 'watch' ? 'watch' : 'meta'
   if (editingSite.value === 'new') {
-    cfg.online_sites.push({ id: 's_' + Date.now(), name: name || url, url, enabled: draftSite.enabled })
+    cfg.online_sites.push({ id: 's_' + Date.now(), name: name || url, url, kind, enabled: draftSite.enabled })
   } else {
     const i = cfg.online_sites.findIndex((s) => s.id === editingSite.value)
-    if (i >= 0) Object.assign(cfg.online_sites[i], { name: name || url, url, enabled: draftSite.enabled })
+    if (i >= 0) Object.assign(cfg.online_sites[i], { name: name || url, url, kind, enabled: draftSite.enabled })
   }
   closeSiteEditor()
 }
@@ -2082,7 +2085,12 @@ onMounted(async () => {
                   <span class="track"></span>
                 </label>
                 <div class="sites-info">
-                  <div class="sites-name">{{ s.name }}</div>
+                  <div class="sites-name">
+                    {{ s.name }}
+                    <span class="sites-kind" :class="{ watch: s.kind === 'watch' }">
+                      {{ s.kind === 'watch' ? $t('settings.sitesKindWatch') : $t('settings.sitesKindMeta') }}
+                    </span>
+                  </div>
                   <div class="sites-url">{{ s.url }}</div>
                 </div>
                 <div class="sites-actions">
@@ -2114,6 +2122,14 @@ onMounted(async () => {
                 <input v-model="draftSite.url" :placeholder="$t('settings.sitesUrlPh')" />
               </div>
               <div class="form-hint">{{ $t('settings.sitesUrlHint') }}</div>
+              <div class="form-row">
+                <label>{{ $t('settings.sitesKind') }}</label>
+                <select v-model="draftSite.kind">
+                  <option value="meta">{{ $t('settings.sitesKindMeta') }}</option>
+                  <option value="watch">{{ $t('settings.sitesKindWatch') }}</option>
+                </select>
+              </div>
+              <div class="form-hint">{{ $t('settings.sitesKindHint') }}</div>
               <div class="form-row inline">
                 <label class="switch sm">
                   <input type="checkbox" v-model="draftSite.enabled" />
@@ -3224,7 +3240,13 @@ kbd {
   background: var(--c-surface);
 }
 .sites-item .sites-info { flex: 1; min-width: 0; }
-.sites-name { font-weight: 600; }
+.sites-name { font-weight: 600; display: flex; align-items: center; gap: 6px; }
+/* 站点类别：元数据查询 / 在线观看 */
+.sites-kind {
+  font-size: 11px; font-weight: 500; padding: 1px 6px; border-radius: 999px;
+  border: 1px solid var(--c-line); color: var(--c-text-3);
+}
+.sites-kind.watch { color: var(--c-primary); border-color: var(--c-primary); }
 .sites-url { font-size: var(--fs-sm); color: var(--c-text-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .sites-actions { display: flex; gap: var(--sp-2); flex-shrink: 0; }
 .btn.sm { padding: 4px 10px; font-size: var(--fs-sm); }

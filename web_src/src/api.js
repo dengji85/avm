@@ -570,3 +570,49 @@ export const probeSource = (id) => post(`/sources/${id}/probe`, {})
 export const probeStart = (body = {}) => post('/sources/probe/start', body)
 export const probeState = () => get('/sources/probe/state')
 export const probeCancel = () => post('/sources/probe/cancel', {})
+
+/* ---------------- 订阅（女优 / 系列）新片提醒 ---------------- */
+export const subTargets = () => get('/subscriptions/targets')
+export const subLibraryOptions = (params = {}) => get('/subscriptions/library-options', params)
+export const subTargetFromLibrary = (body) => post('/subscriptions/targets/from-library', body)
+export const subTargetsFromLibraryBulk = (body = {}) => post('/subscriptions/targets/from-library/bulk', body)
+export const subTargetCreate = (body) => post('/subscriptions/targets', body)
+export const subTargetUpdate = (id, body) => patch(`/subscriptions/targets/${id}`, body)
+export const subTargetDelete = (id) => del(`/subscriptions/targets/${id}`)
+export const subFindings = (params = {}) => get('/subscriptions/findings', params)
+export const subFindingActresses = (params = {}) => get('/subscriptions/findings/actresses', params)
+// 封面走后端缓存（外站图片直链在浏览器里常被墙 / 防盗链）
+// v：缓存版本（用探测时间）；size=large 取官方大图（拿不到后端自动退回缩略图）
+export const subFindingCover = (id, v = '', size = '') => {
+  const q = []
+  if (size) q.push('size=' + encodeURIComponent(size))
+  if (v) q.push('v=' + encodeURIComponent(v))
+  return `${API}/subscriptions/findings/${id}/cover` + (q.length ? '?' + q.join('&') : '')
+}
+export const subRead = (id) => post(`/subscriptions/findings/${id}/read`, {})
+export const subMarkUnread = (id) => post(`/subscriptions/findings/${id}/unread`, {})
+export const subSeen = () => post('/subscriptions/seen', {})
+export const subIgnore = (id) => post(`/subscriptions/findings/${id}/ignore`, {})
+export const subRestore = (id) => post(`/subscriptions/findings/${id}/restore`, {})
+export const subSave = (id) => post(`/subscriptions/findings/${id}/save`, {})
+// 批量改状态：read / unread / ignore / restore / archive
+export const subBulk = (ids, action) => post('/subscriptions/findings/bulk', { ids, action })
+export const subResources = (id) => get(`/subscriptions/findings/${id}/resources`)
+export const subRules = (targetId) => get('/subscriptions/rules', { target_id: targetId })
+export const subRuleCreate = (body) => post('/subscriptions/rules', body)
+export const subRuleUpdate = (id, body) => patch(`/subscriptions/rules/${id}`, body)
+export const subRuleDelete = (id) => del(`/subscriptions/rules/${id}`)
+export const subRulesPreview = (body) => post('/subscriptions/rules/preview', body)
+export const subScanStart = (body = {}) => post('/subscriptions/scan', body)
+export const subScanState = () => get('/subscriptions/scan/state')
+// 自动扫描的定时状态：上次 / 下次时间、cron 是否合法
+export const subSchedule = () => get('/subscriptions/schedule')
+// 校验 cron 表达式并预览接下来几次触发时间
+export const subSchedulePreview = (expr, count = 3) => get('/subscriptions/schedule/preview', { expr, count })
+export const subScanCancel = () => post('/subscriptions/scan/cancel', {})
+export const subProbeStart = (body = {}) => post('/subscriptions/probe', body)
+export const subProbeState = () => get('/subscriptions/probe/state')
+export const subProbeCancel = () => post('/subscriptions/probe/cancel', {})
+// 单条立即重探（同步，秒级）：卡片上的「重新探测」
+export const subProbeOne = (id) => post(`/subscriptions/findings/${id}/probe`, {})
+export const subUnread = () => get('/subscriptions/unread-count')

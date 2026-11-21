@@ -83,6 +83,9 @@ export const state = reactive({
   theme: saved.theme === 'light' ? 'light' : 'dark',
   // 跨页面请求设置页的某个标签（如解锁码提示 → 设置 → 隐私）；消费后置空
   settingsTab: '',
+  // 跨页面请求订阅页的分区与目标（女优页「规则」→ 订阅页规则 Tab 并预选该女优）；消费后置空
+  subTab: '',
+  subTarget: null,
   // 跨页面请求高亮扩展组件页的某个组件卡（如抽帧报错 → 去安装 ffmpeg）；ExtPanel 消费后置空
   extHighlight: '',
   // 跨页面请求 AI 中心的某个分区（如面板里的「改提示词」→ AI 中心 → 提示词）；消费后置空
@@ -126,6 +129,8 @@ export const state = reactive({
     scan: { running: false, done: 0, total: 0, message: '', phase: '', elapsed: 0, cancelled: false, ok: 0, fail: 0, logs: [], counters: {} },
     scrape: { running: false, done: 0, total: 0, message: '', phase: '', elapsed: 0, cancelled: false, ok: 0, fail: 0, logs: [], counters: {} },
     actress_fetch: { running: false, done: 0, total: 0, message: '', phase: '', elapsed: 0, cancelled: false, ok: 0, fail: 0, logs: [], counters: {} },
+    // 订阅扫描 / 在线资源探测：只做「全局可见 + 可取消」，不进历史、不参与总进度
+    sub_update: { running: false, show: false, done: 0, total: 0, percent: 0, message: '', phase: '', kind: '', ok: 0, fail: 0 },
   },
   // 任务历史（已完成的任务存档，任务结束后失败数据仍可回看）
   taskHistory: [],
@@ -227,7 +232,7 @@ export function clearPlayQueue() {
  */
 const VALID_VIEWS = ['gallery', 'stats', 'maintenance', 'actress', 'ai',
   'collections', 'rankings', 'markers', 'swipe', 'settings', 'recent',
-  'discover', 'yearReview']
+  'discover', 'yearReview', 'subscriptions']
 // 与 MaintenanceView 的 TABS 一一对应：白名单不全的话，切到未列出的子标签时
 // hash 不会更新，刷新/分享就回不到那一页。
 const VALID_MAINT = ['overview', 'missing', 'storage', 'sources', 'ad', 'subtitle',
@@ -402,6 +407,8 @@ export const NAV_ICONS = {
   ext: 'M10 3a2 2 0 0 1 2 2v1h3.5a1.5 1.5 0 0 1 1.5 1.5V11h1a2 2 0 1 1 0 4h-1v3.5a1.5 1.5 0 0 1-1.5 1.5H12v-1a2 2 0 1 0-4 0v1H4.5A1.5 1.5 0 0 1 3 18.5V15H2a2 2 0 1 1 0-4h1V7.5A1.5 1.5 0 0 1 4.5 6H8V5a2 2 0 0 1 2-2z',
   // 标记墙：书签
   markers: 'M6 2h12a1 1 0 0 1 1 1v18l-7-4-7 4V3a1 1 0 0 1 1-1z',
+  // 订阅新片：铃铛
+  bell: 'M12 22a2.2 2.2 0 0 0 2.2-2.2H9.8A2.2 2.2 0 0 0 12 22zm7-6V11a7 7 0 0 0-5.5-6.84V3.5a1.5 1.5 0 1 0-3 0v.66A7 7 0 0 0 5 11v5l-1.6 1.6a1 1 0 0 0 .7 1.7h15.8a1 1 0 0 0 .7-1.7L19 16z',
   // 推荐首页：取景框
   discover: 'M4 7h3v2H6v3H4V7zm13-3h3v5h-2V6h-1V4zM4 17h2v3h3v2H4v-5zm14 0h2v5h-5v-2h3v-3zM8 9h8v6H8V9z',
 }
@@ -423,6 +430,7 @@ export const NAV_MORE = [
     { id: 'settings', label: 'nav.settings', icon: 'settings' },
   ] },
   { key: 'explore', title: 'navGroup.browse', items: [
+    { id: 'subscriptions', label: 'nav.subscriptions', icon: 'bell' },
     { id: 'actress', label: 'nav.actress', icon: 'actress' },
     { id: 'rankings', label: 'nav.rankings', icon: 'rankings' },
     { id: 'markers', label: 'nav.markers', icon: 'markers' },
@@ -452,6 +460,7 @@ export const NAV_GROUPS = [
     { id: 'recent', label: 'nav.recent', icon: 'recent' },
     { id: 'collections', label: 'nav.collections', icon: 'collections' },
     { id: 'rankings', label: 'nav.rankings', icon: 'rankings' },
+    { id: 'subscriptions', label: 'nav.subscriptions', icon: 'bell' },
     { id: 'yearReview', label: 'nav.yearReview', icon: 'yearReview' },
     { id: 'swipe', label: 'nav.swipe', icon: 'swipe' },
   ] },

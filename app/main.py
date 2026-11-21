@@ -502,6 +502,13 @@ def _startup() -> None:
         print("=" * 60)
     _start_auto_scan()
     _start_auto_renew()
+    _start_subscription_scan()
+    # 订阅在线资源探测：启动后延迟补一轮（上次没探完 / 新增的发现）
+    try:
+        from . import subscription_probe_job
+        subscription_probe_job.schedule_auto()
+    except Exception:
+        pass
     # MetaTube 托管进程：仅在「已启用 + managed + 自动启动」时拉起，
     # 失败不影响主服务（它只是一个可选数据源）。
     try:
@@ -598,6 +605,33 @@ def _start_auto_renew() -> None:
             time.sleep(max(2, interval) * 60)
 
     threading.Thread(target=_loop, name="auto-renew", daemon=True).start()
+
+
+def _start_subscription_scan() -> None:
+    """后台定时扫描订阅目标（女优 / 系列）的列表页，发现新片落进提醒表。
+
+    只做定时器：「该不该跑」交给 ``subscription_schedule``（cron 定点或固定
+    间隔，含关机错过后的启动补扫），抓取、进度、取消、单站冷却在
+    ``subscription_job`` / ``subscription`` 里。
+    """
+    import threading
+
+    from . import subscription_job, subscription_schedule
+
+    def _loop() -> None:
+        time.sleep(90)          # 启动后先让服务完全就绪，避开首屏请求高峰
+        while True:
+            try:
+                if subscription_schedule.should_run():
+                    subscription_job.start()
+                    subscription_schedule.mark_ran()
+            except Exception:  # noqa: BLE001 后台任务不因单轮失败退出
+                pass
+            # 半分钟醒一次：cron 最小粒度是分钟，够了；不按整个间隔 sleep，
+            # 改配置 / 改表达式能在一分钟内生效，不用重启
+            time.sleep(30)
+
+    threading.Thread(target=_loop, name="auto-subscription", daemon=True).start()
 
 
 @app.exception_handler(Exception)

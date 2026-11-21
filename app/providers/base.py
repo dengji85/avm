@@ -54,6 +54,21 @@ class BaseProvider:
     def fetch(self, movie: Dict[str, Any]) -> Optional[MetaResult]:
         raise NotImplementedError
 
+    # ------------------------------------------------------ 列表能力（订阅用）
+    # 订阅扫描需要「按女优 / 系列拿作品列表」，这与按番号查详情是两种能力：
+    # 后者必须实现 fetch，前者是可选能力，不实现该方法的源维持现状。
+    def list_url(self, target: Dict[str, Any], page: int = 1) -> str:
+        """列表页地址（订阅目标 + 页码）。"""
+        raise NotImplementedError
+
+    def parse_list(self, html: str, target: Dict[str, Any]) -> list:
+        """解析列表页为条目数组；条目字段见 docs/订阅新片提醒设计.md 7.1。"""
+        raise NotImplementedError
+
+    def supports_list(self) -> bool:
+        """本数据源是否具备列表能力。"""
+        return type(self).parse_list is not BaseProvider.parse_list
+
     # 收录范围声明：子类可覆写，用于「智能刮削」跳过不可能命中的源。
     # 返回 None/空 表示不限制；返回类型集合表示只处理这些类型。
     #: 只处理这些番号类型（空 = 不限制）
@@ -240,6 +255,12 @@ def _human_http_error(exc: Exception) -> str:
     return f"{name}: {exc}"
 
 
+def _html_title(html: str) -> str:
+    """取页面标题（小写、压平空白），用于判断验证页。"""
+    m = re.search(r"<title[^>]*>(.*?)</title>", html or "", re.I | re.S)
+    return re.sub(r"\s+", " ", m.group(1)).strip().lower() if m else ""
+
+
 def detect_blocker(html: str) -> str:
     """识别返回的页面是被什么拦了，供测试接口给出可操作提示。
 
@@ -248,13 +269,19 @@ def detect_blocker(html: str) -> str:
     if not html:
         return ""
     low = html.lower()
-    if ("cf-browser-verification" in low or "challenge-platform" in low
-            or "just a moment" in low or "enable javascript and cookies" in low):
+    title = _html_title(html)
+    # 只看真正的挑战页特征：正常的 Cloudflare 站点也会注入 challenge-platform
+    # 脚本（如 123av 的作品页），拿它当判据会把真实页面误判成验证页。
+    if ("cf-browser-verification" in low or "__cf_chl" in low
+            or 'id="challenge-form"' in low or "enable javascript and cookies" in low
+            or title.startswith(("just a moment", "attention required"))):
         return "Cloudflare 人机验证页（需填 cf_clearance Cookie）"
     if "driver-verify" in low or "age verification" in low:
         return "JavBus 自带的 driver-verify / 年龄验证页（需粘贴浏览器整段 Cookie）"
-    # av-wiki.net 的 Loader 验证页：标题「请稍候…」+ 正文「Loader 正在验证您的请求」
-    if ("loader" in low and "正在验证" in html) or "请稍候" in html or "正在验证您的请求" in html:
+    # av-wiki.net 的 Loader 验证页：标题「请稍候…」+ 正文「Loader 正在验证您的请求」。
+    # 「请稍候」只认标题：正常页面里也会出现这句（如登录按钮的 loading 文案）。
+    if (("loader" in low and "正在验证" in html) or "正在验证您的请求" in html
+            or title.startswith(("请稍候", "稍候"))):
         return "av-wiki 反爬验证页（Loader 正在验证您的请求），需等待放行或带 Cookie"
     return ""
 

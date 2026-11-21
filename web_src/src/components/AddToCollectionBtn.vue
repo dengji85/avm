@@ -142,10 +142,12 @@ onBeforeUnmount(() => window.removeEventListener('scroll', onReflow, { capture: 
       @click.stop="quickAdd"
     >＋</button>
 
+    <!-- 详情抽屉在滚动容器里，data-tip 浮层会被裁掉，用原生 title -->
     <button
       v-else
       class="btn icon"
-      :data-tip="$t('detail.addToCollection')"
+      :title="$t('detail.addToCollection')"
+      :aria-label="$t('detail.addToCollection')"
       @click.stop="toggle"
     >＋</button>
 

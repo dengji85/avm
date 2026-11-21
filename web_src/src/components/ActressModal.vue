@@ -2,9 +2,11 @@
 import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
 import { state } from '../state.js'
 import {
-  getActress, toggleActressFav, toggleActressFollow, coverThumbUrl, avatarUrl,
+  getActress, toggleActressFav, coverThumbUrl, avatarUrl,
+  subTargets, subTargetFromLibrary, subTargetDelete,
 } from '../api.js'
-import { toast, avatarFallback, fmtSize } from '../utils.js'
+import { toast, avatarFallback, fmtSize, confirmDialog } from '../utils.js'
+import { t } from '../i18n/index.js'
 import MovieGrid from './MovieGrid.vue'
 import Pager from './Pager.vue'
 
@@ -55,6 +57,7 @@ async function load() {
     info.value = r.info || {}
     movies.value = r.items || []
     total.value = Number(r.total) || movies.value.length
+    await loadSubscription()
   } catch (e) {
     toast(e.message, 'err')
   } finally { loading.value = false }
@@ -82,15 +85,44 @@ async function fav() {
     info.value.favorite = r && r.favorite != null ? r.favorite : (info.value.favorite ? 0 : 1)
   } catch (e) { toast(e.message, 'err') }
 }
-async function follow() {
+/** 订阅（关注并入订阅）：未订阅时从库里建目标，已订阅时确认后取消 */
+const subTarget = ref(null)
+const subBusy = ref(false)
+
+async function loadSubscription() {
+  const n = (info.value && (info.value.name || props.ident)) || ''
+  if (!n) { subTarget.value = null; return }
   try {
-    const r = await toggleActressFollow(info.value.id || props.ident)
-    info.value.followed = r && r.followed != null ? r.followed : (info.value.followed ? 0 : 1)
-  } catch (e) { toast(e.message, 'err') }
+    const r = await subTargets()
+    subTarget.value = ((r && r.items) || [])
+      .find((x) => x.kind === 'actress' && x.name === n) || null
+  } catch (e) { subTarget.value = null }
+}
+
+async function subscribe() {
+  if (subBusy.value) return
+  const n = (info.value && (info.value.name || props.ident)) || ''
+  if (!n) return
+  subBusy.value = true
+  try {
+    if (subTarget.value) {
+      const ok = await confirmDialog(t('actress.unsubscribeTitle'),
+        t('actress.unsubscribeDesc', { name: n }), { danger: true })
+      if (!ok) return
+      await subTargetDelete(subTarget.value.id)
+      subTarget.value = null
+      info.value.followed = 0
+      toast(t('actress.unsubscribed'), 'ok')
+    } else {
+      const r = await subTargetFromLibrary({ kind: 'actress', name: n })
+      subTarget.value = (r && r.item) || null
+      info.value.followed = 1
+      toast(t('actress.subscribedTip'), 'ok')
+    }
+  } catch (e) { toast(e.message, 'err') } finally { subBusy.value = false }
 }
 
 function onKey(e) { if (e.key === 'Escape') emit('close') }
-watch(() => props.ident, () => { page.value = 1; sort.value = 'date'; load() })
 onMounted(() => { load(); window.addEventListener('keydown', onKey) })
 onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
 </script>
@@ -137,7 +169,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
             <p v-if="info && info.profile" class="am-prof-text">{{ info.profile }}</p>
             <div class="am-acts" v-if="info">
               <button class="btn tiny" :class="{ active: info.favorite }" @click="fav">{{ info.favorite ? '♥ 已收藏' : '♡ 收藏' }}</button>
-              <button class="btn tiny" :class="{ active: info.followed }" @click="follow">{{ info.followed ? '已关注' : '关注' }}</button>
+              <button class="btn tiny" :class="{ active: !!subTarget }" :disabled="subBusy" @click="subscribe">{{ subTarget ? '已订阅' : '订阅' }}</button>
             </div>
           </div>
         </div>

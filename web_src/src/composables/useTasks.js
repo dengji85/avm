@@ -1,6 +1,6 @@
 import { computed } from 'vue'
 import { state } from '../state.js'
-import { scanStatus, scrapeStatus, startScan, startScrape, cancelScan, cancelScrape, scrapeLogs, actressFetchStatus, actressFetchCancel } from '../api.js'
+import { scanStatus, scrapeStatus, startScan, startScrape, cancelScan, cancelScrape, scrapeLogs, actressFetchStatus, actressFetchCancel, subScanState, subScanCancel, subProbeState, subProbeCancel } from '../api.js'
 import { toast } from '../utils.js'
 import { t } from '../i18n/index.js'
 
@@ -8,6 +8,13 @@ let timer = null
 let wasScanning = false
 let wasScraping = false
 let wasActressFetching = false
+// 订阅扫描 / 探测：独立一档，只做全局可见 + 可取消，不进历史、不参与总进度
+let subFinishedAt = 0
+let subPolledAt = 0
+//: 订阅状态轮询间隔（毫秒）：空闲时 15s 一次就够，运行中跟随主轮询
+const SUB_IDLE_POLL = 15000
+//: 结束后仍显示多久（毫秒）
+const SUB_SHOW_DONE = 5 * 60 * 1000
 
 function normalize(raw) {
   const r = raw || {}
@@ -45,6 +52,23 @@ async function poll() {
     if (af) Object.assign(state.task.actress_fetch, normalize(af))
   } catch (e) { /* 静默 */ }
 
+  // 订阅扫描 / 探测：全局后台任务（定时器也会触发），空闲时低频拉取
+  if (state.task.sub_update.running || Date.now() - subPolledAt >= SUB_IDLE_POLL) {
+    subPolledAt = Date.now()
+    try {
+      const [ss, ps] = await Promise.all([
+        subScanState().catch(() => null),
+        subProbeState().catch(() => null),
+      ])
+      applySubUpdate(ss, ps)
+      const su = state.task.sub_update
+      // 结束超过 5 分钟就收起；这里主动翻 show，让 lastFinished 的 computed 能刷新
+      if (!su.running && subFinishedAt && Date.now() - subFinishedAt >= SUB_SHOW_DONE) {
+        su.show = false
+      }
+    } catch (e) { /* 静默 */ }
+  }
+
   const scanning = state.task.scan.running
   const scraping = state.task.scrape.running
   const actressFetching = state.task.actress_fetch.running
@@ -76,7 +100,42 @@ async function poll() {
   wasScraping = scraping
   wasActressFetching = actressFetching
 
-  schedule(scanning || scraping || actressFetching ? 900 : 5000)
+  schedule(scanning || scraping || actressFetching || state.task.sub_update.running ? 900 : 5000)
+}
+
+/** 订阅扫描 / 探测 → 任务中心里的一条只读任务（无历史、无总进度）。 */
+function applySubUpdate(ss, ps) {
+  const scanRunning = !!(ss && ss.running)
+  const probeRunning = !!(ps && ps.running)
+  const task = state.task.sub_update
+  const prev = !!task.running
+  let kind = ''
+  if (scanRunning) kind = 'scan'
+  else if (probeRunning) kind = 'probe'
+  // 刚结束：沿用之前盯着的那个，避免拿上一次探测的旧 message 顶替刚结束的扫描
+  else if (prev && task.kind) kind = task.kind
+  else if (ps && ps.finished_at) kind = 'probe'
+  else if (ss && ss.finished_at) kind = 'scan'
+  if (!kind) return
+  const src = (kind === 'scan' ? ss : ps) || {}
+  const running = scanRunning || probeRunning
+  task.running = running
+  // 只有「正在跑」或「本轮亲眼看到它结束」才展示；刷新页面不会翻出上次的旧任务
+  if (running || prev) task.show = true
+  task.kind = kind
+  task.total = Number(src.total) || 0
+  task.done = Number(src.done) || 0
+  task.percent = Number(src.percent) || (task.total ? Math.round(task.done * 100 / task.total) : 0)
+  task.message = src.message || ''
+  // 扫描：新增 / 失败；探测：有资源 / 未知（站点不可达）
+  task.ok = kind === 'scan' ? (Number(src.new) || 0) : (Number(src.found) || 0)
+  task.fail = kind === 'scan' ? (Number(src.failed) || 0) : (Number(src.unknown) || 0)
+  task.phase = running ? (kind === 'scan' ? 'scanning' : 'fetching') : 'done'
+  if (running) {
+    subFinishedAt = 0
+  } else if (prev) {
+    subFinishedAt = Date.now()
+  }
 }
 
 // 将刚结束的任务快照存入历史（最多保留 20 条，最新的在前）
@@ -117,19 +176,26 @@ function schedule(ms) {
 }
 
 export function useTasks() {
-  const anyRunning = computed(() => state.task.scan.running || state.task.scrape.running || state.task.actress_fetch.running)
+  const anyRunning = computed(() => state.task.scan.running || state.task.scrape.running
+    || state.task.actress_fetch.running || state.task.sub_update.running)
 
   const activeTasks = computed(() => {
     const out = []
     if (state.task.scan.running) out.push(buildOne('scan', '扫描媒体库', state.task.scan))
     if (state.task.scrape.running) out.push(buildOne('scrape', '刮削元数据', state.task.scrape))
     if (state.task.actress_fetch.running) out.push(buildOne('actress_fetch', '女优资料抓取', state.task.actress_fetch))
+    // 订阅更新：定时器也会触发，所以独立显示在任务中心（不进历史）
+    if (state.task.sub_update.running) out.push(buildOne('sub_update', t('tasks.subUpdate'), state.task.sub_update))
     return out
   })
 
   const overallPct = computed(() => {
-    const list = activeTasks.value
-    if (!list.length) return 0
+    // 订阅更新不参与总进度：只有它一个在跑时，直接用它自己的百分比
+    const list = activeTasks.value.filter(x => x.key !== 'sub_update')
+    if (!list.length) {
+      const s = state.task.sub_update
+      return s.running ? Math.min(100, Number(s.percent) || 0) : 0
+    }
     const t = list.reduce((s, x) => s + (x.total || 0), 0)
     const d = list.reduce((s, x) => s + (x.done || 0), 0)
     return t > 0 ? Math.min(100, Math.round((d / t) * 100)) : 0
@@ -171,6 +237,11 @@ export function useTasks() {
       if (key === 'scan') await cancelScan()
       else if (key === 'scrape') await cancelScrape()
       else if (key === 'actress_fetch') await actressFetchCancel()
+      else if (key === 'sub_update') {
+        // 扫描 / 探测二选一：按当前类型取消对应任务
+        if (state.task.sub_update.kind === 'probe') await subProbeCancel()
+        else await subScanCancel()
+      }
       toast('已请求取消', 'ok')
       schedule(200)
     } catch (e) { toast(e.message, 'err') }
@@ -185,6 +256,11 @@ export function useTasks() {
       if (t && !t.running && (t.total || t.done || t.logs?.length)) {
         list.push(buildOne(key, labels[key], t))
       }
+    }
+    // 订阅更新结束后只保留 5 分钟：定时扫描每几小时一次，不适合长期占位
+    const sub = state.task.sub_update
+    if (sub.show) {
+      list.push(buildOne('sub_update', t('tasks.subUpdate'), sub))
     }
     return list
   })

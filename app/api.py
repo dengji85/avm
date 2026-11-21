@@ -50,6 +50,7 @@ from .routers import ext as _ext_api                # noqa: E402
 from .routers import ingest as _ingest_api          # noqa: E402
 from .routers import markers as _markers_api        # noqa: E402
 from .routers import metatube as _metatube_api      # noqa: E402
+from .routers import subscriptions as _subscriptions_api  # noqa: E402
 from .routers import subtitles as _subtitles_api    # noqa: E402
 
 router.include_router(_adcheck_api.router)
@@ -58,6 +59,7 @@ router.include_router(_ext_api.router)
 router.include_router(_ingest_api.router)
 router.include_router(_markers_api.router)
 router.include_router(_metatube_api.router)
+router.include_router(_subscriptions_api.router)
 router.include_router(_subtitles_api.router)
 
 #: 在线字幕来源的展示名（登记时存的是 provider id，打分与配置都按 id 走）
