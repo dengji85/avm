@@ -8,7 +8,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-1.17.0-1f6feb" alt="version"/>
+  <img src="https://img.shields.io/badge/version-1.18.0-1f6feb" alt="version"/>
   <img src="https://img.shields.io/badge/Python-3.11-3776ab" alt="Python 3.11"/>
   <img src="https://img.shields.io/badge/FastAPI-009688" alt="FastAPI"/>
   <img src="https://img.shields.io/badge/Vue%203%20%2F%20Vite-42b883" alt="Vue 3"/>
@@ -72,7 +72,7 @@
 
 ### ① Windows 单文件（最省事）
 
-从 **[Releases](https://github.com/dengji85/avm/releases/latest)** 下载 `AVM-1.17.0.exe` → 放到任意目录双击启动 → 用 `data/access_token.txt` 里的令牌登录。升级只需替换 exe，`data/` 原地保留。
+从 **[Releases](https://github.com/dengji85/avm/releases/latest)** 下载 `AVM-1.18.0.exe` → 放到任意目录双击启动 → 用 `data/access_token.txt` 里的令牌登录。升级只需替换 exe，`data/` 原地保留。
 
 ### ② Docker / NAS（推荐常驻）
 
@@ -85,7 +85,7 @@ docker run -d --name avm \
 ```
 
 也可直接用 [`docker-compose.yml`](docker-compose.yml)：`docker compose pull && docker compose up -d`。
-镜像标签：`latest`（稳定）· `latest-full`（含语音依赖，仅 amd64）· `main`（最新构建）· `1.17.0`（固定版本）。
+镜像标签：`latest`（稳定）· `latest-full`（含语音依赖，仅 amd64）· `main`（最新构建）· `1.18.0`（固定版本）。
 首次令牌：`docker compose exec avm cat /data/access_token.txt`；媒体目录填**容器内路径**（如 `/media`）。详见 [Docker 部署指南](docs/Docker部署.md)。
 
 ### ③ 源码运行（开发）
@@ -163,7 +163,7 @@ python -m compileall -q app                                        # 语法检�
 python -c "from app.main import app; print(len(app.openapi()['paths']))"   # 路由干跑
 cd web_src && npm run build                                       # 前端构建
 python run.py scan --full / dedupe / stats / export / organize / mcp / ai-check / web-check
-python build.py                                                   # → dist/AVM-1.17.0.exe
+python build.py                                                   # → dist/AVM-1.18.0.exe
 ```
 
 > 项目**目前没有单元测试框架**，CI 只做多架构镜像与 Release 构建；正确性依赖编译检查、OpenAPI 干跑、前端构建与真实浏览器验证。开发约定见 [AGENTS.md](AGENTS.md) 与 [开发文档](docs/开发文档.md)。
