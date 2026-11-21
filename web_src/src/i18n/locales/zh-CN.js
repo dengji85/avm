@@ -675,6 +675,7 @@ export default {
     rules: '规则',
     subscribedTip: '已订阅新片提醒，并已关注该女优',
     unsubscribed: '已取消订阅',
+    newFindings: '{n} 部新片，点击查看',
     unsubscribeTitle: '取消订阅',
     unsubscribeDesc: '取消订阅「{name}」的新片提醒，同时取消关注，该女优的专属规则会一并删除。确定继续？',
   },

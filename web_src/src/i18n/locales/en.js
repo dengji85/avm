@@ -668,6 +668,7 @@ export default {
     rules: 'Rules',
     subscribedTip: 'Subscribed to new releases and followed this actress',
     unsubscribed: 'Unsubscribed',
+    newFindings: '{n} new titles, click to view',
     unsubscribeTitle: 'Unsubscribe',
     unsubscribeDesc: 'Unsubscribe from {name} new releases and unfollow this actress. Her custom rules will be deleted. Continue?',
   },

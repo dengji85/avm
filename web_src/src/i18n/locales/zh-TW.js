@@ -668,6 +668,7 @@ export default {
     rules: '規則',
     subscribedTip: '已訂閱新片提醒，並已關注該女優',
     unsubscribed: '已取消訂閱',
+    newFindings: '{n} 部新片，點擊查看',
     unsubscribeTitle: '取消訂閱',
     unsubscribeDesc: '取消訂閱「{name}」的新片提醒，同時取消關注，該女優的專屬規則會一併刪除。確定繼續？',
   },

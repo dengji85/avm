@@ -81,6 +81,9 @@ async function follow(a, e) {
       const m = { ...subMap.value }
       delete m[a.name]
       subMap.value = m
+      const nm = { ...newMap.value }
+      delete nm[a.name]
+      newMap.value = nm
       a.followed = 0
       toast(t('actress.unsubscribed'), 'ok')
     } else {
@@ -105,16 +108,33 @@ const pageCount = computed(() => Math.max(1, Math.ceil(total.value / pageSize)))
 
 /* 订阅状态：关注并入订阅，墙上按钮直接建/删订阅目标 */
 const subMap = ref({})   // 女优名 → 订阅目标 id
+const newMap = ref({})   // 女优名 → 未读新片数（头像右上角角标）
 
 async function loadSubs() {
   try {
     const r = await subTargets()
     const m = {}
+    const n = {}
     for (const x of ((r && r.items) || [])) {
-      if (x.kind === 'actress') m[x.name] = x.id
+      if (x.kind !== 'actress') continue
+      m[x.name] = x.id
+      const c = Number(x.new_count) || 0
+      if (c > 0) n[x.name] = c
     }
     subMap.value = m
-  } catch (e) { subMap.value = {} }
+    newMap.value = n
+  } catch (e) {
+    subMap.value = {}
+    newMap.value = {}
+  }
+}
+
+/** 头像角标：直接去订阅页看这位女优的新片（按未读 + 女优筛好） */
+function openNewFindings(a, e) {
+  e.stopPropagation()
+  state.subTab = 'new'
+  state.subActress = a.name
+  state.view = 'subscriptions'
 }
 
 /* 批量从 gfriends 补全无头像女优 */
@@ -177,6 +197,9 @@ onMounted(() => { load(); loadSubs() })
               {{ a.favorite ? '♥' : '♡' }}
             </button>
             <span v-if="a.followed" class="a-follow">已订阅</span>
+            <!-- 有新片：数字是未读数，点一下去订阅页按这位女优筛好 -->
+            <span v-if="newMap[a.name]" class="a-new" @click="openNewFindings(a, $event)"
+                  :title="$t('actress.newFindings', { n: newMap[a.name] })">{{ newMap[a.name] > 99 ? '99+' : newMap[a.name] }}</span>
           </div>
           <div class="a-name ellipsis">{{ a.name }}</div>
           <div class="a-sub">
@@ -255,6 +278,22 @@ onMounted(() => { load(); loadSubs() })
   color: #fff; font-size: 10px; font-weight: 600;
   white-space: nowrap;
 }
+
+/* 有新片：右上角红色数字，与右下角的收藏按钮分开摆 */
+.a-new {
+  position: absolute; right: -3px; top: 0;
+  min-width: 20px; height: 20px; padding: 0 5px;
+  display: grid; place-items: center;
+  border-radius: var(--r-full);
+  background: var(--c-err);
+  color: #fff;
+  font-size: 11px; font-weight: 600;
+  line-height: 1;
+  box-shadow: 0 0 0 2px var(--c-surface);
+  cursor: pointer;
+  transition: transform var(--t-fast);
+}
+.a-new:hover { transform: scale(1.1); }
 
 .a-name { font-size: var(--fs-md); font-weight: 500; max-width: 100%; text-align: center; }
 .a-sub { display: flex; gap: var(--sp-2); font-size: var(--fs-xs); color: var(--c-text-3); }

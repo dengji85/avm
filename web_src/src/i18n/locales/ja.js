@@ -668,6 +668,7 @@ export default {
     rules: 'ルール',
     subscribedTip: '新作通知を購読し、フォローしました',
     unsubscribed: '購読を解除しました',
+    newFindings: '新作 {n} 本、クリックで確認',
     unsubscribeTitle: '購読を解除',
     unsubscribeDesc: '「{name}」の新作通知を解除し、フォローも解除します。専用ルールも削除されます。よろしいですか？',
   },

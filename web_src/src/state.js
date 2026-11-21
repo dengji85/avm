@@ -86,6 +86,8 @@ export const state = reactive({
   // 跨页面请求订阅页的分区与目标（女优页「规则」→ 订阅页规则 Tab 并预选该女优）；消费后置空
   subTab: '',
   subTarget: null,
+  // 女优墙「有新片」角标 → 订阅页按该女优 + 未读筛好；消费后置空
+  subActress: '',
   // 跨页面请求高亮扩展组件页的某个组件卡（如抽帧报错 → 去安装 ffmpeg）；ExtPanel 消费后置空
   extHighlight: '',
   // 跨页面请求 AI 中心的某个分区（如面板里的「改提示词」→ AI 中心 → 提示词）；消费后置空

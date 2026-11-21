@@ -39,14 +39,18 @@ const loading = ref(false)
 const error = ref('')
 // 女优页「规则」入口：直接定位到该目标的单独偏好
 const prefTargetId = ref(state.subTarget || null)
+// 女优墙点「有新片」角标进来：直接按该女优筛一遍
+const incomingActress = String(state.subActress || '').trim()
+const incomingUnread = state.subTab === 'new' && !!incomingActress
 state.subTab = ''
 state.subTarget = null
+state.subActress = ''
 
 /* 新片 */
-const status = ref('')
+const status = ref(incomingUnread ? 'unread' : '')
 const targetFilter = ref('')
 const q = ref('')
-const actress = ref('')
+const actress = ref(incomingActress)
 const actressOpts = ref([])
 const sortBy = ref('release')
 const items = ref([])
@@ -84,7 +88,7 @@ const menuFor = ref(null)
 // 目标行的「⋯」菜单：同时只开一个
 const tgMenu = ref(null)
 // 新片筛选：常用状态+搜索常驻，女优/目标/排序收进「筛选」
-const showFilters = ref(false)
+const showFilters = ref(incomingUnread)
 const hasAdvFilters = computed(() => !!(actress.value || targetFilter.value))
 function toggleTgMenu(id) {
   tgMenu.value = tgMenu.value === id ? null : id

@@ -695,15 +695,25 @@ def probe_finding(conn, finding_id: int, cfg: Optional[Dict[str, Any]] = None,
 
 # ------------------------------------------------------------------ 目标
 def list_targets(conn) -> List[Dict[str, Any]]:
+    # new_count 与发现列表「未读」口径保持一致：status='new' 且已二次确认，
+    # 否则女优墙的红点会比订阅页多出还没确认的脏数据
     rows = query_all(
         conn,
         "SELECT t.*, (SELECT COUNT(*) FROM subscription_finding_targets ft "
-        "WHERE ft.target_id = t.id) AS finding_count "
+        "WHERE ft.target_id = t.id) AS finding_count, "
+        "(SELECT COUNT(*) FROM subscription_finding_targets ft "
+        "JOIN subscription_findings f ON f.id = ft.finding_id "
+        "WHERE ft.target_id = t.id AND f.status = 'new' AND f.confirm_count >= 2) AS new_count, "
+        "(SELECT MAX(f.first_seen_at) FROM subscription_finding_targets ft "
+        "JOIN subscription_findings f ON f.id = ft.finding_id "
+        "WHERE ft.target_id = t.id) AS latest_found_at "
         "FROM subscription_targets t ORDER BY t.enabled DESC, t.id DESC")
     out = []
     for r in rows:
         item = _target_public(r)
         item["finding_count"] = int(r.get("finding_count") or 0)
+        item["new_count"] = int(r.get("new_count") or 0)
+        item["latest_found_at"] = r.get("latest_found_at") or ""
         out.append(item)
     return out
 
